@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from smartstitch.models import AppConfig, Asset, MediaProbe, ScanResult
-from smartstitch.planner import build_plan
+from smartstitch.planner import PlanError, build_plan
 
 
 def make_config(tmp_path):
@@ -68,3 +70,48 @@ def test_every_item_contains_core_categories(tmp_path):
     assert len(plan.items) == 4
     assert all(all(item.selections[category] for category in config.timeline) for item in plan.items)
 
+
+def core_signatures(plan):
+    return {
+        tuple(item.selections[category].id for category in ("hook", "benefit_video", "ending"))
+        for item in plan.items
+    }
+
+
+def test_best_effort_preserves_quotas_and_rearranges_core_combinations(tmp_path):
+    config = make_config(tmp_path)
+    config.randomization.duplicate_policy = "best_effort"
+    scan = ScanResult(
+        config_id=config.id,
+        assets={
+            category: [asset(category, "a"), asset(category, "b")]
+            for category in ("hook", "benefit_video", "ending")
+        }
+        | {"benefit_overlay": []},
+    )
+
+    plan = build_plan(config, scan, 6, seed=31)
+
+    assert len(core_signatures(plan)) == 6
+    for category in ("hook", "benefit_video", "ending"):
+        assert sorted(plan.distribution[category].values()) == [3, 3]
+
+
+def test_strict_selects_unique_core_combinations_and_only_fails_when_exhausted(tmp_path):
+    config = make_config(tmp_path)
+    config.randomization.duplicate_policy = "strict"
+    scan = ScanResult(
+        config_id=config.id,
+        assets={
+            "hook": [asset("hook", "a", 5), asset("hook", "b")],
+            "benefit_video": [asset("benefit_video", "a"), asset("benefit_video", "b")],
+            "ending": [asset("ending", "only")],
+            "benefit_overlay": [],
+        },
+    )
+
+    plan = build_plan(config, scan, 4, seed=17)
+    assert len(core_signatures(plan)) == 4
+
+    with pytest.raises(PlanError, match="只有 4 种可用核心组合"):
+        build_plan(config, scan, 5, seed=17)

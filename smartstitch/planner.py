@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import heapq
 import math
 import random
 import secrets
 from collections import Counter
 from datetime import datetime
+from itertools import product
 from pathlib import Path
 
 from .models import AppConfig, Asset, BatchPlan, PlanItem, ScanResult, SourceMode
@@ -12,6 +14,9 @@ from .models import AppConfig, Asset, BatchPlan, PlanItem, ScanResult, SourceMod
 
 class PlanError(ValueError):
     pass
+
+
+CORE_CATEGORIES = ("hook", "benefit_video", "ending")
 
 
 def _quota_sequence(assets: list[Asset], count: int, rng: random.Random) -> list[Asset]:
@@ -41,6 +46,91 @@ def _sequence(assets: list[Asset], count: int, mode: str, rng: random.Random) ->
 
 def _selectable(scan: ScanResult, category: str) -> list[Asset]:
     return [asset for asset in scan.assets.get(category, []) if asset.selectable]
+
+
+def _core_signature(selections: dict[str, Asset | None]) -> tuple[str | None, ...]:
+    return tuple(
+        selections[category].id if selections.get(category) is not None else None
+        for category in CORE_CATEGORIES
+    )
+
+
+def _sequence_score(sequences: dict[str, list[Asset | None]], count: int) -> tuple[int, int]:
+    signatures = [
+        tuple(
+            sequences[category][index].id if sequences[category][index] else None
+            for category in CORE_CATEGORIES
+        )
+        for index in range(count)
+    ]
+    duplicates = count - len(set(signatures))
+    adjacent_reuse = sum(
+        sequences[category][index] is not None
+        and sequences[category][index - 1] is not None
+        and sequences[category][index].id == sequences[category][index - 1].id
+        for category in CORE_CATEGORIES
+        for index in range(1, count)
+    )
+    return duplicates, adjacent_reuse
+
+
+def _arrange_core_best_effort(
+    sequences: dict[str, list[Asset | None]], count: int, rng: random.Random
+) -> None:
+    """Keep each category's selected quota while searching for fewer repeated core combinations."""
+    best = {category: list(sequences[category]) for category in CORE_CATEGORIES}
+    best_score = _sequence_score(best, count)
+    for _ in range(128):
+        candidate = {category: list(sequences[category]) for category in CORE_CATEGORIES}
+        for values in candidate.values():
+            rng.shuffle(values)
+        score = _sequence_score(candidate, count)
+        if score < best_score:
+            best, best_score = candidate, score
+    for category in CORE_CATEGORIES:
+        sequences[category] = best[category]
+
+
+def _strict_unique_core_sequences(
+    candidates: dict[str, list[Asset]], count: int, rng: random.Random
+) -> dict[str, list[Asset]]:
+    combination_count = math.prod(len(candidates[category]) for category in CORE_CATEGORIES)
+    if count > combination_count:
+        raise PlanError(
+            f"严格去重无法满足：本次需要 {count} 条，但只有 {combination_count} 种可用核心组合"
+        )
+
+    # Weighted sampling without replacement. A material's weight remains influential,
+    # while every selected hook + benefit_video + ending signature stays unique.
+    selected_heap: list[tuple[float, int, tuple[Asset, ...]]] = []
+    combinations = product(*(candidates[category] for category in CORE_CATEGORIES))
+    for order, combination in enumerate(combinations):
+        combination_weight = math.prod(asset.weight for asset in combination)
+        key = math.log(max(rng.random(), 1e-300)) / combination_weight
+        entry = (key, order, combination)
+        if len(selected_heap) < count:
+            heapq.heappush(selected_heap, entry)
+        elif key > selected_heap[0][0]:
+            heapq.heapreplace(selected_heap, entry)
+
+    selected = [entry[2] for entry in selected_heap]
+    best_order = list(selected)
+    best_adjacent = math.inf
+    for _ in range(128):
+        candidate_order = list(selected)
+        rng.shuffle(candidate_order)
+        adjacent = sum(
+            candidate_order[index][category_index].id == candidate_order[index - 1][category_index].id
+            for index in range(1, count)
+            for category_index in range(len(CORE_CATEGORIES))
+        )
+        if adjacent < best_adjacent:
+            best_order, best_adjacent = candidate_order, adjacent
+
+    return {
+        category: [combination[index] for combination in best_order]
+        for index, category in enumerate(CORE_CATEGORIES)
+    }
 
 
 def _format_name(config: AppConfig, seed: int, index: int, batch_id: str) -> str:
@@ -85,6 +175,12 @@ def build_plan(
             continue
         sequences[category] = list(_sequence(candidates, count, config.randomization.mode, rng))
 
+    core_candidates = {category: _selectable(scan, category) for category in CORE_CATEGORIES}
+    if config.randomization.duplicate_policy == "strict":
+        sequences.update(_strict_unique_core_sequences(core_candidates, count, rng))
+    elif config.randomization.duplicate_policy == "best_effort":
+        _arrange_core_best_effort(sequences, count, rng)
+
     overlay_assets = _selectable(scan, "benefit_overlay")
     overlays: list[Asset | None] = [None] * count
     overlay_required = config.benefit_overlays.mode == SourceMode.REQUIRED
@@ -101,10 +197,7 @@ def build_plan(
     items: list[PlanItem] = []
     for index in range(count):
         selections = {category: sequence[index] for category, sequence in sequences.items()}
-        signature = tuple(
-            [selections[category].id if selections[category] else None for category in config.timeline]
-            + [overlays[index].id if overlays[index] else None]
-        )
+        signature = _core_signature(selections)
         if signature in signatures:
             duplicate_count += 1
         signatures.add(signature)
@@ -123,10 +216,8 @@ def build_plan(
             )
         )
 
-    if duplicate_count and config.randomization.duplicate_policy == "strict":
-        raise PlanError(f"严格去重无法满足：计划中出现 {duplicate_count} 个重复组合")
     if duplicate_count and config.randomization.duplicate_policy == "best_effort":
-        warnings.append(f"组合空间或权重限制导致 {duplicate_count} 条重复组合")
+        warnings.append(f"为优先保持权重配额，本批仍有 {duplicate_count} 条重复核心组合")
 
     distribution: dict[str, dict[str, int]] = {}
     for category, sequence in sequences.items():

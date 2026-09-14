@@ -79,6 +79,10 @@ matching:
 randomization:
   # quota_shuffle=整批按权重分配次数后打乱；independent_random=逐条独立随机。
   mode: quota_shuffle
+  # 核心组合仅指“引子 + 利益点视频 + 结尾”，不包含前贴、叠图和尾帧。
+  # allow=允许重复，权重优先。
+  # best_effort=保持权重次数并主动重排，尽量减少完整组合重复（推荐）。
+  # strict=从唯一组合中加权无放回选择；组合唯一优先，素材次数可能偏离权重。
   duplicate_policy: best_effort
   default_seed: null
 

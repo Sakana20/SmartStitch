@@ -374,8 +374,19 @@ function configTextarea(label, path, value) {
   return `<div class="config-field wide"><label>${label}</label><textarea data-config-path="${path}" data-config-type="string">${escapeHtml(value || "")}</textarea></div>`;
 }
 
-function configSelect(label, path, value, choices, hint = "") {
-  return `<div class="config-field"><label>${label}${hint ? `<small>${hint}</small>` : ""}</label><select data-config-path="${path}" data-config-type="string">${choices.map(([key, text]) => `<option value="${key}" ${value === key ? "selected" : ""}>${text}</option>`).join("")}</select></div>`;
+function configHelp(title, items) {
+  return `<span class="field-help-wrap">
+    <button class="field-help-button" type="button" aria-label="${escapeHtml(title)}">?</button>
+    <span class="field-help-popover" role="tooltip">
+      <strong>${escapeHtml(title)}</strong>
+      ${items.map(([name, description]) => `<span><b>${escapeHtml(name)}</b>${escapeHtml(description)}</span>`).join("")}
+    </span>
+  </span>`;
+}
+
+function configSelect(label, path, value, choices, hint = "", help = null) {
+  const labelTitle = `<span class="config-label-title">${label}${help ? configHelp(help.title, help.items) : ""}</span>`;
+  return `<div class="config-field"><label>${labelTitle}${hint ? `<small>${hint}</small>` : ""}</label><select data-config-path="${path}" data-config-type="string">${choices.map(([key, text]) => `<option value="${key}" ${value === key ? "selected" : ""}>${text}</option>`).join("")}</select></div>`;
 }
 
 function configSwitch(label, path, value, help = "") {
@@ -449,11 +460,24 @@ function renderVisualConfig() {
       </div>
     </details>
 
-    <details class="config-section" data-config-section="randomization">
+    <details class="config-section randomization-section" data-config-section="randomization">
       <summary>随机组合 <small>仅用于视频片段和尾帧</small></summary>
       <div class="config-section-body config-form-grid three">
-        ${configSelect("权重算法", "randomization.mode", config.randomization.mode, [["quota_shuffle", "按批次配额后洗牌"], ["independent_random", "逐条独立随机"]])}
-        ${configSelect("重复组合策略", "randomization.duplicate_policy", config.randomization.duplicate_policy, [["allow", "允许重复"], ["best_effort", "尽量去重"], ["strict", "严格禁止重复"]])}
+        ${configSelect("权重算法", "randomization.mode", config.randomization.mode, [["quota_shuffle", "按批次配额后洗牌"], ["independent_random", "逐条独立随机"]], "", {
+          title: "权重算法怎么选？",
+          items: [
+            ["按批次配额后洗牌：", "先按权重分配整批的出现次数，再打乱顺序。数量更稳定，适合批量生成。"],
+            ["逐条独立随机：", "每生成一条都重新抽一次。结果更随机，小批量时可能和设置的比例有偏差。"],
+          ],
+        })}
+        ${configSelect("核心组合去重策略", "randomization.duplicate_policy", config.randomization.duplicate_policy, [["allow", "允许重复（权重优先）"], ["best_effort", "尽量去重（权重优先）— 推荐"], ["strict", "严格去重（组合优先）"]], "引子 + 利益点视频 + 结尾", {
+          title: "去重策略怎么选？",
+          items: [
+            ["允许重复：", "完全按权重选择，相同的引子、利益点和结尾组合可以再次出现。"],
+            ["尽量去重：", "优先保留权重设置，同时尽量换一种组合。适合大多数批量生成。"],
+            ["严格去重：", "每条核心组合都不同；组合不够时会停止并提示。"],
+          ],
+        })}
         ${configInput("默认随机种子", "randomization.default_seed", config.randomization.default_seed, { type: "nullable-number", hint: "留空自动" })}
       </div>
     </details>
