@@ -1,0 +1,117 @@
+# SmartStitch 配置模板（完整字段说明见 doc/03-配置文件规范.md）
+# 复制此文件并改名为 <配置ID>.yaml 后再编辑；配置 ID 只能使用小写英文、数字和短横线。
+schema_version: 1
+id: new-config
+name: 新配置
+enabled: true
+description: 请填写配置用途
+
+# 主素材根目录。相对的“引子/利益点/结尾”目录都基于此处解析。
+source_root: /请替换为/主素材目录
+timeline: [pre_roll, hook, benefit_video, ending, end_card]
+
+sources:
+  pre_roll:
+    # required=每条必需；optional=有素材时使用；disabled=停用。
+    mode: required
+    directory: /请替换为/前贴目录
+    extensions: [.mp4, .mov, .mkv]
+    default_weight: 1
+    items:
+      # 单个素材的 weight 越大，本批次计划出现次数越多；0 表示不抽取。
+      - path: 示例前贴.mp4
+        enabled: true
+        weight: 1
+        tags: [product-a]
+  hook:
+    mode: required
+    directory: 引子
+    extensions: [.mp4]
+    default_weight: 1
+    items: []
+  benefit_video:
+    mode: required
+    directory: 利益点
+    extensions: [.mp4]
+    default_weight: 1
+    items: []
+  ending:
+    mode: required
+    directory: 结尾
+    extensions: [.mp4]
+    default_weight: 1
+    items: []
+  end_card:
+    mode: disabled
+    directory: /请替换为/尾帧目录
+    extensions: [.png, .jpg, .webp, .mp4]
+    default_weight: 1
+    # 静态图片作为尾帧时持续的秒数。
+    image_duration_seconds: 1.5
+    items: []
+
+# 透明利益点图片始终覆盖在最终画面的最高层。
+benefit_overlays:
+  mode: disabled
+  directory: /请替换为/利益点图片目录
+  extensions: [.png, .jpg, .jpeg, .webp]
+  default_weight: 1
+  items: []
+  placement:
+    # original=原尺寸；fit=等比适配画布；stretch=拉伸铺满。
+    scale_mode: original
+    x: "0"
+    y: "0"
+    shrink_if_oversized: true
+    opacity: 1.0
+  timing:
+    # full=全片；main=不含前贴和尾帧；benefit_video=仅利益点视频；custom=自定义秒数。
+    scope: benefit_video
+    start_seconds: 0
+    end_seconds: null
+
+matching:
+  # 开启后，前贴与利益点图片可用相同 tags 防止产品错配。
+  enabled: false
+  strategy: product_tag
+  allow_untagged_as_global: true
+  on_missing_match: error
+
+randomization:
+  # quota_shuffle=整批按权重分配次数后打乱；independent_random=逐条独立随机。
+  mode: quota_shuffle
+  duplicate_policy: best_effort
+  default_seed: null
+
+output:
+  directory: output
+  width: 720
+  height: 1280
+  fps: 30
+  video_codec: libx264
+  pixel_format: yuv420p
+  video_preset: medium
+  crf: 18
+  audio_codec: aac
+  audio_bitrate: 192k
+  audio_sample_rate: 48000
+  audio_channels: 2
+  resize_mode: fit_pad
+  background_color: black
+  filename_template: "{config}_{date}_{batch}_{index:04d}.mp4"
+  collision_policy: increment
+  faststart: true
+
+batch:
+  default_count: 10
+  max_count: 1000
+  concurrency: 2
+  retry_count: 1
+  minimum_free_space_gb: 5
+
+scanner:
+  recursive: false
+  ignore_hidden_files: true
+  ignore_prefixes: ["._", ".~"]
+  ignore_names: [.DS_Store]
+

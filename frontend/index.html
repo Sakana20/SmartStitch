@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SmartStitch · 智能混剪</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="noise"></div>
+    <header class="topbar">
+      <a class="brand" href="#">
+        <span class="brand-mark">S</span>
+        <span><strong>SmartStitch</strong><small>本地智能混剪</small></span>
+      </a>
+      <div class="system-pill"><span id="healthDot" class="dot"></span><span id="healthText">正在检查环境</span></div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <p class="eyebrow">LOCAL VIDEO WORKFLOW</p>
+          <h1>让每一次组合<br /><em>都有迹可循</em></h1>
+          <p class="hero-copy">按权重组合前贴、引子、利益点和结尾。先预览分布，再交给 FFmpeg 稳定批量输出。</p>
+        </div>
+        <div class="hero-stat">
+          <span>今日工作台</span>
+          <strong id="heroConfigName">—</strong>
+          <small id="heroAssetCount">等待素材扫描</small>
+        </div>
+      </section>
+
+      <nav class="section-tabs" aria-label="页面区域">
+        <button class="section-tab active" data-view="create">创建任务</button>
+        <button class="section-tab" data-view="assets">素材权重</button>
+        <button class="section-tab" data-view="jobs">任务记录</button>
+      </nav>
+
+      <section id="createView" class="view active">
+        <div class="grid create-grid">
+          <article class="panel setup-panel">
+            <div class="panel-heading">
+              <div><span class="step">01</span><h2>生成设置</h2></div>
+              <div class="inline-actions">
+                <button id="cloneConfigBtn" class="text-btn">复制配置</button>
+                <button id="editConfigBtn" class="text-btn">高级配置 ↗</button>
+              </div>
+            </div>
+
+            <label class="field">
+              <span>使用配置</span>
+              <select id="configSelect"></select>
+            </label>
+
+            <div class="field-row">
+              <label class="field">
+                <span>生成数量</span>
+                <div class="number-wrap"><input id="countInput" type="number" min="1" max="1000" value="10" /><i>条</i></div>
+              </label>
+              <label class="field">
+                <span>并发任务</span>
+                <div class="number-wrap"><input id="concurrencyInput" type="number" min="1" max="8" value="2" /><i>路</i></div>
+              </label>
+            </div>
+
+            <label class="field">
+              <span>输出目录 <small>留空使用配置默认值</small></span>
+              <input id="outputInput" type="text" placeholder="例如 /Volumes/Elements SE/成片输出" />
+            </label>
+
+            <label class="field">
+              <span>随机种子 <small>留空自动生成；固定后可复现</small></span>
+              <input id="seedInput" type="number" placeholder="自动生成" />
+            </label>
+
+            <div class="actions">
+              <button id="previewBtn" class="button secondary"><span>预览组合</span></button>
+              <button id="startBtn" class="button primary"><span>开始生成</span><b>→</b></button>
+            </div>
+          </article>
+
+          <article class="panel preview-panel">
+            <div class="panel-heading">
+              <div><span class="step">02</span><h2>计划预览</h2></div>
+              <span id="previewStatus" class="status neutral">尚未预览</span>
+            </div>
+            <div id="emptyPreview" class="empty-state">
+              <div class="orbit"><span></span><span></span><span></span></div>
+              <h3>组合分布会显示在这里</h3>
+              <p>系统会先检查全部素材，再按权重计算本批次的实际使用次数。</p>
+            </div>
+            <div id="previewContent" class="hidden">
+              <div class="seed-card"><span>本批随机种子</span><strong id="previewSeed">—</strong></div>
+              <div id="distributionList" class="distribution-list"></div>
+              <div id="previewWarnings"></div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="assetsView" class="view">
+        <article class="panel full-panel">
+          <div class="panel-heading">
+            <div><span class="step">素材</span><h2>权重与状态</h2></div>
+            <div class="inline-actions">
+              <button id="scanBtn" class="button secondary small">重新扫描</button>
+              <button id="saveWeightsBtn" class="button primary small">保存权重</button>
+            </div>
+          </div>
+          <div id="scanSummary" class="scan-summary">选择配置后将自动扫描</div>
+          <div id="assetTabs" class="asset-tabs"></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>启用</th><th>素材</th><th>媒体信息</th><th>标签</th><th>权重</th><th>组内占比</th><th>状态</th></tr></thead>
+              <tbody id="assetTable"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="jobsView" class="view">
+        <article class="panel full-panel">
+          <div class="panel-heading">
+            <div><span class="step">历史</span><h2>任务记录</h2></div>
+            <button id="refreshJobsBtn" class="button secondary small">刷新</button>
+          </div>
+          <div id="jobsList" class="jobs-list"></div>
+        </article>
+      </section>
+    </main>
+
+    <div id="jobDrawer" class="drawer" aria-hidden="true">
+      <div class="drawer-backdrop" data-close-drawer></div>
+      <aside>
+        <button class="drawer-close" data-close-drawer>×</button>
+        <div id="jobDetail"></div>
+      </aside>
+    </div>
+
+    <div id="configModal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal></div>
+      <div class="modal-card config-modal-card">
+        <div class="modal-heading">
+          <div><p class="eyebrow">ADVANCED YAML</p><h2>高级配置</h2></div>
+          <button class="drawer-close" data-close-modal>×</button>
+        </div>
+        <p>可修改素材目录、叠图时段、尾帧、编码质量和随机策略。保存前会校验并备份原配置。</p>
+        <textarea id="yamlEditor" spellcheck="false"></textarea>
+        <div class="actions right"><button class="button secondary" data-close-modal>取消</button><button id="saveConfigBtn" class="button primary">校验并保存</button></div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
