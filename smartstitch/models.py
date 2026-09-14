@@ -66,9 +66,20 @@ class OverlayTiming(BaseModel):
         return self
 
 
-class BenefitOverlayConfig(SourceGroupConfig):
+class BenefitOverlayConfig(BaseModel):
+    mode: SourceMode = SourceMode.DISABLED
+    # 每个配置固定使用唯一一张利益点图片；directory 仅用于兼容旧配置。
+    file: str = ""
+    directory: str | None = Field(default=None, exclude=True)
+    image_duration_seconds: float = Field(default=1.5, gt=0)
     placement: OverlayPlacement = Field(default_factory=OverlayPlacement)
     timing: OverlayTiming = Field(default_factory=OverlayTiming)
+
+    @model_validator(mode="after")
+    def migrate_legacy_directory(self) -> BenefitOverlayConfig:
+        if not self.file and self.directory:
+            self.file = self.directory
+        return self
 
 
 class MatchingConfig(BaseModel):
@@ -92,6 +103,8 @@ class OutputConfig(BaseModel):
     video_codec: str = "libx264"
     pixel_format: str = "yuv420p"
     video_preset: str = "medium"
+    rate_control: Literal["crf", "vbr"] = "crf"
+    video_bitrate_kbps: int = Field(default=3000, gt=0)
     crf: int = Field(default=18, ge=0, le=51)
     audio_codec: str = "aac"
     audio_bitrate: str = "192k"

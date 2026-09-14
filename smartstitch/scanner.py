@@ -175,6 +175,54 @@ def scan_group(config: AppConfig, category: str, group: SourceGroupConfig) -> tu
     return assets, errors
 
 
+def scan_fixed_overlay(config: AppConfig) -> tuple[list[Asset], list[str]]:
+    group = config.benefit_overlays
+    if group.mode == SourceMode.DISABLED:
+        return [], []
+    if not group.file.strip():
+        message = "benefit_overlay: 请指定唯一的利益点图片文件"
+        return [], [message] if group.mode == SourceMode.REQUIRED else []
+
+    path = Path(group.file).expanduser()
+    if not path.is_absolute():
+        path = Path(config.source_root).expanduser() / path
+    path = path.resolve()
+    exists = path.exists() and path.is_file()
+    error: str | None = None
+    if path.exists() and path.is_dir():
+        error = "利益点图片必须指定具体图片文件，不能填写目录"
+    elif not exists:
+        error = "图片文件不存在或外接磁盘未挂载"
+    elif path.suffix.lower() not in IMAGE_EXTENSIONS:
+        error = f"不支持的图片格式: {path.suffix or '无扩展名'}"
+
+    asset = Asset(
+        id=_asset_id("benefit_overlay", path),
+        category="benefit_overlay",
+        path=str(path),
+        name=path.name,
+        media_type="image",
+        enabled=True,
+        weight=1,
+        exists=exists,
+        valid=error is None,
+        error=error,
+        size_bytes=path.stat().st_size if exists else None,
+        modified_at=path.stat().st_mtime if exists else None,
+    )
+    if asset.valid:
+        try:
+            asset.probe = probe_media(path, group.image_duration_seconds)
+        except Exception as exc:
+            asset.valid = False
+            asset.error = str(exc)
+
+    errors = []
+    if group.mode == SourceMode.REQUIRED and not asset.selectable:
+        errors.append(f"benefit_overlay: {asset.error or '唯一利益点图片不可用'}: {path}")
+    return [asset], errors
+
+
 def scan_config(config: AppConfig) -> ScanResult:
     assets: dict[str, list[Asset]] = {}
     errors: list[str] = []
@@ -187,7 +235,7 @@ def scan_config(config: AppConfig) -> ScanResult:
         if invalid:
             warnings.append(f"{category}: {len(invalid)} 个文件不可用")
 
-    overlays, overlay_errors = scan_group(config, "benefit_overlay", config.benefit_overlays)
+    overlays, overlay_errors = scan_fixed_overlay(config)
     assets["benefit_overlay"] = overlays
     errors.extend(overlay_errors)
     if any(not asset.valid for asset in overlays):

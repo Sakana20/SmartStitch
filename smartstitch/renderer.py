@@ -154,8 +154,14 @@ def build_ffmpeg_command(
             config.output.video_codec,
             "-preset",
             config.output.video_preset,
-            "-crf",
-            str(config.output.crf),
+        ]
+    )
+    if config.output.rate_control == "vbr":
+        command.extend(["-b:v", f"{config.output.video_bitrate_kbps}k"])
+    else:
+        command.extend(["-crf", str(config.output.crf)])
+    command.extend(
+        [
             "-pix_fmt",
             config.output.pixel_format,
             "-fps_mode",

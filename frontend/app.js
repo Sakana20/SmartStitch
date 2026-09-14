@@ -157,18 +157,19 @@ function renderAssetTabs() {
 
 function renderAssets() {
   const assets = state.scan?.assets[state.assetCategory] || [];
+  const fixedOverlay = state.assetCategory === "benefit_overlay";
   const total = assets.filter(asset => asset.enabled && asset.valid).reduce((sum, asset) => sum + Number(asset.weight), 0);
   $("#assetTable").innerHTML = assets.length ? assets.map(asset => {
     const probe = asset.probe;
     const meta = probe ? (asset.media_type === "image" ? `${probe.width}×${probe.height} · 图片` : `${probe.width}×${probe.height} · ${formatDuration(probe.duration)} · ${probe.fps ? probe.fps.toFixed(2) + "fps" : "—"}`) : "无法读取";
     const percent = asset.enabled && asset.valid && total ? (asset.weight / total * 100).toFixed(1) : "0.0";
     return `<tr data-id="${asset.id}">
-      <td><input class="check asset-enabled" type="checkbox" ${asset.enabled ? "checked" : ""}></td>
+      <td>${fixedOverlay ? '<span class="valid">固定</span>' : `<input class="check asset-enabled" type="checkbox" ${asset.enabled ? "checked" : ""}>`}</td>
       <td><div class="file-name" title="${escapeHtml(asset.name)}">${escapeHtml(asset.name)}</div><div class="file-path" title="${escapeHtml(asset.path)}">${escapeHtml(asset.path)}</div></td>
       <td><span class="media-meta">${escapeHtml(meta)}</span></td>
-      <td><input class="tags-input asset-tags" value="${escapeHtml(asset.tags.join(","))}" placeholder="通用"></td>
-      <td><input class="weight-input asset-weight" type="number" min="0" step="0.1" value="${asset.weight}"></td>
-      <td>${percent}%</td>
+      <td>${fixedOverlay ? "—" : `<input class="tags-input asset-tags" value="${escapeHtml(asset.tags.join(","))}" placeholder="通用">`}</td>
+      <td>${fixedOverlay ? "不参与随机" : `<input class="weight-input asset-weight" type="number" min="0" step="0.1" value="${asset.weight}">`}</td>
+      <td>${fixedOverlay ? "100%" : `${percent}%`}</td>
       <td><span class="${asset.valid ? "valid" : "invalid"}" title="${escapeHtml(asset.error || "")}">${asset.valid ? "可用" : "异常"}</span></td>
     </tr>`;
   }).join("") : `<tr><td colspan="7" style="text-align:center;padding:50px;color:var(--muted)">此类别当前没有素材</td></tr>`;
@@ -177,6 +178,7 @@ function renderAssets() {
 
 function syncVisibleAssetValues(rerender = true) {
   if (!state.scan?.assets[state.assetCategory]) return;
+  if (state.assetCategory === "benefit_overlay") return;
   const assets = state.scan.assets[state.assetCategory];
   $$("#assetTable tr[data-id]").forEach(row => {
     const asset = assets.find(item => item.id === row.dataset.id);
@@ -190,7 +192,9 @@ function syncVisibleAssetValues(rerender = true) {
 async function saveWeights() {
   if (!state.scan) return;
   syncVisibleAssetValues(false);
-  const items = Object.entries(state.scan.assets).flatMap(([category, assets]) => assets.map(asset => ({ category, path: asset.path, enabled: asset.enabled, weight: Number(asset.weight), tags: asset.tags })));
+  const items = Object.entries(state.scan.assets)
+    .filter(([category]) => category !== "benefit_overlay")
+    .flatMap(([category, assets]) => assets.map(asset => ({ category, path: asset.path, enabled: asset.enabled, weight: Number(asset.weight), tags: asset.tags })));
   try {
     await api(`/configs/${state.configId}/weights`, { method: "POST", body: JSON.stringify({ items }) });
     toast("权重已保存，原配置已备份");
@@ -363,9 +367,7 @@ function renderVisualConfig() {
       <summary>利益点图片 <small>最高图层叠加设置</small></summary>
       <div class="config-section-body config-form-grid three">
         ${configSelect("使用方式", "benefit_overlays.mode", overlay.mode, modeChoices)}
-        ${configInput("默认权重", "benefit_overlays.default_weight", overlay.default_weight, { type: "number" })}
-        ${configInput("支持格式", "benefit_overlays.extensions", overlay.extensions, { type: "list" })}
-        ${configInput("图片目录", "benefit_overlays.directory", overlay.directory, { wide: true })}
+        ${configInput("唯一图片文件", "benefit_overlays.file", overlay.file, { wide: true, hint: "固定 · 不参与随机", placeholder: "/路径/利益点图片.png" })}
         ${configSelect("缩放方式", "benefit_overlays.placement.scale_mode", overlay.placement.scale_mode, [["original", "保持原尺寸"], ["fit", "等比适配画布"], ["stretch", "拉伸铺满"]])}
         ${configInput("整体透明度", "benefit_overlays.placement.opacity", overlay.placement.opacity, { type: "number", hint: "0～1" })}
         ${configSwitch("超出画布时自动缩小", "benefit_overlays.placement.shrink_if_oversized", overlay.placement.shrink_if_oversized)}
@@ -378,14 +380,11 @@ function renderVisualConfig() {
     </details>
 
     <details class="config-section">
-      <summary>随机与产品匹配 <small>权重算法、去重和标签关联</small></summary>
+      <summary>随机组合 <small>仅用于视频片段和尾帧</small></summary>
       <div class="config-section-body config-form-grid three">
         ${configSelect("权重算法", "randomization.mode", config.randomization.mode, [["quota_shuffle", "按批次配额后洗牌"], ["independent_random", "逐条独立随机"]])}
         ${configSelect("重复组合策略", "randomization.duplicate_policy", config.randomization.duplicate_policy, [["allow", "允许重复"], ["best_effort", "尽量去重"], ["strict", "严格禁止重复"]])}
         ${configInput("默认随机种子", "randomization.default_seed", config.randomization.default_seed, { type: "nullable-number", hint: "留空自动" })}
-        ${configSwitch("启用产品标签匹配", "matching.enabled", config.matching.enabled)}
-        ${configSwitch("无标签素材作为通用素材", "matching.allow_untagged_as_global", config.matching.allow_untagged_as_global)}
-        ${configSelect("找不到同标签素材", "matching.on_missing_match", config.matching.on_missing_match, [["error", "阻止生成并报错"], ["fallback_global", "退回通用素材池"]])}
       </div>
     </details>
 
@@ -400,7 +399,9 @@ function renderVisualConfig() {
         ${configInput("补边颜色", "output.background_color", output.background_color)}
         ${configInput("视频编码器", "output.video_codec", output.video_codec)}
         ${configSelect("编码速度", "output.video_preset", output.video_preset, [["ultrafast", "ultrafast（最快）"], ["veryfast", "veryfast"], ["fast", "fast"], ["medium", "medium（推荐）"], ["slow", "slow（更省体积）"]])}
-        ${configInput("画质 CRF", "output.crf", output.crf, { type: "number", hint: "越低越清晰" })}
+        ${configSelect("码率控制", "output.rate_control", output.rate_control, [["vbr", "VBR 目标平均码率"], ["crf", "CRF 恒定质量"]])}
+        ${configInput("VBR 目标码率", "output.video_bitrate_kbps", output.video_bitrate_kbps, { type: "number", hint: "kbps" })}
+        ${configInput("CRF 质量值", "output.crf", output.crf, { type: "number", hint: "仅 CRF 模式生效" })}
         ${configInput("音频码率", "output.audio_bitrate", output.audio_bitrate)}
         ${configInput("音频采样率", "output.audio_sample_rate", output.audio_sample_rate, { type: "number" })}
         ${configSelect("声道", "output.audio_channels", String(output.audio_channels), [["1", "单声道"], ["2", "双声道"]])}

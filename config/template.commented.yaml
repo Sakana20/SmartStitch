@@ -51,12 +51,10 @@ sources:
     items: []
 
 # 透明利益点图片始终覆盖在最终画面的最高层。
+# 每个配置只指定一张固定图片；它会用于该配置生成的所有成片，不参与随机抽取。
 benefit_overlays:
   mode: disabled
-  directory: /请替换为/利益点图片目录
-  extensions: [.png, .jpg, .jpeg, .webp]
-  default_weight: 1
-  items: []
+  file: /请替换为/唯一利益点图片.png
   placement:
     # original=原尺寸；fit=等比适配画布；stretch=拉伸铺满。
     scale_mode: original
@@ -71,7 +69,7 @@ benefit_overlays:
     end_seconds: null
 
 matching:
-  # 开启后，前贴与利益点图片可用相同 tags 防止产品错配。
+  # 预留的素材标签匹配设置；固定利益点图片不使用此项。
   enabled: false
   strategy: product_tag
   allow_untagged_as_global: true
@@ -91,6 +89,9 @@ output:
   video_codec: libx264
   pixel_format: yuv420p
   video_preset: medium
+  # crf=恒定质量；vbr=目标平均码率。选择 vbr 时使用 video_bitrate_kbps。
+  rate_control: vbr
+  video_bitrate_kbps: 3000
   crf: 18
   audio_codec: aac
   audio_bitrate: 192k
@@ -114,4 +115,3 @@ scanner:
   ignore_hidden_files: true
   ignore_prefixes: ["._", ".~"]
   ignore_names: [.DS_Store]
-

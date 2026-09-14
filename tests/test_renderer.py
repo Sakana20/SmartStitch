@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 
 from smartstitch.models import AppConfig, Asset, MediaProbe, PlanItem
-from smartstitch.renderer import render_item
+from smartstitch.renderer import build_ffmpeg_command, render_item
 from smartstitch.scanner import probe_media
 
 
@@ -53,6 +53,11 @@ def test_render_three_part_timeline(tmp_path):
     assert output.exists()
     assert result["actual_duration"] > 0.8
     assert probe_media(output).fps == 24
+    config.output.rate_control = "vbr"
+    config.output.video_bitrate_kbps = 3000
+    command, _ = build_ffmpeg_command(config, item, tmp_path / "vbr.mp4")
+    assert command[command.index("-b:v") + 1] == "3000k"
+    assert "-crf" not in command
 
 
 def test_render_with_highest_layer_overlay(tmp_path):
@@ -90,7 +95,7 @@ def test_render_with_highest_layer_overlay(tmp_path):
             "sources": {category: {"directory": "."} for category in assets},
             "benefit_overlays": {
                 "mode": "required",
-                "directory": ".",
+                "file": str(overlay_path),
                 "timing": {"scope": "benefit_video"},
                 "placement": {"x": "(W-w)/2", "y": "(H-h)/2"},
             },

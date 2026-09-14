@@ -43,24 +43,6 @@ def _selectable(scan: ScanResult, category: str) -> list[Asset]:
     return [asset for asset in scan.assets.get(category, []) if asset.selectable]
 
 
-def _matching_candidates(config: AppConfig, assets: list[Asset], tags: set[str]) -> list[Asset]:
-    if not config.matching.enabled or not tags:
-        return assets
-    matching = [asset for asset in assets if tags.intersection(asset.tags)]
-    if config.matching.allow_untagged_as_global:
-        matching.extend(asset for asset in assets if not asset.tags)
-    unique = {asset.id: asset for asset in matching}
-    if unique:
-        return list(unique.values())
-    if config.matching.on_missing_match == "fallback_global":
-        return [asset for asset in assets if not asset.tags] or assets
-    raise PlanError(f"找不到与产品标签 {', '.join(sorted(tags))} 匹配的素材")
-
-
-def _weighted_one(assets: list[Asset], rng: random.Random) -> Asset:
-    return rng.choices(assets, weights=[asset.weight for asset in assets], k=1)[0]
-
-
 def _format_name(config: AppConfig, seed: int, index: int, batch_id: str) -> str:
     values = {
         "config": config.name.replace("/", "-"),
@@ -107,17 +89,9 @@ def build_plan(
     overlays: list[Asset | None] = [None] * count
     overlay_required = config.benefit_overlays.mode == SourceMode.REQUIRED
     if overlay_assets:
-        if config.matching.enabled:
-            for index in range(count):
-                tags: set[str] = set()
-                for sequence in sequences.values():
-                    asset = sequence[index]
-                    if asset:
-                        tags.update(asset.tags)
-                candidates = _matching_candidates(config, overlay_assets, tags)
-                overlays[index] = _weighted_one(candidates, rng)
-        else:
-            overlays = list(_sequence(overlay_assets, count, config.randomization.mode, rng))
+        if len(overlay_assets) != 1:
+            raise PlanError("每个配置必须且只能有一张利益点图片")
+        overlays = [overlay_assets[0]] * count
     elif overlay_required:
         raise PlanError("利益点图片为必需，但没有可用图片")
 
@@ -168,4 +142,3 @@ def build_plan(
         distribution=distribution,
         warnings=warnings,
     )
-
