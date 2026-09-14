@@ -264,6 +264,11 @@ class CloneConfigRequest(BaseModel):
     new_name: str
 
 
+class CreateConfigRequest(BaseModel):
+    new_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
+    new_name: str = Field(min_length=1)
+
+
 class WeightUpdate(BaseModel):
     category: str
     path: str

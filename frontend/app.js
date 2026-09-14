@@ -88,11 +88,17 @@ function bindEvents() {
   $("#deleteAllJobsBtn").addEventListener("click", showDeleteAllJobsConfirm);
   $("#cancelDeleteAllJobsBtn").addEventListener("click", hideDeleteAllJobsConfirm);
   $("#confirmDeleteAllJobsBtn").addEventListener("click", deleteAllJobRecords);
+  $("#newConfigBtn").addEventListener("click", openNewConfig);
+  $("#createConfigBtn").addEventListener("click", createConfig);
+  $("#deleteConfigBtn").addEventListener("click", showDeleteConfigConfirm);
+  $("#cancelDeleteConfigBtn").addEventListener("click", hideDeleteConfigConfirm);
+  $("#confirmDeleteConfigBtn").addEventListener("click", deleteConfig);
   $("#cloneConfigBtn").addEventListener("click", cloneConfig);
   $("#editConfigBtn").addEventListener("click", openConfig);
   $("#saveConfigBtn").addEventListener("click", saveConfig);
   $$(".config-mode-tab").forEach(button => button.addEventListener("click", () => setConfigMode(button.dataset.configMode)));
   $$('[data-close-modal]').forEach(element => element.addEventListener("click", closeConfig));
+  $$('[data-close-new-config]').forEach(element => element.addEventListener("click", closeNewConfig));
   $$('[data-close-drawer]').forEach(element => element.addEventListener("click", closeDrawer));
 }
 
@@ -107,8 +113,23 @@ async function loadConfigs(preferredId = null) {
   const select = $("#configSelect");
   select.innerHTML = state.configs.map(config => `<option value="${escapeHtml(config.id)}" ${!config.valid ? "disabled" : ""}>${escapeHtml(config.name)}${config.valid ? "" : "（配置错误）"}</option>`).join("");
   const valid = state.configs.filter(config => config.valid);
-  if (!valid.length) { toast("没有可用配置", true); return; }
-  await selectConfig(preferredId || state.configId || valid[0].id);
+  const hasConfigs = valid.length > 0;
+  [$("#cloneConfigBtn"), $("#deleteConfigBtn"), $("#editConfigBtn"), $("#scanBtn"), $("#saveWeightsBtn"), $("#previewBtn"), $("#startBtn")]
+    .forEach(button => { button.disabled = !hasConfigs; });
+  if (!hasConfigs) {
+    state.configId = null; state.config = null; state.scan = null;
+    select.innerHTML = '<option value="">暂无可用配置</option>';
+    $("#heroConfigName").textContent = "尚未创建配置";
+    $("#heroAssetCount").textContent = "新建配置后开始扫描";
+    $("#scanSummary").textContent = "请先新建一个配置";
+    $("#assetTabs").innerHTML = "";
+    $("#assetTable").innerHTML = '<tr><td colspan="7" style="text-align:center;padding:50px;color:var(--muted)">暂无配置</td></tr>';
+    hideDeleteConfigConfirm();
+    return;
+  }
+  const targetId = valid.some(config => config.id === preferredId) ? preferredId
+    : valid.some(config => config.id === state.configId) ? state.configId : valid[0].id;
+  await selectConfig(targetId);
 }
 
 async function selectConfig(id) {
@@ -360,7 +381,72 @@ async function deleteAllJobRecords() {
 }
 function closeDrawer() { $("#jobDrawer").classList.remove("open"); if (state.eventSource) state.eventSource.close(); }
 
+function openNewConfig() {
+  $("#newConfigIdInput").value = "";
+  $("#newConfigNameInput").value = "";
+  $("#newConfigModal").classList.add("open");
+  $("#newConfigModal").setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => $("#newConfigIdInput").focus());
+}
+
+function closeNewConfig() {
+  $("#newConfigModal").classList.remove("open");
+  $("#newConfigModal").setAttribute("aria-hidden", "true");
+}
+
+async function createConfig() {
+  const newId = $("#newConfigIdInput").value.trim();
+  const newName = $("#newConfigNameInput").value.trim();
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(newId)) {
+    toast("配置 ID 只能使用小写英文、数字和短横线", true);
+    $("#newConfigIdInput").focus();
+    return;
+  }
+  if (!newName) {
+    toast("请填写配置名称", true);
+    $("#newConfigNameInput").focus();
+    return;
+  }
+  const button = $("#createConfigBtn");
+  button.disabled = true; button.textContent = "新建中…";
+  try {
+    await api("/configs", { method: "POST", body: JSON.stringify({ new_id: newId, new_name: newName }) });
+    closeNewConfig();
+    await loadConfigs(newId);
+    toast("配置已新建，请继续完善素材和输出设置");
+    openConfig();
+  } catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; button.textContent = "新建并编辑"; }
+}
+
+function showDeleteConfigConfirm() {
+  if (!state.config) return;
+  $("#deleteConfigName").textContent = state.config.name;
+  $("#deleteConfigConfirm").classList.remove("hidden");
+}
+
+function hideDeleteConfigConfirm() {
+  $("#deleteConfigConfirm").classList.add("hidden");
+}
+
+async function deleteConfig() {
+  if (!state.configId) return;
+  const deletedId = state.configId;
+  const button = $("#confirmDeleteConfigBtn");
+  button.disabled = true; button.textContent = "删除中…";
+  try {
+    await api(`/configs/${deletedId}`, { method: "DELETE" });
+    try { localStorage.removeItem(`${configUiStoragePrefix}${deletedId}`); } catch (_) {}
+    state.configId = null;
+    hideDeleteConfigConfirm();
+    await loadConfigs();
+    toast("配置已删除，并已保留可恢复备份");
+  } catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; button.textContent = "确认删除"; }
+}
+
 function openConfig() {
+  if (!state.config) return;
   state.configDraft = structuredClone(state.config);
   $("#yamlEditor").value = state.yaml;
   renderVisualConfig();

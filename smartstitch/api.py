@@ -16,6 +16,7 @@ from .jobs import JobManager, TERMINAL_STATES
 from .models import (
     CloneConfigRequest,
     ConfigUpdateRequest,
+    CreateConfigRequest,
     JobCreateRequest,
     LoudnessPreviewRequest,
     PreviewRequest,
@@ -47,6 +48,14 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
     @app.get("/api/v1/configs")
     def list_configs() -> list[dict[str, object]]:
         return config_store.list()
+
+    @app.post("/api/v1/configs")
+    def create_config(request: CreateConfigRequest) -> dict[str, object]:
+        try:
+            config = config_store.create(request.new_id, request.new_name.strip())
+            return {"ok": True, "config": config.model_dump(mode="json")}
+        except ConfigError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/v1/configs/{config_id}")
     def get_config(config_id: str) -> dict[str, object]:
@@ -81,6 +90,14 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
             return {"ok": True, "config": config.model_dump(mode="json")}
         except (ConfigError, FileNotFoundError) as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.delete("/api/v1/configs/{config_id}")
+    def delete_config(config_id: str) -> dict[str, object]:
+        try:
+            backup = config_store.delete(config_id)
+            return {"ok": True, "backup": str(backup)}
+        except (ConfigError, FileNotFoundError) as exc:
+            raise HTTPException(404, str(exc)) from exc
 
     @app.post("/api/v1/configs/{config_id}/weights")
     def update_weights(config_id: str, request: WeightUpdateRequest) -> dict[str, object]:

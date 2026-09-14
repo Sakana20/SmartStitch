@@ -111,6 +111,36 @@ class ConfigStore:
         self._atomic_save(destination, text, backup=False)
         return config
 
+    def create(self, new_id: str, new_name: str) -> AppConfig:
+        new_name = new_name.strip()
+        if not new_name:
+            raise ConfigError("配置名称不能为空")
+        destination = self.path_for(new_id)
+        if destination.exists():
+            raise ConfigError(f"配置已存在: {new_id}")
+        template = self.directory / "template.commented.yaml"
+        if not template.exists():
+            raise ConfigError("缺少配置模板 template.commented.yaml")
+        data = yaml.safe_load(template.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ConfigError("配置模板格式不正确")
+        data["id"] = new_id
+        data["name"] = new_name
+        text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
+        config = self.validate_text(text)
+        self._atomic_save(destination, text, backup=False)
+        return config
+
+    def delete(self, config_id: str) -> Path:
+        path = self.path_for(config_id)
+        if not path.exists():
+            raise FileNotFoundError(f"配置不存在: {config_id}")
+        self.backup_directory.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        backup = self.backup_directory / f"{path.stem}-{stamp}.deleted.yaml"
+        path.replace(backup)
+        return backup
+
     def update_weights(self, config_id: str, updates: list[WeightUpdate]) -> AppConfig:
         config = self.load(config_id)
         grouped: dict[str, list[WeightUpdate]] = {}

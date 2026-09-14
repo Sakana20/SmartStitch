@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260914-5" />
+    <link rel="stylesheet" href="/styles.css?v=20260914-6" />
   </head>
   <body>
     <div class="noise"></div>
@@ -41,8 +41,10 @@
           <article class="panel setup-panel">
             <div class="panel-heading">
               <div><span class="step">01</span><h2>生成设置</h2></div>
-              <div class="inline-actions">
+              <div class="inline-actions config-heading-actions">
+                <button id="newConfigBtn" class="text-btn">新建配置</button>
                 <button id="cloneConfigBtn" class="text-btn">复制配置</button>
+                <button id="deleteConfigBtn" class="text-btn danger-text">删除配置</button>
                 <button id="editConfigBtn" class="text-btn">高级配置 ↗</button>
               </div>
             </div>
@@ -51,6 +53,14 @@
               <span>使用配置</span>
               <select id="configSelect"></select>
             </label>
+
+            <div id="deleteConfigConfirm" class="record-delete-confirm config-delete-confirm hidden">
+              <div><strong>删除“<span id="deleteConfigName"></span>”？</strong><p>配置文件会移入备份目录，已经生成的视频和任务记录不会删除。</p></div>
+              <div class="record-delete-actions">
+                <button id="cancelDeleteConfigBtn" class="button secondary small" type="button">取消</button>
+                <button id="confirmDeleteConfigBtn" class="button danger small" type="button">确认删除</button>
+              </div>
+            </div>
 
             <div class="field-row">
               <label class="field">
@@ -168,7 +178,27 @@
       </div>
     </div>
 
+    <div id="newConfigModal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-new-config></div>
+      <div class="modal-card compact-modal-card">
+        <div class="modal-heading">
+          <div><p class="eyebrow">NEW CONFIGURATION</p><h2>新建配置</h2></div>
+          <button class="drawer-close" data-close-new-config>×</button>
+        </div>
+        <p>从标准模板创建一份独立配置，创建后继续填写素材目录和输出设置。</p>
+        <label class="field">
+          <span>配置 ID <small>小写英文、数字和短横线</small></span>
+          <input id="newConfigIdInput" type="text" placeholder="例如 product-video" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>配置名称</span>
+          <input id="newConfigNameInput" type="text" placeholder="例如 商品视频配置" autocomplete="off" />
+        </label>
+        <div class="actions right"><button class="button secondary" data-close-new-config>取消</button><button id="createConfigBtn" class="button primary">新建并编辑</button></div>
+      </div>
+    </div>
+
     <div id="toast" class="toast" role="status"></div>
-    <script src="/app.js?v=20260914-5" defer></script>
+    <script src="/app.js?v=20260914-6" defer></script>
   </body>
 </html>
