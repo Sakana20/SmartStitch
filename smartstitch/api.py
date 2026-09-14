@@ -164,6 +164,13 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
     def list_jobs() -> list[dict[str, object]]:
         return job_manager.list_jobs()
 
+    @app.delete("/api/v1/jobs")
+    def delete_all_jobs() -> dict[str, object]:
+        try:
+            return {"ok": True, "deleted_count": job_manager.delete_all()}
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.get("/api/v1/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, object]:
         try:
@@ -186,6 +193,16 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
             return job_manager.cancel(job_id)
         except KeyError as exc:
             raise HTTPException(404, "任务不存在") from exc
+
+    @app.delete("/api/v1/jobs/{job_id}")
+    def delete_job(job_id: str) -> dict[str, object]:
+        try:
+            job_manager.delete(job_id)
+            return {"ok": True, "job_id": job_id}
+        except KeyError as exc:
+            raise HTTPException(404, "任务不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.get("/api/v1/jobs/{job_id}/manifest")
     def manifest(job_id: str) -> FileResponse:

@@ -69,3 +69,7 @@ def test_job_manager_writes_outputs_and_manifests(tmp_path):
     assert (output_directory / "manifest.csv").exists()
     assert (output_directory / "config.snapshot.yaml").exists()
 
+    manager.delete(job["id"])
+    assert manager.list_jobs() == []
+    assert len(list(output_directory.glob("*.mp4"))) == 2
+    assert output_directory.exists()

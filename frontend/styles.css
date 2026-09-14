@@ -75,6 +75,10 @@ input:focus, select:focus, textarea:focus { border-color: rgba(29,92,67,.55); bo
 .button.primary { flex: 1; color: white; background: var(--green); box-shadow: 0 8px 20px rgba(29,92,67,.18); }
 .button.primary:hover { background: #174c38; }
 .button.secondary { flex: 1; color: var(--green); background: var(--mint); border-color: rgba(29,92,67,.08); }
+.button.danger-secondary { color: #954533; background: #f7e9e4; border-color: rgba(166,75,56,.1); }
+.button.danger-secondary:hover { background: #f2ddd6; }
+.button.danger { flex: none; color: white; background: #a64b38; box-shadow: 0 8px 20px rgba(166,75,56,.14); }
+.button.danger:hover { background: #8f3f30; }
 .button.small { flex: none; padding: 9px 14px; font-size: 12px; }
 .inline-actions { display: flex !important; gap: 8px !important; }
 
@@ -131,6 +135,13 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .job-detail-header { padding-top: 40px; }.job-detail-header h2 { font-family: Georgia, "Songti SC", serif; font-size: 28px; margin: 9px 0; }.job-detail-header p { color: var(--muted); font-size: 11px; word-break: break-all; }
 .big-progress { margin: 24px 0; }.big-progress .bar { height: 10px; }.big-progress > div:first-child { display: flex; justify-content: space-between; margin-bottom: 9px; font-size: 12px; }
 .item-list { display: grid; gap: 8px; margin-top: 25px; }.item-row { display: grid; grid-template-columns: 30px 1fr 70px; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; align-items: center; font-size: 11px; }.item-row .error-text { color: #a64631; grid-column: 2 / -1; line-height: 1.5; white-space: pre-wrap; max-height: 90px; overflow: auto; }
+.record-delete-zone { margin-top: 4px; text-align: right; }
+.danger-text { color: #9c4937; }
+.record-delete-confirm { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 15px; border: 1px solid rgba(166,75,56,.18); border-radius: 12px; background: #f8ece8; text-align: left; }
+.record-delete-confirm strong { display: block; font-size: 12px; color: var(--ink); }
+.record-delete-confirm p { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.record-delete-actions { display: flex; gap: 7px; flex: none; }
+.bulk-delete-confirm { margin: -10px 0 18px; }
 
 .modal { position: fixed; inset: 0; z-index: 30; visibility: hidden; pointer-events: none; }.modal.open { visibility: visible; pointer-events: auto; }
 .modal-card { position: relative; width: min(1000px, calc(100vw - 40px)); margin: 4vh auto; background: #f8f8f4; border-radius: 22px; padding: 30px; box-shadow: 0 30px 100px rgba(20,30,24,.25); transform: translateY(10px); opacity: 0; transition: .25s; }.modal.open .modal-card { opacity: 1; transform: none; }.modal-heading { display: flex; justify-content: space-between; align-items: flex-start; }.modal-heading h2 { font-family: Georgia, "Songti SC", serif; margin: 0; }.modal-card > p { color: var(--muted); font-size: 12px; }

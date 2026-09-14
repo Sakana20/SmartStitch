@@ -70,6 +70,16 @@ class JobDatabase:
             rows = connection.execute("SELECT payload FROM jobs ORDER BY updated_at DESC").fetchall()
         return [json.loads(row[0]) for row in rows]
 
+    def delete(self, job_id: str) -> bool:
+        with self.lock, self._connect() as connection:
+            cursor = connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        return cursor.rowcount > 0
+
+    def delete_all(self) -> int:
+        with self.lock, self._connect() as connection:
+            cursor = connection.execute("DELETE FROM jobs")
+        return cursor.rowcount
+
 
 class JobManager:
     def __init__(self, config_store: ConfigStore, data_directory: Path):
@@ -189,6 +199,25 @@ class JobManager:
                 if running_job == job_id and process.poll() is None:
                     process.terminate()
         return self.get_job(job_id)
+
+    def delete(self, job_id: str) -> None:
+        with self.lock:
+            job = self.get_job(job_id)
+            if job["status"] not in TERMINAL_STATES | {"draft"}:
+                raise ValueError("任务仍在处理中，请先取消并等待任务结束")
+            if not self.database.delete(job_id):
+                raise KeyError(job_id)
+            self.cancel_events.pop(job_id, None)
+
+    def delete_all(self) -> int:
+        with self.lock:
+            jobs = self.database.list()
+            active = [job for job in jobs if job["status"] not in TERMINAL_STATES | {"draft"}]
+            if active:
+                raise ValueError(f"还有 {len(active)} 个任务正在处理中，请先取消并等待任务结束")
+            deleted_count = self.database.delete_all()
+            self.cancel_events.clear()
+            return deleted_count
 
     def _run(self, job_id: str) -> None:
         job = self.get_job(job_id)

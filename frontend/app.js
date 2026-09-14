@@ -85,6 +85,9 @@ function bindEvents() {
   $("#previewBtn").addEventListener("click", previewPlan);
   $("#startBtn").addEventListener("click", startJob);
   $("#refreshJobsBtn").addEventListener("click", loadJobs);
+  $("#deleteAllJobsBtn").addEventListener("click", showDeleteAllJobsConfirm);
+  $("#cancelDeleteAllJobsBtn").addEventListener("click", hideDeleteAllJobsConfirm);
+  $("#confirmDeleteAllJobsBtn").addEventListener("click", deleteAllJobRecords);
   $("#cloneConfigBtn").addEventListener("click", cloneConfig);
   $("#editConfigBtn").addEventListener("click", openConfig);
   $("#saveConfigBtn").addEventListener("click", saveConfig);
@@ -255,6 +258,9 @@ async function loadJobs() {
 
 function renderJobs() {
   const list = $("#jobsList");
+  $("#deleteAllJobsBtn").disabled = state.jobs.length === 0;
+  $("#deleteAllJobsCount").textContent = String(state.jobs.length);
+  if (!state.jobs.length) hideDeleteAllJobsConfirm();
   if (!state.jobs.length) { list.innerHTML = `<div class="empty-state"><h3>还没有生成任务</h3><p>预览组合后，点击“开始生成”即可在这里查看进度。</p></div>`; return; }
   list.innerHTML = state.jobs.map(job => {
     const [label, cls] = statusInfo(job.status); const done = job.success_count + job.failure_count; const pct = job.count ? done/job.count*100 : 0;
@@ -283,12 +289,74 @@ function renderJobDetail(job) {
     <div class="big-progress"><div><span>总体进度</span><b>${totalProgress.toFixed(1)}%</b></div><div class="bar"><i style="width:${totalProgress}%"></i></div></div>
     <div class="seed-card"><span>随机种子</span><strong>${job.seed}</strong></div>
     ${!terminalStates.has(job.status) ? `<button id="cancelJobBtn" class="button secondary" style="width:100%">取消剩余任务</button>` : ""}
+    ${terminalStates.has(job.status) ? `<div class="record-delete-zone">
+      <button id="showDeleteJobBtn" class="text-btn danger-text" type="button">删除任务记录</button>
+      <div id="deleteJobConfirm" class="record-delete-confirm hidden">
+        <div><strong>删除这条任务记录？</strong><p>只会从任务记录中移除，已经生成的视频不会删除。</p></div>
+        <div class="record-delete-actions">
+          <button id="cancelDeleteJobBtn" class="button secondary small" type="button">取消</button>
+          <button id="confirmDeleteJobBtn" class="button danger small" type="button">确认删除</button>
+        </div>
+      </div>
+    </div>` : ""}
     <div class="item-list">${job.items.map(item => { const [itemLabel,itemCls] = statusInfo(item.status); return `<div class="item-row"><b>${String(item.index).padStart(2,"0")}</b><div><strong>${escapeHtml(item.output_name)}</strong><div class="mini-progress" style="margin-top:7px"><i style="width:${item.progress*100}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`; }).join("")}</div>`;
   $("#cancelJobBtn")?.addEventListener("click", () => cancelJob(job.id));
+  $("#showDeleteJobBtn")?.addEventListener("click", () => {
+    $("#showDeleteJobBtn").classList.add("hidden");
+    $("#deleteJobConfirm").classList.remove("hidden");
+  });
+  $("#cancelDeleteJobBtn")?.addEventListener("click", () => {
+    $("#deleteJobConfirm").classList.add("hidden");
+    $("#showDeleteJobBtn").classList.remove("hidden");
+  });
+  $("#confirmDeleteJobBtn")?.addEventListener("click", () => deleteJobRecord(job.id));
 }
 
 async function cancelJob(id) {
   try { await api(`/jobs/${id}/cancel`, { method: "POST" }); toast("正在取消任务"); } catch (error) { toast(error.message, true); }
+}
+
+async function deleteJobRecord(id) {
+  const button = $("#confirmDeleteJobBtn");
+  if (button) { button.disabled = true; button.textContent = "删除中…"; }
+  try {
+    if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+    await api(`/jobs/${id}`, { method: "DELETE" });
+    state.activeJob = null;
+    closeDrawer();
+    await loadJobs();
+    toast("任务记录已删除，生成的视频已保留");
+  } catch (error) {
+    toast(error.message, true);
+    if (button) { button.disabled = false; button.textContent = "确认删除"; }
+  }
+}
+
+function showDeleteAllJobsConfirm() {
+  if (!state.jobs.length) return;
+  $("#deleteAllJobsCount").textContent = String(state.jobs.length);
+  $("#deleteAllJobsConfirm").classList.remove("hidden");
+}
+
+function hideDeleteAllJobsConfirm() {
+  $("#deleteAllJobsConfirm").classList.add("hidden");
+}
+
+async function deleteAllJobRecords() {
+  const button = $("#confirmDeleteAllJobsBtn");
+  button.disabled = true;
+  button.textContent = "删除中…";
+  try {
+    const result = await api("/jobs", { method: "DELETE" });
+    hideDeleteAllJobsConfirm();
+    await loadJobs();
+    toast(`已删除 ${result.deleted_count} 条任务记录，生成的视频已保留`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "确认全部删除";
+  }
 }
 function closeDrawer() { $("#jobDrawer").classList.remove("open"); if (state.eventSource) state.eventSource.close(); }
 

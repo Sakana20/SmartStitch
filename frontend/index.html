@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260914-3" />
+    <link rel="stylesheet" href="/styles.css?v=20260914-5" />
   </head>
   <body>
     <div class="noise"></div>
@@ -122,7 +122,17 @@
         <article class="panel full-panel">
           <div class="panel-heading">
             <div><span class="step">历史</span><h2>任务记录</h2></div>
-            <button id="refreshJobsBtn" class="button secondary small">刷新</button>
+            <div class="inline-actions">
+              <button id="deleteAllJobsBtn" class="button secondary danger-secondary small" type="button">删除全部记录</button>
+              <button id="refreshJobsBtn" class="button secondary small">刷新</button>
+            </div>
+          </div>
+          <div id="deleteAllJobsConfirm" class="record-delete-confirm bulk-delete-confirm hidden">
+            <div><strong>删除全部任务记录？</strong><p>将移除当前的 <span id="deleteAllJobsCount">0</span> 条记录，已经生成的视频不会删除。</p></div>
+            <div class="record-delete-actions">
+              <button id="cancelDeleteAllJobsBtn" class="button secondary small" type="button">取消</button>
+              <button id="confirmDeleteAllJobsBtn" class="button danger small" type="button">确认全部删除</button>
+            </div>
           </div>
           <div id="jobsList" class="jobs-list"></div>
         </article>
@@ -159,6 +169,6 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/app.js?v=20260914-3" defer></script>
+    <script src="/app.js?v=20260914-5" defer></script>
   </body>
 </html>

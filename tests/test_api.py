@@ -45,3 +45,30 @@ def test_structured_config_update(tmp_path):
     assert saved["name"] == "网页修改后的配置"
     assert saved["output"]["fps"] == 25
     assert list((config_directory / "backups").glob("*.yaml"))
+
+
+def test_delete_job_record_keeps_active_jobs_protected(tmp_path):
+    (tmp_path / "config").mkdir()
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    manager = app.state.job_manager
+    manager.database.save({"id": "finished-job", "status": "completed"})
+    manager.database.save({"id": "running-job", "status": "running"})
+
+    response = client.delete("/api/v1/jobs/finished-job")
+    assert response.status_code == 200
+    assert manager.database.get("finished-job") is None
+
+    response = client.delete("/api/v1/jobs/running-job")
+    assert response.status_code == 409
+    assert manager.database.get("running-job") is not None
+
+    response = client.delete("/api/v1/jobs")
+    assert response.status_code == 409
+
+    manager.database.save({"id": "running-job", "status": "completed"})
+    manager.database.save({"id": "another-finished-job", "status": "failed"})
+    response = client.delete("/api/v1/jobs")
+    assert response.status_code == 200
+    assert response.json()["deleted_count"] == 2
+    assert manager.database.list() == []
