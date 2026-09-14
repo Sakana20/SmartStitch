@@ -11,6 +11,7 @@ const state = {
   eventSource: null,
   configMode: "visual",
   configDraft: null,
+  previewAudioCleanup: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -298,7 +299,14 @@ function openConfig() {
   $("#configModal").classList.add("open");
   $("#configModal").setAttribute("aria-hidden","false");
 }
-function closeConfig() { $("#configModal").classList.remove("open"); $("#configModal").setAttribute("aria-hidden","true"); }
+function closeConfig() {
+  const audio = $("#loudnessPreviewAudio");
+  if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
+  state.previewAudioCleanup?.();
+  state.previewAudioCleanup = null;
+  $("#configModal").classList.remove("open");
+  $("#configModal").setAttribute("aria-hidden","true");
+}
 
 function setConfigMode(mode) {
   state.configMode = mode;
@@ -308,11 +316,11 @@ function setConfigMode(mode) {
 }
 
 function configInput(label, path, value, options = {}) {
-  const { type = "text", hint = "", wide = false, placeholder = "" } = options;
+  const { type = "text", hint = "", wide = false, placeholder = "", className = "" } = options;
   const dataType = type === "number" ? "number" : type === "nullable-number" ? "nullable-number" : type === "list" ? "list" : "string";
   const inputType = ["number", "nullable-number"].includes(type) ? "number" : "text";
   const renderedValue = Array.isArray(value) ? value.join(", ") : (value ?? "");
-  return `<div class="config-field ${wide ? "wide" : ""}"><label>${label}${hint ? `<small>${hint}</small>` : ""}</label><input type="${inputType}" data-config-path="${path}" data-config-type="${dataType}" value="${escapeHtml(renderedValue)}" placeholder="${escapeHtml(placeholder)}" ${inputType === "number" ? 'step="any"' : ""}></div>`;
+  return `<div class="config-field ${wide ? "wide" : ""} ${className}"><label>${label}${hint ? `<small>${hint}</small>` : ""}</label><input type="${inputType}" data-config-path="${path}" data-config-type="${dataType}" value="${escapeHtml(renderedValue)}" placeholder="${escapeHtml(placeholder)}" ${inputType === "number" ? 'step="any"' : ""}></div>`;
 }
 
 function configTextarea(label, path, value) {
@@ -344,7 +352,22 @@ function renderVisualConfig() {
 
   const overlay = config.benefit_overlays;
   const output = config.output;
+  const loudness = output.loudness || {
+    enabled: false,
+    target_lufs: -14,
+    loudness_range_lu: 7,
+    true_peak_dbtp: -1.5,
+    preview_duration_seconds: 12,
+  };
   const batch = config.batch;
+  const previewAssets = Object.entries(state.scan?.assets || {}).flatMap(([category, assets]) =>
+    assets
+      .filter(asset => asset.media_type === "video" && asset.valid && asset.probe?.has_audio)
+      .map(asset => ({ ...asset, category }))
+  );
+  const previewOptions = previewAssets.map(asset =>
+    `<option value="${escapeHtml(asset.path)}">${escapeHtml(categoryNames[asset.category] || asset.category)} · ${escapeHtml(asset.name)}</option>`
+  ).join("");
   $("#visualConfigEditor").innerHTML = `
     <details class="config-section" open>
       <summary>基础信息 <small>名称、主目录与时间线</small></summary>
@@ -400,11 +423,34 @@ function renderVisualConfig() {
         ${configInput("视频编码器", "output.video_codec", output.video_codec)}
         ${configSelect("编码速度", "output.video_preset", output.video_preset, [["ultrafast", "ultrafast（最快）"], ["veryfast", "veryfast"], ["fast", "fast"], ["medium", "medium（推荐）"], ["slow", "slow（更省体积）"]])}
         ${configSelect("码率控制", "output.rate_control", output.rate_control, [["vbr", "VBR 目标平均码率"], ["crf", "CRF 恒定质量"]])}
-        ${configInput("VBR 目标码率", "output.video_bitrate_kbps", output.video_bitrate_kbps, { type: "number", hint: "kbps" })}
-        ${configInput("CRF 质量值", "output.crf", output.crf, { type: "number", hint: "仅 CRF 模式生效" })}
+        ${configInput("VBR 目标码率", "output.video_bitrate_kbps", output.video_bitrate_kbps, { type: "number", hint: "kbps", className: "rate-option rate-vbr" })}
+        ${configInput("CRF 质量值", "output.crf", output.crf, { type: "number", hint: "数值越低画质越高", className: "rate-option rate-crf" })}
         ${configInput("音频码率", "output.audio_bitrate", output.audio_bitrate)}
         ${configInput("音频采样率", "output.audio_sample_rate", output.audio_sample_rate, { type: "number" })}
         ${configSelect("声道", "output.audio_channels", String(output.audio_channels), [["1", "单声道"], ["2", "双声道"]])}
+        ${configSwitch("启用响度均衡", "output.loudness.enabled", loudness.enabled, "响度均衡")}
+        <div class="config-field loudness-option">
+          <label>目标响度 <small>-24 ～ -8 LUFS</small></label>
+          <div class="range-number-control">
+            <input id="loudnessTargetSlider" type="range" min="-24" max="-8" step="0.5" value="${loudness.target_lufs}">
+            <div class="number-with-unit"><input id="loudnessTargetNumber" type="number" min="-24" max="-8" step="0.5" value="${loudness.target_lufs}" data-config-path="output.loudness.target_lufs" data-config-type="number"><span>LUFS</span></div>
+          </div>
+        </div>
+        ${configInput("试听时长", "output.loudness.preview_duration_seconds", loudness.preview_duration_seconds, { type: "number", hint: "3～30 秒", className: "loudness-option" })}
+        ${configInput("响度范围", "output.loudness.loudness_range_lu", loudness.loudness_range_lu, { type: "number", hint: "LU", className: "loudness-option" })}
+        ${configInput("真峰值上限", "output.loudness.true_peak_dbtp", loudness.true_peak_dbtp, { type: "number", hint: "dBTP", className: "loudness-option" })}
+        <div class="config-field loudness-option">
+          <label>试听素材 <small>当前配置中的有声视频</small></label>
+          <select id="loudnessPreviewSource" ${previewAssets.length ? "" : "disabled"}>${previewOptions || '<option>没有可试听的音频素材</option>'}</select>
+        </div>
+        <div class="config-field wide loudness-option">
+          <label>响度试听 <small id="loudnessPreviewStatus">选择同一素材对比试听</small></label>
+          <div class="loudness-audition-controls">
+            <button id="previewOriginalAudioBtn" class="button secondary small" type="button" ${previewAssets.length ? "" : "disabled"}>试听原音</button>
+            <button id="previewNormalizedAudioBtn" class="button primary small" type="button" ${previewAssets.length ? "" : "disabled"}>试听均衡后</button>
+            <audio id="loudnessPreviewAudio" controls preload="none"></audio>
+          </div>
+        </div>
         ${configInput("文件名模板", "output.filename_template", output.filename_template, { wide: true })}
         ${configSelect("重名处理", "output.collision_policy", output.collision_policy, [["increment", "自动递增"], ["error", "报错"], ["overwrite", "覆盖"]])}
         ${configSwitch("启用 Faststart", "output.faststart", output.faststart)}
@@ -428,6 +474,94 @@ function renderVisualConfig() {
 
   const idInput = $('[data-config-path="id"]');
   if (idInput) idInput.disabled = true;
+  bindOutputControls();
+}
+
+function bindOutputControls() {
+  const slider = $("#loudnessTargetSlider");
+  const number = $("#loudnessTargetNumber");
+  if (slider && number) {
+    slider.addEventListener("input", () => { number.value = slider.value; });
+    number.addEventListener("input", () => {
+      const value = Math.min(-8, Math.max(-24, Number(number.value)));
+      if (Number.isFinite(value)) slider.value = String(value);
+    });
+  }
+  $("#previewOriginalAudioBtn")?.addEventListener("click", () => playLoudnessPreview(false));
+  $("#previewNormalizedAudioBtn")?.addEventListener("click", () => playLoudnessPreview(true));
+  const loudnessSwitch = $('[data-config-path="output.loudness.enabled"]');
+  const rateControl = $('[data-config-path="output.rate_control"]');
+  loudnessSwitch?.addEventListener("change", syncConditionalOutputFields);
+  rateControl?.addEventListener("change", syncConditionalOutputFields);
+  syncConditionalOutputFields();
+}
+
+function syncConditionalOutputFields() {
+  const loudnessEnabled = $('[data-config-path="output.loudness.enabled"]')?.checked ?? false;
+  $$(".loudness-option").forEach(field => field.classList.toggle("hidden", !loudnessEnabled));
+
+  const rateControl = $('[data-config-path="output.rate_control"]')?.value;
+  $$(".rate-vbr").forEach(field => field.classList.toggle("hidden", rateControl !== "vbr"));
+  $$(".rate-crf").forEach(field => field.classList.toggle("hidden", rateControl !== "crf"));
+}
+
+async function playLoudnessPreview(normalized) {
+  const source = $("#loudnessPreviewSource")?.value;
+  if (!source) return;
+  const buttons = [$("#previewOriginalAudioBtn"), $("#previewNormalizedAudioBtn")].filter(Boolean);
+  const status = $("#loudnessPreviewStatus");
+  const audio = $("#loudnessPreviewAudio");
+  const settings = collectVisualConfig().output.loudness;
+  state.previewAudioCleanup?.();
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
+  buttons.forEach(button => { button.disabled = true; });
+  status.textContent = normalized ? "正在生成均衡试听…" : "正在生成原音试听…";
+  const url = new URL("/api/v1/audio/preview", window.location.origin);
+  Object.entries({
+    config_id: state.configId,
+    asset_path: source,
+    normalized,
+    target_lufs: settings.target_lufs,
+    loudness_range_lu: settings.loudness_range_lu,
+    true_peak_dbtp: settings.true_peak_dbtp,
+    duration_seconds: settings.preview_duration_seconds,
+  }).forEach(([key, value]) => url.searchParams.set(key, String(value)));
+
+  let finished = false;
+  const finish = (message, error = false) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timeout);
+    audio.removeEventListener("canplay", onCanPlay);
+    audio.removeEventListener("error", onError);
+    buttons.forEach(button => { button.disabled = false; });
+    status.textContent = message;
+    if (error) toast(message, true);
+    state.previewAudioCleanup = null;
+  };
+  const onCanPlay = () => finish(normalized ? `均衡后 · ${settings.target_lufs} LUFS` : "原音（未处理）");
+  const onError = () => finish("试听加载失败，请重试或检查后端是否已重启", true);
+  const timeout = setTimeout(() => finish("试听生成超时，请重试", true), 15000);
+  state.previewAudioCleanup = () => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timeout);
+    audio.removeEventListener("canplay", onCanPlay);
+    audio.removeEventListener("error", onError);
+    buttons.forEach(button => { button.disabled = false; });
+  };
+  audio.addEventListener("canplay", onCanPlay);
+  audio.addEventListener("error", onError);
+  audio.src = url.toString();
+  audio.load();
+  audio.play().catch(error => {
+    const message = error.name === "NotAllowedError"
+      ? "浏览器阻止了自动播放，请点击播放器的播放键"
+      : "试听播放失败，请重试";
+    finish(message, error.name !== "NotAllowedError");
+  });
 }
 
 function collectVisualConfig() {

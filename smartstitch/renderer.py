@@ -46,8 +46,15 @@ def _audio_filter(index: int, asset: Asset, config: AppConfig) -> str:
     duration = asset.probe.duration if asset.probe else 0
     layout = "mono" if output.audio_channels == 1 else "stereo"
     if asset.probe and asset.probe.has_audio:
+        loudness = ""
+        if output.loudness.enabled:
+            settings = output.loudness
+            loudness = (
+                f"loudnorm=I={settings.target_lufs}:LRA={settings.loudness_range_lu}:"
+                f"TP={settings.true_peak_dbtp},"
+            )
         return (
-            f"[{index}:a]aresample={output.audio_sample_rate},"
+            f"[{index}:a]{loudness}aresample={output.audio_sample_rate},"
             f"aformat=channel_layouts={layout},asetpts=PTS-STARTPTS[a{index}]"
         )
     return (

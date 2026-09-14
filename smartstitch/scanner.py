@@ -96,6 +96,52 @@ def probe_media(path: Path, image_duration: float = 1.5) -> MediaProbe:
     )
 
 
+def probe_config_audio(config: AppConfig, requested_path: Path) -> MediaProbe:
+    """Validate and probe one configured audio/video path without scanning every source."""
+    path = requested_path.expanduser().resolve()
+    allowed = False
+    for group in config.sources.values():
+        if group.mode == SourceMode.DISABLED:
+            continue
+        directory = resolve_directory(config, group.directory).expanduser().resolve()
+        explicit_paths = set()
+        for item in group.items:
+            item_path = Path(item.path).expanduser()
+            if not item_path.is_absolute():
+                item_path = directory / item_path
+            explicit_paths.add(item_path.resolve())
+        if path in explicit_paths:
+            allowed = True
+            break
+
+        name = path.name
+        visible = not (
+            name in config.scanner.ignore_names
+            or any(name.startswith(prefix) for prefix in config.scanner.ignore_prefixes)
+            or (config.scanner.ignore_hidden_files and name.startswith("."))
+        )
+        within_directory = (
+            path.is_relative_to(directory)
+            if config.scanner.recursive
+            else path.parent == directory
+        )
+        if visible and within_directory and path.suffix.lower() in set(group.extensions):
+            allowed = True
+            break
+
+    if not allowed:
+        raise ValueError("试听文件不在当前配置的有效音频素材中")
+    if not path.exists() or not path.is_file():
+        raise ValueError("试听文件不存在或外接磁盘未挂载")
+    if path.suffix.lower() in IMAGE_EXTENSIONS:
+        raise ValueError("试听文件必须是视频")
+
+    probe = probe_media(path)
+    if not probe.has_audio:
+        raise ValueError("试听文件没有音轨")
+    return probe
+
+
 def _discover_paths(config: AppConfig, group: SourceGroupConfig) -> tuple[Path, list[Path]]:
     directory = resolve_directory(config, group.directory)
     if not directory.exists() or not directory.is_dir():

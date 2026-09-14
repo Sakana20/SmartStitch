@@ -58,6 +58,11 @@ def test_render_three_part_timeline(tmp_path):
     command, _ = build_ffmpeg_command(config, item, tmp_path / "vbr.mp4")
     assert command[command.index("-b:v") + 1] == "3000k"
     assert "-crf" not in command
+    config.output.loudness.enabled = True
+    config.output.loudness.target_lufs = -14
+    command, _ = build_ffmpeg_command(config, item, tmp_path / "loudness.mp4")
+    filter_complex = command[command.index("-filter_complex") + 1]
+    assert filter_complex.count("loudnorm=I=-14:LRA=7:TP=-1.5") == 3
 
 
 def test_render_with_highest_layer_overlay(tmp_path):

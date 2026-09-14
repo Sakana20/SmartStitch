@@ -11,17 +11,19 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .config import ConfigError, ConfigStore
+from .audio_preview import AudioPreviewError, create_audio_preview
 from .jobs import JobManager, TERMINAL_STATES
 from .models import (
     CloneConfigRequest,
     ConfigUpdateRequest,
     JobCreateRequest,
+    LoudnessPreviewRequest,
     PreviewRequest,
     StructuredConfigUpdateRequest,
     WeightUpdateRequest,
 )
 from .planner import PlanError, build_plan
-from .scanner import scan_config
+from .scanner import probe_config_audio, scan_config
 
 
 def create_app(base_directory: Path | None = None) -> FastAPI:
@@ -106,6 +108,50 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
             return result.model_dump(mode="json")
         except (ConfigError, FileNotFoundError, PlanError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    def audio_preview_response(request: LoudnessPreviewRequest) -> FileResponse:
+        try:
+            config = config_store.load(request.config_id)
+            requested_path = Path(request.asset_path).expanduser().resolve()
+            probe_config_audio(config, requested_path)
+            preview_path = create_audio_preview(
+                request, requested_path, root / "data" / "previews"
+            )
+            return FileResponse(
+                preview_path,
+                media_type="audio/mp4",
+                headers={"Cache-Control": "private, max-age=3600"},
+            )
+        except (ConfigError, FileNotFoundError, ValueError, AudioPreviewError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/audio/preview")
+    def audio_preview(request: LoudnessPreviewRequest) -> FileResponse:
+        return audio_preview_response(request)
+
+    @app.get("/api/v1/audio/preview")
+    def audio_preview_for_player(
+        config_id: str,
+        asset_path: str,
+        normalized: bool = True,
+        target_lufs: float = -14,
+        loudness_range_lu: float = 7,
+        true_peak_dbtp: float = -1.5,
+        duration_seconds: float = 12,
+    ) -> FileResponse:
+        try:
+            request = LoudnessPreviewRequest(
+                config_id=config_id,
+                asset_path=asset_path,
+                normalized=normalized,
+                target_lufs=target_lufs,
+                loudness_range_lu=loudness_range_lu,
+                true_peak_dbtp=true_peak_dbtp,
+                duration_seconds=duration_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return audio_preview_response(request)
 
     @app.post("/api/v1/jobs")
     def create_job(request: JobCreateRequest) -> dict[str, object]:

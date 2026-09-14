@@ -95,6 +95,14 @@ class RandomizationConfig(BaseModel):
     default_seed: int | None = None
 
 
+class LoudnessConfig(BaseModel):
+    enabled: bool = False
+    target_lufs: float = Field(default=-14, ge=-24, le=-8)
+    loudness_range_lu: float = Field(default=7, ge=1, le=20)
+    true_peak_dbtp: float = Field(default=-1.5, ge=-9, le=-0.1)
+    preview_duration_seconds: float = Field(default=12, ge=3, le=30)
+
+
 class OutputConfig(BaseModel):
     directory: str
     width: int = Field(default=720, gt=0)
@@ -110,6 +118,7 @@ class OutputConfig(BaseModel):
     audio_bitrate: str = "192k"
     audio_sample_rate: int = Field(default=48000, gt=0)
     audio_channels: Literal[1, 2] = 2
+    loudness: LoudnessConfig = Field(default_factory=LoudnessConfig)
     resize_mode: Literal["fit_pad", "fill_crop", "stretch"] = "fit_pad"
     background_color: str = "black"
     filename_template: str = "{config}_{date}_{batch}_{index:04d}.mp4"
@@ -265,6 +274,16 @@ class WeightUpdate(BaseModel):
 
 class WeightUpdateRequest(BaseModel):
     items: list[WeightUpdate]
+
+
+class LoudnessPreviewRequest(BaseModel):
+    config_id: str
+    asset_path: str
+    normalized: bool = True
+    target_lufs: float = Field(default=-14, ge=-24, le=-8)
+    loudness_range_lu: float = Field(default=7, ge=1, le=20)
+    true_peak_dbtp: float = Field(default=-1.5, ge=-9, le=-0.1)
+    duration_seconds: float = Field(default=12, ge=3, le=30)
 
 
 def resolve_directory(config: AppConfig, directory: str) -> Path:

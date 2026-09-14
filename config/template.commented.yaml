@@ -97,6 +97,16 @@ output:
   audio_bitrate: 192k
   audio_sample_rate: 48000
   audio_channels: 2
+  # 启用后，每个有声片段会先做响度均衡，再参与拼接。
+  loudness:
+    enabled: false
+    # 目标综合响度，短视频常用 -14 LUFS；可在网页中滑动或直接输入。
+    target_lufs: -14.0
+    # 允许的响度范围与真峰值上限。
+    loudness_range_lu: 7.0
+    true_peak_dbtp: -1.5
+    # 网页试听截取时长，只影响试听缓存，不影响正式成片。
+    preview_duration_seconds: 12.0
   resize_mode: fit_pad
   background_color: black
   filename_template: "{config}_{date}_{batch}_{index:04d}.mp4"
