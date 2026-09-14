@@ -25,6 +25,7 @@ const categoryNames = {
   benefit_overlay: "利益点图片",
 };
 const terminalStates = new Set(["completed", "partial_failed", "failed", "cancelled", "interrupted"]);
+const configUiStoragePrefix = "smartstitch.config-ui.";
 
 async function api(path, options = {}) {
   const response = await fetch(`/api/v1${path}`, {
@@ -295,11 +296,13 @@ function openConfig() {
   state.configDraft = structuredClone(state.config);
   $("#yamlEditor").value = state.yaml;
   renderVisualConfig();
-  setConfigMode("visual");
+  restoreConfigUiPreferences();
   $("#configModal").classList.add("open");
   $("#configModal").setAttribute("aria-hidden","false");
+  requestAnimationFrame(restoreConfigEditorScroll);
 }
 function closeConfig() {
+  saveConfigUiPreferences();
   const audio = $("#loudnessPreviewAudio");
   if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
   state.previewAudioCleanup?.();
@@ -313,6 +316,50 @@ function setConfigMode(mode) {
   $$(".config-mode-tab").forEach(button => button.classList.toggle("active", button.dataset.configMode === mode));
   $("#visualConfigEditor").classList.toggle("hidden", mode !== "visual");
   $("#yamlConfigEditor").classList.toggle("hidden", mode !== "yaml");
+  if ($("#configModal").classList.contains("open")) saveConfigUiPreferences();
+}
+
+function configUiStorageKey() {
+  return `${configUiStoragePrefix}${state.configId}`;
+}
+
+function readConfigUiPreferences() {
+  try {
+    return JSON.parse(localStorage.getItem(configUiStorageKey()) || "{}") || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveConfigUiPreferences() {
+  if (!state.configId) return;
+  const sections = {};
+  $$("#visualConfigEditor details[data-config-section]").forEach(section => {
+    sections[section.dataset.configSection] = section.open;
+  });
+  const preferences = {
+    mode: state.configMode,
+    sections,
+    visualScrollTop: $("#visualConfigEditor")?.scrollTop || 0,
+    yamlScrollTop: $("#yamlEditor")?.scrollTop || 0,
+  };
+  try { localStorage.setItem(configUiStorageKey(), JSON.stringify(preferences)); } catch (_) {}
+}
+
+function restoreConfigUiPreferences() {
+  const preferences = readConfigUiPreferences();
+  $$("#visualConfigEditor details[data-config-section]").forEach(section => {
+    const saved = preferences.sections?.[section.dataset.configSection];
+    if (typeof saved === "boolean") section.open = saved;
+    section.addEventListener("toggle", saveConfigUiPreferences);
+  });
+  setConfigMode(preferences.mode === "yaml" ? "yaml" : "visual");
+}
+
+function restoreConfigEditorScroll() {
+  const preferences = readConfigUiPreferences();
+  if ($("#visualConfigEditor")) $("#visualConfigEditor").scrollTop = Number(preferences.visualScrollTop || 0);
+  if ($("#yamlEditor")) $("#yamlEditor").scrollTop = Number(preferences.yamlScrollTop || 0);
 }
 
 function configInput(label, path, value, options = {}) {
@@ -369,7 +416,7 @@ function renderVisualConfig() {
     `<option value="${escapeHtml(asset.path)}">${escapeHtml(categoryNames[asset.category] || asset.category)} · ${escapeHtml(asset.name)}</option>`
   ).join("");
   $("#visualConfigEditor").innerHTML = `
-    <details class="config-section" open>
+    <details class="config-section" data-config-section="basic" open>
       <summary>基础信息 <small>名称、主目录与时间线</small></summary>
       <div class="config-section-body config-form-grid">
         ${configInput("配置 ID", "id", config.id, { hint: "不可修改" })}
@@ -381,12 +428,12 @@ function renderVisualConfig() {
       </div>
     </details>
 
-    <details class="config-section" open>
+    <details class="config-section" data-config-section="sources" open>
       <summary>视频素材 <small>前贴、引子、利益点视频、结尾和尾帧</small></summary>
       <div class="config-section-body">${sourceCards}</div>
     </details>
 
-    <details class="config-section" open>
+    <details class="config-section" data-config-section="benefit-overlay" open>
       <summary>利益点图片 <small>最高图层叠加设置</small></summary>
       <div class="config-section-body config-form-grid three">
         ${configSelect("使用方式", "benefit_overlays.mode", overlay.mode, modeChoices)}
@@ -402,7 +449,7 @@ function renderVisualConfig() {
       </div>
     </details>
 
-    <details class="config-section">
+    <details class="config-section" data-config-section="randomization">
       <summary>随机组合 <small>仅用于视频片段和尾帧</small></summary>
       <div class="config-section-body config-form-grid three">
         ${configSelect("权重算法", "randomization.mode", config.randomization.mode, [["quota_shuffle", "按批次配额后洗牌"], ["independent_random", "逐条独立随机"]])}
@@ -411,7 +458,7 @@ function renderVisualConfig() {
       </div>
     </details>
 
-    <details class="config-section">
+    <details class="config-section" data-config-section="output">
       <summary>成片输出 <small>尺寸、编码质量与文件名</small></summary>
       <div class="config-section-body config-form-grid three">
         ${configInput("默认输出目录", "output.directory", output.directory, { wide: true })}
@@ -457,7 +504,7 @@ function renderVisualConfig() {
       </div>
     </details>
 
-    <details class="config-section">
+    <details class="config-section" data-config-section="batch-scanner">
       <summary>批处理与扫描 <small>默认数量、并发和文件过滤</small></summary>
       <div class="config-section-body config-form-grid three">
         ${configInput("默认生成数量", "batch.default_count", batch.default_count, { type: "number" })}
