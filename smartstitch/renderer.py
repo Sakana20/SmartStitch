@@ -63,13 +63,13 @@ def _audio_filter(index: int, asset: Asset, config: AppConfig) -> str:
     )
 
 
-def _overlay_range(config: AppConfig, timeline: list[tuple[str, Asset]]) -> tuple[float, float]:
+def _overlay_range(config: AppConfig, timeline: list[tuple[str, Asset]]) -> tuple[float, float | None]:
     timing = config.benefit_overlays.timing
     total = sum(asset.probe.duration for _, asset in timeline if asset.probe)
     if timing.scope == "full":
-        return 0, total
+        return 0, None
     if timing.scope == "custom":
-        return timing.start_seconds, timing.end_seconds if timing.end_seconds is not None else total
+        return timing.start_seconds, timing.end_seconds
 
     elapsed = 0.0
     ranges: dict[str, tuple[float, float]] = {}
@@ -143,9 +143,14 @@ def build_ffmpeg_command(
         start, end = _overlay_range(config, timeline)
         x = _escape_filter_value(placement.x)
         y = _escape_filter_value(placement.y)
+        enable = (
+            f"gte(t,{start:.6f})"
+            if end is None
+            else f"between(t,{start:.6f},{end:.6f})"
+        )
         filters.append(
             f"[basev][overlay]overlay=x='{x}':y='{y}':"
-            f"enable='between(t,{start:.6f},{end:.6f})':eof_action=pass[outv]"
+            f"enable='{enable}':eof_action=pass[outv]"
         )
         video_map = "[outv]"
 

@@ -112,3 +112,9 @@ def test_render_with_highest_layer_overlay(tmp_path):
     output = tmp_path / "overlay-result.mp4"
     render_item(config, item, output, threading.Event())
     assert output.exists()
+
+    config.benefit_overlays.timing.scope = "full"
+    command, _ = build_ffmpeg_command(config, item, tmp_path / "full-overlay-result.mp4")
+    filter_complex = command[command.index("-filter_complex") + 1]
+    assert "enable='gte(t,0.000000)'" in filter_complex
+    assert "enable='between(t,0.000000" not in filter_complex
