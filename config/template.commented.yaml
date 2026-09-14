@@ -25,19 +25,20 @@ sources:
         tags: [product-a]
   hook:
     mode: required
-    directory: 引子
+    # 建议填写该素材组的完整目录，网页中更直观，也不依赖 source_root 推断。
+    directory: /请替换为/主素材目录/引子
     extensions: [.mp4]
     default_weight: 1
     items: []
   benefit_video:
     mode: required
-    directory: 利益点
+    directory: /请替换为/主素材目录/利益点
     extensions: [.mp4]
     default_weight: 1
     items: []
   ending:
     mode: required
-    directory: 结尾
+    directory: /请替换为/主素材目录/结尾
     extensions: [.mp4]
     default_weight: 1
     items: []
