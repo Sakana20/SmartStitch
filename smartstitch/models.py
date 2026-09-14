@@ -233,6 +233,10 @@ class ConfigUpdateRequest(BaseModel):
     yaml_text: str
 
 
+class StructuredConfigUpdateRequest(BaseModel):
+    config: AppConfig
+
+
 class CloneConfigRequest(BaseModel):
     new_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
     new_name: str

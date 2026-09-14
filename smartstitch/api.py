@@ -17,6 +17,7 @@ from .models import (
     ConfigUpdateRequest,
     JobCreateRequest,
     PreviewRequest,
+    StructuredConfigUpdateRequest,
     WeightUpdateRequest,
 )
 from .planner import PlanError, build_plan
@@ -57,6 +58,16 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
     def update_config(config_id: str, request: ConfigUpdateRequest) -> dict[str, object]:
         try:
             config = config_store.save_text(config_id, request)
+            return {"ok": True, "config": config.model_dump(mode="json")}
+        except ConfigError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.put("/api/v1/configs/{config_id}/structured")
+    def update_structured_config(
+        config_id: str, request: StructuredConfigUpdateRequest
+    ) -> dict[str, object]:
+        try:
+            config = config_store.save_config(config_id, request.config)
             return {"ok": True, "config": config.model_dump(mode="json")}
         except ConfigError as exc:
             raise HTTPException(422, str(exc)) from exc

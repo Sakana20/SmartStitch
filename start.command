@@ -13,6 +13,6 @@ if ! .venv/bin/python -c 'import fastapi, pydantic, uvicorn, yaml, smartstitch' 
   .venv/bin/python -m pip install -e .
 fi
 
-echo "SmartStitch 将在浏览器地址 http://127.0.0.1:8765 运行"
-(sleep 1; open "http://127.0.0.1:8765") &
+echo "SmartStitch 将在浏览器地址 http://127.0.0.1:8766 运行"
+(sleep 1; open "http://127.0.0.1:8766") &
 .venv/bin/smartstitch

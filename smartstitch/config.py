@@ -92,6 +92,13 @@ class ConfigStore:
         self._atomic_save(self.path_for(config_id), request.yaml_text)
         return config
 
+    def save_config(self, config_id: str, config: AppConfig) -> AppConfig:
+        if config.id != config_id:
+            raise ConfigError(f"配置内 id={config.id!r} 与目标配置 {config_id!r} 不一致")
+        text = yaml.safe_dump(config.model_dump(mode="json"), allow_unicode=True, sort_keys=False)
+        self._atomic_save(self.path_for(config_id), text)
+        return config
+
     def clone(self, source_id: str, new_id: str, new_name: str) -> AppConfig:
         destination = self.path_for(new_id)
         if destination.exists():
@@ -139,4 +146,3 @@ class ConfigStore:
         temp = path.with_suffix(".yaml.tmp")
         temp.write_text(text, encoding="utf-8")
         temp.replace(path)
-

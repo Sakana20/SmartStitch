@@ -9,6 +9,8 @@ const state = {
   jobs: [],
   activeJob: null,
   eventSource: null,
+  configMode: "visual",
+  configDraft: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -30,7 +32,14 @@ async function api(path, options = {}) {
   });
   if (!response.ok) {
     let detail = `请求失败 (${response.status})`;
-    try { detail = (await response.json()).detail || detail; } catch (_) {}
+    try {
+      const payload = await response.json();
+      if (Array.isArray(payload.detail)) {
+        detail = payload.detail.map(item => `${item.loc?.slice(1).join(".") || "配置"}: ${item.msg}`).join("；");
+      } else {
+        detail = payload.detail || detail;
+      }
+    } catch (_) {}
     throw new Error(detail);
   }
   return response.json();
@@ -77,6 +86,7 @@ function bindEvents() {
   $("#cloneConfigBtn").addEventListener("click", cloneConfig);
   $("#editConfigBtn").addEventListener("click", openConfig);
   $("#saveConfigBtn").addEventListener("click", saveConfig);
+  $$(".config-mode-tab").forEach(button => button.addEventListener("click", () => setConfigMode(button.dataset.configMode)));
   $$('[data-close-modal]').forEach(element => element.addEventListener("click", closeConfig));
   $$('[data-close-drawer]').forEach(element => element.addEventListener("click", closeDrawer));
 }
@@ -276,8 +286,172 @@ async function cancelJob(id) {
 }
 function closeDrawer() { $("#jobDrawer").classList.remove("open"); if (state.eventSource) state.eventSource.close(); }
 
-function openConfig() { $("#yamlEditor").value = state.yaml; $("#configModal").classList.add("open"); $("#configModal").setAttribute("aria-hidden","false"); }
+function openConfig() {
+  state.configDraft = structuredClone(state.config);
+  $("#yamlEditor").value = state.yaml;
+  renderVisualConfig();
+  setConfigMode("visual");
+  $("#configModal").classList.add("open");
+  $("#configModal").setAttribute("aria-hidden","false");
+}
 function closeConfig() { $("#configModal").classList.remove("open"); $("#configModal").setAttribute("aria-hidden","true"); }
+
+function setConfigMode(mode) {
+  state.configMode = mode;
+  $$(".config-mode-tab").forEach(button => button.classList.toggle("active", button.dataset.configMode === mode));
+  $("#visualConfigEditor").classList.toggle("hidden", mode !== "visual");
+  $("#yamlConfigEditor").classList.toggle("hidden", mode !== "yaml");
+}
+
+function configInput(label, path, value, options = {}) {
+  const { type = "text", hint = "", wide = false, placeholder = "" } = options;
+  const dataType = type === "number" ? "number" : type === "nullable-number" ? "nullable-number" : type === "list" ? "list" : "string";
+  const inputType = ["number", "nullable-number"].includes(type) ? "number" : "text";
+  const renderedValue = Array.isArray(value) ? value.join(", ") : (value ?? "");
+  return `<div class="config-field ${wide ? "wide" : ""}"><label>${label}${hint ? `<small>${hint}</small>` : ""}</label><input type="${inputType}" data-config-path="${path}" data-config-type="${dataType}" value="${escapeHtml(renderedValue)}" placeholder="${escapeHtml(placeholder)}" ${inputType === "number" ? 'step="any"' : ""}></div>`;
+}
+
+function configTextarea(label, path, value) {
+  return `<div class="config-field wide"><label>${label}</label><textarea data-config-path="${path}" data-config-type="string">${escapeHtml(value || "")}</textarea></div>`;
+}
+
+function configSelect(label, path, value, choices, hint = "") {
+  return `<div class="config-field"><label>${label}${hint ? `<small>${hint}</small>` : ""}</label><select data-config-path="${path}" data-config-type="string">${choices.map(([key, text]) => `<option value="${key}" ${value === key ? "selected" : ""}>${text}</option>`).join("")}</select></div>`;
+}
+
+function configSwitch(label, path, value, help = "") {
+  return `<div class="config-field"><label>${help || "开关"}</label><div class="config-switch"><span>${label}</span><input class="switch-input" type="checkbox" data-config-path="${path}" data-config-type="boolean" ${value ? "checked" : ""}></div></div>`;
+}
+
+function renderVisualConfig() {
+  const config = state.configDraft;
+  const modeChoices = [["required", "必需"], ["optional", "可选"], ["disabled", "停用"]];
+  const sourceCards = Object.entries(config.sources).map(([category, group]) => `
+    <div class="source-config-card">
+      <div class="source-config-title"><i></i>${categoryNames[category] || category}</div>
+      <div class="config-form-grid three">
+        ${configSelect("使用方式", `sources.${category}.mode`, group.mode, modeChoices)}
+        ${configInput("默认权重", `sources.${category}.default_weight`, group.default_weight, { type: "number" })}
+        ${configInput("扩展名", `sources.${category}.extensions`, group.extensions, { type: "list", hint: "逗号分隔" })}
+        ${configInput("素材目录", `sources.${category}.directory`, group.directory, { wide: true })}
+        ${category === "end_card" ? configInput("静态尾帧时长", `sources.${category}.image_duration_seconds`, group.image_duration_seconds, { type: "number", hint: "秒" }) : ""}
+      </div>
+    </div>`).join("");
+
+  const overlay = config.benefit_overlays;
+  const output = config.output;
+  const batch = config.batch;
+  $("#visualConfigEditor").innerHTML = `
+    <details class="config-section" open>
+      <summary>基础信息 <small>名称、主目录与时间线</small></summary>
+      <div class="config-section-body config-form-grid">
+        ${configInput("配置 ID", "id", config.id, { hint: "不可修改" })}
+        ${configInput("配置名称", "name", config.name)}
+        ${configSwitch("启用此配置", "enabled", config.enabled, "配置状态")}
+        ${configInput("时间线顺序", "timeline", config.timeline, { type: "list", hint: "逗号分隔" })}
+        ${configInput("主素材根目录", "source_root", config.source_root, { wide: true })}
+        ${configTextarea("配置说明", "description", config.description)}
+      </div>
+    </details>
+
+    <details class="config-section" open>
+      <summary>视频素材 <small>前贴、引子、利益点视频、结尾和尾帧</small></summary>
+      <div class="config-section-body">${sourceCards}</div>
+    </details>
+
+    <details class="config-section" open>
+      <summary>利益点图片 <small>最高图层叠加设置</small></summary>
+      <div class="config-section-body config-form-grid three">
+        ${configSelect("使用方式", "benefit_overlays.mode", overlay.mode, modeChoices)}
+        ${configInput("默认权重", "benefit_overlays.default_weight", overlay.default_weight, { type: "number" })}
+        ${configInput("支持格式", "benefit_overlays.extensions", overlay.extensions, { type: "list" })}
+        ${configInput("图片目录", "benefit_overlays.directory", overlay.directory, { wide: true })}
+        ${configSelect("缩放方式", "benefit_overlays.placement.scale_mode", overlay.placement.scale_mode, [["original", "保持原尺寸"], ["fit", "等比适配画布"], ["stretch", "拉伸铺满"]])}
+        ${configInput("整体透明度", "benefit_overlays.placement.opacity", overlay.placement.opacity, { type: "number", hint: "0～1" })}
+        ${configSwitch("超出画布时自动缩小", "benefit_overlays.placement.shrink_if_oversized", overlay.placement.shrink_if_oversized)}
+        ${configInput("横向位置 X", "benefit_overlays.placement.x", overlay.placement.x, { placeholder: "0 或 (W-w)/2" })}
+        ${configInput("纵向位置 Y", "benefit_overlays.placement.y", overlay.placement.y, { placeholder: "0 或 (H-h)/2" })}
+        ${configSelect("显示时段", "benefit_overlays.timing.scope", overlay.timing.scope, [["full", "整条成片"], ["main", "主片段"], ["benefit_video", "仅利益点视频"], ["custom", "自定义时段"]])}
+        ${configInput("自定义开始", "benefit_overlays.timing.start_seconds", overlay.timing.start_seconds, { type: "number", hint: "秒" })}
+        ${configInput("自定义结束", "benefit_overlays.timing.end_seconds", overlay.timing.end_seconds, { type: "nullable-number", hint: "留空到片尾" })}
+      </div>
+    </details>
+
+    <details class="config-section">
+      <summary>随机与产品匹配 <small>权重算法、去重和标签关联</small></summary>
+      <div class="config-section-body config-form-grid three">
+        ${configSelect("权重算法", "randomization.mode", config.randomization.mode, [["quota_shuffle", "按批次配额后洗牌"], ["independent_random", "逐条独立随机"]])}
+        ${configSelect("重复组合策略", "randomization.duplicate_policy", config.randomization.duplicate_policy, [["allow", "允许重复"], ["best_effort", "尽量去重"], ["strict", "严格禁止重复"]])}
+        ${configInput("默认随机种子", "randomization.default_seed", config.randomization.default_seed, { type: "nullable-number", hint: "留空自动" })}
+        ${configSwitch("启用产品标签匹配", "matching.enabled", config.matching.enabled)}
+        ${configSwitch("无标签素材作为通用素材", "matching.allow_untagged_as_global", config.matching.allow_untagged_as_global)}
+        ${configSelect("找不到同标签素材", "matching.on_missing_match", config.matching.on_missing_match, [["error", "阻止生成并报错"], ["fallback_global", "退回通用素材池"]])}
+      </div>
+    </details>
+
+    <details class="config-section">
+      <summary>成片输出 <small>尺寸、编码质量与文件名</small></summary>
+      <div class="config-section-body config-form-grid three">
+        ${configInput("默认输出目录", "output.directory", output.directory, { wide: true })}
+        ${configInput("宽度", "output.width", output.width, { type: "number", hint: "px" })}
+        ${configInput("高度", "output.height", output.height, { type: "number", hint: "px" })}
+        ${configInput("帧率", "output.fps", output.fps, { type: "number", hint: "fps" })}
+        ${configSelect("画面适配", "output.resize_mode", output.resize_mode, [["fit_pad", "等比缩放并补边"], ["fill_crop", "铺满并居中裁剪"], ["stretch", "直接拉伸"]])}
+        ${configInput("补边颜色", "output.background_color", output.background_color)}
+        ${configInput("视频编码器", "output.video_codec", output.video_codec)}
+        ${configSelect("编码速度", "output.video_preset", output.video_preset, [["ultrafast", "ultrafast（最快）"], ["veryfast", "veryfast"], ["fast", "fast"], ["medium", "medium（推荐）"], ["slow", "slow（更省体积）"]])}
+        ${configInput("画质 CRF", "output.crf", output.crf, { type: "number", hint: "越低越清晰" })}
+        ${configInput("音频码率", "output.audio_bitrate", output.audio_bitrate)}
+        ${configInput("音频采样率", "output.audio_sample_rate", output.audio_sample_rate, { type: "number" })}
+        ${configSelect("声道", "output.audio_channels", String(output.audio_channels), [["1", "单声道"], ["2", "双声道"]])}
+        ${configInput("文件名模板", "output.filename_template", output.filename_template, { wide: true })}
+        ${configSelect("重名处理", "output.collision_policy", output.collision_policy, [["increment", "自动递增"], ["error", "报错"], ["overwrite", "覆盖"]])}
+        ${configSwitch("启用 Faststart", "output.faststart", output.faststart)}
+      </div>
+    </details>
+
+    <details class="config-section">
+      <summary>批处理与扫描 <small>默认数量、并发和文件过滤</small></summary>
+      <div class="config-section-body config-form-grid three">
+        ${configInput("默认生成数量", "batch.default_count", batch.default_count, { type: "number" })}
+        ${configInput("单批最大数量", "batch.max_count", batch.max_count, { type: "number" })}
+        ${configInput("并发任务", "batch.concurrency", batch.concurrency, { type: "number" })}
+        ${configInput("失败重试次数", "batch.retry_count", batch.retry_count, { type: "number" })}
+        ${configInput("最小剩余空间", "batch.minimum_free_space_gb", batch.minimum_free_space_gb, { type: "number", hint: "GB" })}
+        ${configSwitch("递归扫描子目录", "scanner.recursive", config.scanner.recursive)}
+        ${configSwitch("忽略隐藏文件", "scanner.ignore_hidden_files", config.scanner.ignore_hidden_files)}
+        ${configInput("忽略文件前缀", "scanner.ignore_prefixes", config.scanner.ignore_prefixes, { type: "list" })}
+        ${configInput("忽略文件名", "scanner.ignore_names", config.scanner.ignore_names, { type: "list" })}
+      </div>
+    </details>`;
+
+  const idInput = $('[data-config-path="id"]');
+  if (idInput) idInput.disabled = true;
+}
+
+function collectVisualConfig() {
+  const draft = structuredClone(state.configDraft);
+  $$('[data-config-path]').forEach(input => {
+    const type = input.dataset.configType;
+    let value;
+    if (type === "boolean") value = input.checked;
+    else if (type === "number") value = Number(input.value);
+    else if (type === "nullable-number") value = input.value.trim() === "" ? null : Number(input.value);
+    else if (type === "list") value = input.value.split(",").map(item => item.trim()).filter(Boolean);
+    else value = input.value;
+    setConfigPath(draft, input.dataset.configPath, value);
+  });
+  draft.output.audio_channels = Number(draft.output.audio_channels);
+  return draft;
+}
+
+function setConfigPath(target, path, value) {
+  const parts = path.split(".");
+  const leaf = parts.pop();
+  let cursor = target;
+  for (const part of parts) cursor = cursor[part];
+  cursor[leaf] = value;
+}
 async function cloneConfig() {
   const suggestedId = `${state.configId}-copy`;
   const newId = window.prompt("新配置 ID（小写英文、数字、短横线）", suggestedId);
@@ -293,7 +467,12 @@ async function cloneConfig() {
 async function saveConfig() {
   const button = $("#saveConfigBtn"); button.disabled = true; button.textContent = "校验中…";
   try {
-    await api(`/configs/${state.configId}`, { method: "PUT", body: JSON.stringify({ yaml_text: $("#yamlEditor").value }) });
+    if (state.configMode === "visual") {
+      const config = collectVisualConfig();
+      await api(`/configs/${state.configId}/structured`, { method: "PUT", body: JSON.stringify({ config }) });
+    } else {
+      await api(`/configs/${state.configId}`, { method: "PUT", body: JSON.stringify({ yaml_text: $("#yamlEditor").value }) });
+    }
     closeConfig(); toast("配置已保存并备份"); await loadConfigs(state.configId);
   } catch (error) { toast(error.message, true); }
   finally { button.disabled = false; button.textContent = "校验并保存"; }
