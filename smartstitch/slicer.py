@@ -66,8 +66,12 @@ class TimelineSlicer:
         if len(assignments) != len(request.assignments):
             raise SliceError("同一片段不能重复指定入库类别")
         expected_indexes = {int(segment["index"]) for segment in segments}
-        if set(assignments) != expected_indexes:
-            raise SliceError("必须为每个审核片段指定入库类别")
+        unknown_indexes = set(assignments) - expected_indexes
+        if unknown_indexes:
+            raise SliceError("待切片清单包含不存在的片段")
+        selected_segments = [
+            segment for segment in segments if int(segment["index"]) in assignments
+        ]
 
         config = self.library_service.config_store.load(request.config_id)
         if (
@@ -139,7 +143,7 @@ class TimelineSlicer:
             "manifest_path": str(manifest_path),
         }
         source_stem = _safe_stem(source.stem)
-        for segment in segments:
+        for segment in selected_segments:
             index = int(segment["index"])
             category = assignments[index]
             start_frame = int(segment["start_frame"])

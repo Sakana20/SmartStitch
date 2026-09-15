@@ -110,6 +110,38 @@ def test_timeline_slicer_exports_every_segment_and_manifest(tmp_path):
     assert len([command for command in commands if command[0] == "ffmpeg"]) == 3
 
 
+def test_timeline_slicer_exports_only_confirmed_subset(tmp_path):
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        if command[0] == "ffmpeg":
+            Path(command[-1]).write_bytes(b"rendered")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"streams": [{"codec_type": "video"}]}),
+            stderr="",
+        )
+
+    slicer, analysis_id, review_revision, config_hash = setup_slicer(tmp_path, runner)
+    result = slicer.export(
+        TimelineSliceRequest(
+            analysis_id=analysis_id,
+            config_id="slice-library",
+            review_revision=review_revision,
+            current_config_hash=config_hash,
+            client_request_id="slice-request-subset",
+            assignments=[{"segment_index": 2, "category": "hook"}],
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["success_count"] == 1
+    assert [item["segment_index"] for item in result["items"]] == [2]
+    assert len([command for command in commands if command[0] == "ffmpeg"]) == 1
+
+
 def test_timeline_slicer_continues_after_one_segment_fails(tmp_path):
     ffmpeg_count = 0
 

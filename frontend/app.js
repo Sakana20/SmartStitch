@@ -32,6 +32,7 @@ const state = {
     reviewSaved: false,
     reviewRevision: null,
     selectedSegmentId: null,
+    queuedSegmentIds: [],
     segmentCategories: {},
     sliceTargets: [],
   },
@@ -160,8 +161,7 @@ function bindTimelineEvents() {
   $("#nextFrameBtn").addEventListener("click", () => stepTimelineFrame(1));
   $("#addBreakpointBtn").addEventListener("click", addBreakpointAtPlayhead);
   $("#deleteBreakpointBtn").addEventListener("click", deleteSelectedBreakpoint);
-  $("#saveTimelineBtn").addEventListener("click", saveTimelineDecision);
-  $("#exportTimelineSlicesBtn").addEventListener("click", exportTimelineSlices);
+  $("#sliceTimelineBtn").addEventListener("click", exportTimelineSlices);
   $("#selectedFrameInput").addEventListener("change", event => moveSelectedBreakpoint(Number(event.target.value)));
   const video = $("#timelineVideo");
   video.addEventListener("play", startTimelineVideoSync);
@@ -242,6 +242,7 @@ async function analyzeTimeline() {
     state.timeline.reviewSaved = false;
     state.timeline.reviewRevision = null;
     state.timeline.selectedSegmentId = null;
+    state.timeline.queuedSegmentIds = [];
     state.timeline.segmentCategories = {};
     stopTimelineVideoSync();
     const video = $("#timelineVideo");
@@ -278,19 +279,24 @@ function renderTimeline() {
     const width = timelineXForFrame(segment.endFrame) - left;
     const category = state.timeline.segmentCategories[segment.id] || "pending";
     const selected = state.timeline.selectedSegmentId === segment.id ? "selected" : "";
-    return `<span class="${segmentCategoryClass(category)} ${selected}" style="left:${left}px;width:${width}px" title="片段 ${segment.index} · ${escapeHtml(categoryLabelForTimeline(category))} · ${segment.durationFrames} 帧"></span>`;
+    const queued = state.timeline.queuedSegmentIds.includes(segment.id) ? "queued" : "";
+    return `<button class="timeline-segment ${segmentCategoryClass(category)} ${selected} ${queued}" type="button" data-timeline-segment="${segment.id}" style="left:${left}px;width:${width}px" title="加入片段 ${segment.index} · ${escapeHtml(categoryLabelForTimeline(category))} · ${segment.durationFrames} 帧" aria-label="加入片段 ${segment.index}"></button>`;
   }).join("");
   $("#timelineMarkers").innerHTML = state.timeline.breakpoints.map(point => `
     <button class="timeline-marker ${point.frame_index === state.timeline.selectedFrame ? "selected" : ""} ${point.frame_index === state.timeline.snapTargetFrame ? "snap-target" : ""} ${point.review_status === "machine_suggested" ? "machine" : "human"}"
       style="left:${timelineXForFrame(point.frame_index)}px" data-frame="${point.frame_index}"
       title="第 ${point.frame_index} 帧 · ${timelineReasonLabel(point)}"><i></i></button>`).join("");
+  $$('[data-timeline-segment]').forEach(segment => {
+    segment.addEventListener("click", () => selectTimelineSegment(segment.dataset.timelineSegment));
+  });
   $$(".timeline-marker").forEach(marker => bindTimelineMarker(marker));
   $("#timelineMeta").innerHTML = `<span>${escapeHtml(analysis.source_name)}</span><span>${analysis.width}×${analysis.height}</span><span>${analysis.fps.toFixed(3)} fps</span><span>${analysis.frame_count} 帧</span><span>${formatPreciseTime(analysis.duration)}</span>`;
-  const assignedCount = segments.filter(segment => state.timeline.segmentCategories[segment.id]).length;
-  $("#timelineBreakpointSummary").textContent = `${segments.length} 个片段 · ${state.timeline.breakpoints.length} 个断点 · ${assignedCount} 个已分类 · ${segments.length - assignedCount} 个待分类`;
+  const queuedCount = state.timeline.queuedSegmentIds.length;
+  const classifiedCount = state.timeline.queuedSegmentIds.filter(segmentId => state.timeline.segmentCategories[segmentId]).length;
+  $("#timelineBreakpointSummary").textContent = `${segments.length} 个可选片段 · ${state.timeline.breakpoints.length} 个断点 · ${queuedCount} 个已标记 · ${classifiedCount} 个已分类`;
   renderTimelineRuler();
   renderSegmentList();
-  renderSliceAssignments();
+  renderSliceControls();
   syncSelectedBreakpointControls();
   renderTimelinePlayhead();
   updateTimelineSnapVisual();
@@ -739,10 +745,11 @@ function timelineReviewChanged() {
   state.timeline.segmentCategories = Object.fromEntries(
     Object.entries(state.timeline.segmentCategories).filter(([segmentId]) => validSegmentIds.has(segmentId)),
   );
+  state.timeline.queuedSegmentIds = state.timeline.queuedSegmentIds.filter(segmentId => validSegmentIds.has(segmentId));
   if (!validSegmentIds.has(state.timeline.selectedSegmentId)) {
     state.timeline.selectedSegmentId = null;
   }
-  $("#timelineSliceResult").textContent = "断点已变更，请重新保存审核后入库";
+  $("#timelineSliceResult").textContent = "断点已变更，切片时将保存最新审核版本";
   $("#timelineSliceResult").className = "timeline-slice-result";
 }
 
@@ -815,7 +822,6 @@ function timelineSegments() {
 
 function timelineCategoryOptions() {
   const options = [
-    { category: "skip", label: "不入库" },
     { category: "unclassified", label: "未归类" },
   ];
   if (!state.config) return options;
@@ -853,6 +859,9 @@ function segmentCategoryClass(category) {
 function selectTimelineSegment(segmentId, scrollIntoView = false) {
   const segment = timelineSegments().find(item => item.id === segmentId);
   if (!segment) return;
+  if (!state.timeline.queuedSegmentIds.includes(segment.id)) {
+    state.timeline.queuedSegmentIds.push(segment.id);
+  }
   state.timeline.selectedSegmentId = segment.id;
   state.timeline.selectedFrame = null;
   $("#timelineVideo").pause();
@@ -868,9 +877,16 @@ function selectTimelineSegment(segmentId, scrollIntoView = false) {
 
 function renderSegmentList() {
   const analysis = state.timeline.analysis;
-  const segments = timelineSegments();
+  const allSegments = timelineSegments();
+  const queuedSegments = state.timeline.queuedSegmentIds.map(segmentId => (
+    allSegments.find(segment => segment.id === segmentId)
+  )).filter(Boolean);
+  if (!queuedSegments.length) {
+    $("#timelineSegmentList").innerHTML = '<div class="breakpoint-empty">点击上方时间轴中的片段，将需要切割的条目加入这里。</div>';
+    return;
+  }
   const categoryOptions = timelineCategoryOptions();
-  $("#timelineSegmentList").innerHTML = segments.map(segment => {
+  $("#timelineSegmentList").innerHTML = queuedSegments.map(segment => {
     const selectedCategory = state.timeline.segmentCategories[segment.id] || "";
     const options = categoryOptions.map(option => (
       `<option value="${escapeHtml(option.category)}" ${selectedCategory === option.category ? "selected" : ""}>${escapeHtml(option.label)}</option>`
@@ -883,15 +899,16 @@ function renderSegmentList() {
         <option value="" disabled ${selectedCategory ? "" : "selected"}>选择类型</option>${options}
       </select>
       <i>结束：${escapeHtml(segment.endReason)}</i>
+      <button class="segment-remove-button" type="button" data-remove-segment="${segment.id}" aria-label="移除片段 ${segment.index}">移除</button>
     </div>`;
   }).join("");
   $$(".segment-row").forEach(row => {
     row.addEventListener("click", event => {
-      if (event.target.closest("select")) return;
+      if (event.target.closest("select, button")) return;
       selectTimelineSegment(row.dataset.segmentId);
     });
     row.addEventListener("keydown", event => {
-      if ((event.key === "Enter" || event.key === " ") && !event.target.closest("select")) {
+      if ((event.key === "Enter" || event.key === " ") && !event.target.closest("select, button")) {
         event.preventDefault();
         selectTimelineSegment(row.dataset.segmentId);
       }
@@ -905,14 +922,22 @@ function renderSegmentList() {
       renderTimeline();
     });
   });
+  $$('[data-remove-segment]').forEach(button => {
+    button.addEventListener("click", event => {
+      event.stopPropagation();
+      const segmentId = event.currentTarget.dataset.removeSegment;
+      state.timeline.queuedSegmentIds = state.timeline.queuedSegmentIds.filter(id => id !== segmentId);
+      delete state.timeline.segmentCategories[segmentId];
+      if (state.timeline.selectedSegmentId === segmentId) state.timeline.selectedSegmentId = null;
+      renderTimeline();
+    });
+  });
 }
 
-function renderSliceAssignments() {
+function renderSliceControls() {
   const analysis = state.timeline.analysis;
-  const container = $("#timelineSliceAssignments");
-  const button = $("#exportTimelineSlicesBtn");
+  const button = $("#sliceTimelineBtn");
   if (!analysis) {
-    container.innerHTML = '<div class="breakpoint-empty">分析视频后，已归类片段会出现在这里。</div>';
     button.disabled = true;
     return;
   }
@@ -923,74 +948,56 @@ function renderSliceAssignments() {
   } else if (healthyLibrary) {
     $("#timelineSliceLibrary").textContent = `入库到：${state.config.name} · ${state.library.root_path}`;
   } else {
-    $("#timelineSliceLibrary").textContent = "已归类；执行切片前需选择或修复 SmartStitch 标准视频库";
+    $("#timelineSliceLibrary").textContent = "切片前需选择或修复 SmartStitch 标准视频库";
   }
-
-  const segments = timelineSegments();
-  const optionOrder = [
-    { category: "pending", label: "待分类" },
-    ...timelineCategoryOptions(),
-  ];
-  const groups = new Map(optionOrder.map(option => [option.category, { ...option, items: [] }]));
-  segments.forEach(segment => {
-    const category = state.timeline.segmentCategories[segment.id] || "pending";
-    if (!groups.has(category)) {
-      groups.set(category, { category, label: categoryLabelForTimeline(category), items: [] });
-    }
-    groups.get(category).items.push(segment);
-  });
-  container.innerHTML = [...groups.values()].filter(group => group.items.length).map(group => `
-    <section class="slice-category-group ${group.category === "pending" ? "pending" : ""}">
-      <div class="slice-category-heading"><strong>${escapeHtml(group.label)}</strong><span>${group.items.length}</span></div>
-      <div class="slice-category-items">${group.items.map(segment => `
-        <button class="slice-category-item" type="button" data-queued-segment="${segment.id}">
-          <strong>片段 ${String(segment.index).padStart(2, "0")}</strong>
-          <small>${frameTimecode(segment.startFrame, analysis.fps)} → ${frameTimecode(segment.endFrame, analysis.fps)} · ${formatPreciseTime(segment.durationFrames / analysis.fps)}</small>
-        </button>`).join("")}</div>
-    </section>`).join("");
-  $$("[data-queued-segment]").forEach(item => item.addEventListener("click", () => {
-    selectTimelineSegment(item.dataset.queuedSegment, true);
-  }));
-
-  const pendingCount = segments.filter(segment => !state.timeline.segmentCategories[segment.id]).length;
-  const cuttableCount = segments.filter(segment => {
-    const category = state.timeline.segmentCategories[segment.id];
-    return category && category !== "skip";
-  }).length;
-  button.disabled = !state.timeline.reviewSaved
-    || !state.timeline.reviewRevision
-    || pendingCount > 0
-    || !healthyLibrary
-    || cuttableCount === 0;
+  const queuedCount = state.timeline.queuedSegmentIds.length;
+  const allClassified = queuedCount > 0 && state.timeline.queuedSegmentIds.every(segmentId => (
+    Boolean(state.timeline.segmentCategories[segmentId])
+  ));
+  button.disabled = !healthyLibrary || !allClassified;
 }
 
 async function exportTimelineSlices() {
   const analysis = state.timeline.analysis;
   if (!analysis || !state.configId) return;
-  if (!state.timeline.reviewSaved) return toast("请先保存当前审核断点", true);
-  if (!state.timeline.reviewRevision) return toast("审核版本缺失，请重新保存断点", true);
   if (!state.library?.managed || state.library.health !== "healthy") {
     return toast("请先选择或修复 SmartStitch 标准视频库", true);
   }
   const segments = timelineSegments();
-  const pending = segments.find(segment => !state.timeline.segmentCategories[segment.id]);
-  if (pending) {
-    selectTimelineSegment(pending.id, true);
-    return toast(`请先为片段 ${pending.index} 选择类型`, true);
+  const queuedSegments = state.timeline.queuedSegmentIds.map(segmentId => (
+    segments.find(segment => segment.id === segmentId)
+  )).filter(Boolean);
+  if (!queuedSegments.length) return toast("请先在时间轴标记至少一个片段", true);
+  const unclassified = queuedSegments.find(segment => !state.timeline.segmentCategories[segment.id]);
+  if (unclassified) {
+    selectTimelineSegment(unclassified.id, true);
+    return toast(`请先为片段 ${unclassified.index} 选择类型`, true);
   }
-  const assignments = segments.map(segment => ({
+  const assignments = queuedSegments.map(segment => ({
     segment_index: segment.index,
     category: state.timeline.segmentCategories[segment.id],
   }));
-  const cuttableCount = assignments.filter(item => item.category !== "skip").length;
-  if (!cuttableCount) return toast("至少需要一个非“不入库”片段", true);
-  const button = $("#exportTimelineSlicesBtn");
+  const cuttableCount = assignments.length;
+  const button = $("#sliceTimelineBtn");
   const resultElement = $("#timelineSliceResult");
   button.disabled = true;
-  button.textContent = "正在批量切割…";
-  resultElement.textContent = `正在用 FFmpeg 切割 ${cuttableCount} 个片段，请稍候…`;
+  button.textContent = "正在保存断点…";
+  resultElement.textContent = `正在确认 ${cuttableCount} 个片段并保存断点…`;
   resultElement.className = "timeline-slice-result";
   try {
+    const review = await api("/timeline/decisions", {
+      method: "PUT",
+      body: JSON.stringify({
+        analysis_id: analysis.analysis_id,
+        frame_indexes: state.timeline.breakpoints.map(point => point.frame_index),
+      }),
+    });
+    state.timeline.breakpoints.forEach(point => { point.review_status = "human_confirmed"; });
+    state.timeline.reviewSaved = true;
+    state.timeline.reviewRevision = review.review_revision;
+    setTimelineStatus("正在切片", "running");
+    button.textContent = "正在批量切割…";
+    resultElement.textContent = `正在用 FFmpeg 切割 ${cuttableCount} 个已标记片段，请稍候…`;
     const result = await api("/timeline/slices", {
       method: "POST",
       body: JSON.stringify({
@@ -1002,17 +1009,19 @@ async function exportTimelineSlices() {
         client_request_id: clientRequestId(),
       }),
     });
-    resultElement.textContent = `入库完成：${result.success_count} 个成功，${result.failure_count} 个失败，${result.skipped_count || 0} 个不入库 · 清单 ${result.manifest_path}`;
+    resultElement.textContent = `入库完成：${result.success_count} 个成功，${result.failure_count} 个失败 · 清单 ${result.manifest_path}`;
     resultElement.className = `timeline-slice-result ${result.failure_count ? "error" : "success"}`;
-    toast(result.failure_count ? "切片部分完成，请查看清单" : "全部片段已切割并入库", Boolean(result.failure_count));
+    setTimelineStatus(result.failure_count ? "部分切片失败" : "切片完成", result.failure_count ? "danger" : "success");
+    toast(result.failure_count ? "切片部分完成，请查看清单" : "列表片段均已切割并入库", Boolean(result.failure_count));
     await scanAssets(false);
   } catch (error) {
     resultElement.textContent = error.message;
     resultElement.className = "timeline-slice-result error";
+    setTimelineStatus("切片失败", "danger");
     toast(error.message, true);
   } finally {
     button.textContent = "切割并入库";
-    renderSliceAssignments();
+    renderSliceControls();
   }
 }
 
@@ -1026,30 +1035,6 @@ function timelineReasonLabel(point) {
     human_adjusted: "人工调整",
   };
   return (point.reasons || []).map(reason => labels[reason] || reason).join(" + ") || "机器建议";
-}
-
-async function saveTimelineDecision() {
-  const analysis = state.timeline.analysis;
-  if (!analysis) return;
-  const button = $("#saveTimelineBtn");
-  button.disabled = true;
-  button.textContent = "保存中…";
-  try {
-    const result = await api("/timeline/decisions", {
-      method: "PUT",
-      body: JSON.stringify({
-        analysis_id: analysis.analysis_id,
-        frame_indexes: state.timeline.breakpoints.map(point => point.frame_index),
-      }),
-    });
-    state.timeline.breakpoints.forEach(point => { point.review_status = "human_confirmed"; });
-    state.timeline.reviewSaved = true;
-    state.timeline.reviewRevision = result.review_revision;
-    setTimelineStatus("已保存审核", "success");
-    renderTimeline();
-    toast("审核断点已按帧保存");
-  } catch (error) { toast(error.message, true); }
-  finally { button.disabled = false; button.textContent = "保存人工审核"; }
 }
 
 function frameTimecode(frame, fps) {
@@ -1120,6 +1105,7 @@ async function selectConfig(id) {
       state.timeline.sliceTargets = [];
     }
     state.timeline.segmentCategories = {};
+    state.timeline.queuedSegmentIds = [];
     state.timeline.selectedSegmentId = null;
     $("#heroConfigName").textContent = state.config.name;
     $("#countInput").value = state.config.batch.default_count;
