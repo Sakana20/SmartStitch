@@ -33,7 +33,7 @@ from .models import (
 )
 from .planner import PlanError, build_plan
 from .scanner import probe_config_audio, scan_config
-from .slicer import SliceError, TimelineSlicer
+from .slicer import SliceConflictError, SliceError, TimelineSlicer
 from .timeline import TimelineAnalyzer, TimelineError
 
 
@@ -285,6 +285,8 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
     def export_timeline_slices(request: TimelineSliceRequest) -> dict[str, object]:
         try:
             return timeline_slicer.export(request)
+        except SliceConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
         except (SliceError, TimelineError, LibraryError, ConfigError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
 

@@ -4,6 +4,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from smartstitch.api import create_app
+from smartstitch.slicer import SliceConflictError
 
 
 def write_config_template(config_directory, tmp_path):
@@ -171,6 +172,30 @@ def test_directory_picker_api_returns_selected_path(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"cancelled": False, "path": str(tmp_path)}
+
+
+def test_timeline_slice_conflict_returns_409(tmp_path, monkeypatch):
+    (tmp_path / "config").mkdir()
+    app = create_app(tmp_path)
+
+    def reject_stale_review(_request):
+        raise SliceConflictError("断点审核已变更")
+
+    monkeypatch.setattr(app.state.timeline_slicer, "export", reject_stale_review)
+    response = TestClient(app).post(
+        "/api/v1/timeline/slices",
+        json={
+            "analysis_id": "a" * 24,
+            "config_id": "example",
+            "review_revision": "b" * 64,
+            "current_config_hash": "c" * 64,
+            "assignments": [{"segment_index": 1, "category": "hook"}],
+            "client_request_id": "slice-request-conflict",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "断点审核已变更"
 
 
 def test_delete_job_record_keeps_active_jobs_protected(tmp_path):

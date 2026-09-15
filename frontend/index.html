@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260915-6" />
+    <link rel="stylesheet" href="/styles.css?v=20260915-7" />
   </head>
   <body>
     <div class="noise"></div>
@@ -178,16 +178,16 @@
             <p class="timeline-gesture-hint">悬停时间线按空格播放/暂停 · Option + 滚轮缩放 · Shift + 拖动吸附</p>
 
             <div class="timeline-review-heading">
-              <div><strong>断点列表</strong><small id="timelineBreakpointSummary"></small></div>
+              <div><strong>片段列表</strong><small id="timelineBreakpointSummary"></small></div>
               <button id="saveTimelineBtn" class="button primary small" type="button">保存人工审核</button>
             </div>
-            <div id="timelineBreakpointList" class="breakpoint-list"></div>
+            <div id="timelineSegmentList" class="segment-list"></div>
             <div class="timeline-export-panel">
               <div class="timeline-review-heading">
                 <div><strong>批量切片入库</strong><small id="timelineSliceLibrary">请先选择受管视频库</small></div>
                 <button id="exportTimelineSlicesBtn" class="button primary small" type="button" disabled>切割并入库</button>
               </div>
-              <p class="timeline-export-help">为每个片段指定素材池。默认放入“未归类”，系统不会猜测片段用途。入库前必须先保存审核断点。</p>
+              <p class="timeline-export-help">在上方片段行选择类型后，将实时归入这里的待执行清单。只有点击“切割并入库”才会启动后端 FFmpeg。</p>
               <div id="timelineSliceAssignments" class="slice-assignment-list"></div>
               <div id="timelineSliceResult" class="timeline-slice-result"></div>
             </div>
@@ -303,6 +303,6 @@
 
     <div id="toast" class="toast" role="status"></div>
     <script src="/timeline-math.js?v=20260915-4" defer></script>
-    <script src="/app.js?v=20260915-12" defer></script>
+    <script src="/app.js?v=20260915-13" defer></script>
   </body>
 </html>

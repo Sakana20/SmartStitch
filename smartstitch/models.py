@@ -389,6 +389,8 @@ class SliceAssignment(BaseModel):
 class TimelineSliceRequest(BaseModel):
     analysis_id: str = Field(pattern=r"^[a-f0-9]{24}$")
     config_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
+    review_revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+    current_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     assignments: list[SliceAssignment] = Field(min_length=1)
     client_request_id: str = Field(min_length=8, max_length=128)
 

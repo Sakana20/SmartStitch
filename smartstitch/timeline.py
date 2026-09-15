@@ -175,6 +175,7 @@ class TimelineAnalyzer:
         if path.suffix.lower() not in VIDEO_EXTENSIONS:
             raise TimelineError(f"不支持的视频格式: {path.suffix or '无扩展名'}")
         metadata = _probe(path)
+        source_stat = path.stat()
         scene_times = _scene_times(path, scene_threshold)
         silence_times = _silence_end_times(path, silence_duration_seconds)
         breakpoints = merge_breakpoints(
@@ -192,6 +193,10 @@ class TimelineAnalyzer:
             "analysis_id": analysis_id,
             "source_path": str(path),
             "source_name": path.name,
+            "source_fingerprint": {
+                "size_bytes": source_stat.st_size,
+                "modified_at_ns": source_stat.st_mtime_ns,
+            },
             "created_at": datetime.now(UTC).isoformat(),
             **metadata,
             "settings": {
@@ -220,7 +225,18 @@ class TimelineAnalyzer:
         normalized = sorted(set(frame_indexes))
         if any(frame <= 0 or frame >= frame_count for frame in normalized):
             raise TimelineError("断点必须位于视频首尾帧之间")
+        revision_payload = json.dumps(
+            {
+                "analysis_id": analysis_id,
+                "source_fingerprint": data.get("source_fingerprint"),
+                "frame_indexes": normalized,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
         data["review"] = {
+            "review_revision": hashlib.sha256(revision_payload).hexdigest(),
             "saved_at": datetime.now(UTC).isoformat(),
             "breakpoints": [
                 {
@@ -233,6 +249,7 @@ class TimelineAnalyzer:
             "segments": [
                 {
                     "index": index + 1,
+                    "segment_id": f"f{start:09d}-f{end:09d}",
                     "start_frame": start,
                     "end_frame": end,
                     "start_seconds": round(start / fps, 6),

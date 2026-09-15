@@ -33,14 +33,20 @@ def test_save_decision_persists_frame_exact_segments(tmp_path):
     result = analyzer.save_decision(analysis_id, [125, 25, 125])
 
     assert [point["frame_index"] for point in result["breakpoints"]] == [25, 125]
+    assert len(result["review_revision"]) == 64
     assert result["segments"] == [
-        {"index": 1, "start_frame": 0, "end_frame": 25, "start_seconds": 0.0, "end_seconds": 1.0},
-        {"index": 2, "start_frame": 25, "end_frame": 125, "start_seconds": 1.0, "end_seconds": 5.0},
-        {"index": 3, "start_frame": 125, "end_frame": 250, "start_seconds": 5.0, "end_seconds": 10.0},
+        {"index": 1, "segment_id": "f000000000-f000000025", "start_frame": 0, "end_frame": 25, "start_seconds": 0.0, "end_seconds": 1.0},
+        {"index": 2, "segment_id": "f000000025-f000000125", "start_frame": 25, "end_frame": 125, "start_seconds": 1.0, "end_seconds": 5.0},
+        {"index": 3, "segment_id": "f000000125-f000000250", "start_frame": 125, "end_frame": 250, "start_seconds": 5.0, "end_seconds": 10.0},
     ]
 
     saved = json.loads((tmp_path / f"{analysis_id}.json").read_text(encoding="utf-8"))
     assert saved["review"]["breakpoints"][0]["review_status"] == "human_confirmed"
+
+    repeated = analyzer.save_decision(analysis_id, [25, 125])
+    changed = analyzer.save_decision(analysis_id, [25, 150])
+    assert repeated["review_revision"] == result["review_revision"]
+    assert changed["review_revision"] != result["review_revision"]
 
 
 def test_save_decision_rejects_first_and_last_frame(tmp_path):
