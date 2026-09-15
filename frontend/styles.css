@@ -149,18 +149,18 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .timeline-zoom-control output { min-width: 52px; font: 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .timeline-viewport { position: relative; overflow-x: auto; overflow-y: hidden; border: 1px solid rgba(29,92,67,.16); border-radius: 12px; background: #dfe7e1; scrollbar-color: #a9b8ae #edf0eb; }
 .timeline-canvas { position: relative; min-width: 100%; height: 112px; user-select: none; }
-.timeline-ruler-bar { position: relative; height: 42px; color: var(--muted); background: #edf0eb; cursor: pointer; touch-action: none; overflow: hidden; }
+.timeline-ruler-bar { position: relative; height: 42px; color: var(--muted); background: #edf0eb; cursor: ew-resize; touch-action: none; overflow: hidden; }
 .timeline-ticks { position: absolute; inset: 0; pointer-events: none; }
 .timeline-ticks i { position: absolute; bottom: 0; width: 1px; background: #9ca8a0; font-style: normal; }
 .timeline-ticks i.minor { height: 9px; opacity: .65; }
 .timeline-ticks i.major { height: 20px; background: #718078; }
 .timeline-ticks i span { position: absolute; left: 5px; bottom: 20px; width: max-content; color: #68756e; font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.timeline-track { position: relative; height: 70px; border-top: 1px solid rgba(29,92,67,.13); background: #dfe7e1; cursor: pointer; touch-action: none; }
+.timeline-track { position: relative; height: 70px; border-top: 1px solid rgba(29,92,67,.13); background: #dfe7e1; cursor: default; touch-action: none; }
 .timeline-track.is-dragging, .timeline-ruler-bar:active { cursor: ew-resize; }
 .timeline-segments { position: absolute; inset: 8px 0; overflow: hidden; }
 .timeline-segments span { position: absolute; top: 0; bottom: 0; border-right: 2px solid #f8f8f4; background: rgba(71,132,98,.34); }
 .timeline-segments span:nth-child(even) { background: rgba(220,156,61,.34); }
-.timeline-playhead { position: absolute; z-index: 5; top: 0; bottom: 0; width: 16px; margin-left: -8px; cursor: ew-resize; background: transparent; touch-action: none; }
+.timeline-playhead { position: absolute; z-index: 5; top: 0; bottom: 0; width: 16px; margin-left: -8px; pointer-events: none; background: transparent; }
 .timeline-playhead i { position: absolute; left: 7px; top: 15px; bottom: 0; width: 2px; background: #e25038; box-shadow: 0 0 0 1px rgba(255,255,255,.6); pointer-events: none; }
 .timeline-playhead::before { content: ""; position: absolute; left: 2px; top: 2px; width: 12px; height: 13px; border-radius: 2px 2px 5px 5px; background: #e25038; box-shadow: 0 2px 7px rgba(80,44,35,.18); }
 .timeline-marker { position: absolute; z-index: 3; top: 5px; bottom: 5px; width: 17px; padding: 0; margin-left: -8px; border: 0; background: transparent; cursor: ew-resize; touch-action: none; }

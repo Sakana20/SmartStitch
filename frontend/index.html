@@ -167,15 +167,15 @@
                 <div id="timelineRulerBar" class="timeline-ruler-bar" title="单击或拖动定位播放头">
                   <div id="timelineTicks" class="timeline-ticks"></div>
                 </div>
-                <div id="timelineTrack" class="timeline-track" title="单击或拖动定位；双击添加断点">
+                <div id="timelineTrack" class="timeline-track" title="拖动断点调整位置">
                   <div id="timelineSegments" class="timeline-segments"></div>
                   <div id="timelineMarkers"></div>
                 </div>
-                <div id="timelinePlayhead" class="timeline-playhead" title="拖动播放头"><i></i></div>
+                <div id="timelinePlayhead" class="timeline-playhead" aria-hidden="true"><i></i></div>
                 <div id="timelineSnapGuide" class="timeline-snap-guide hidden"><span></span></div>
               </div>
             </div>
-            <p class="timeline-gesture-hint">时间线拖动会跟随鼠标 · 按住 Shift 临时吸附断点 · 放大后可逐帧定位</p>
+            <p class="timeline-gesture-hint">悬停时间线按空格播放/暂停 · Option + 滚轮缩放 · Shift + 拖动吸附</p>
 
             <div class="timeline-review-heading">
               <div><strong>断点列表</strong><small id="timelineBreakpointSummary"></small></div>
@@ -278,6 +278,6 @@
 
     <div id="toast" class="toast" role="status"></div>
     <script src="/timeline-math.js?v=20260915-2" defer></script>
-    <script src="/app.js?v=20260915-3" defer></script>
+    <script src="/app.js?v=20260915-7" defer></script>
   </body>
 </html>

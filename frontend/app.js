@@ -26,6 +26,7 @@ const state = {
     pixelsPerSecond: 30,
     shiftPressed: false,
     dragAnimationFrameId: null,
+    pointerOverTimeline: false,
   },
 };
 
@@ -138,23 +139,20 @@ function bindTimelineEvents() {
   video.addEventListener("timeupdate", syncTimelineFromVideo);
   video.addEventListener("seeking", syncTimelineFromVideo);
   video.addEventListener("seeked", syncTimelineFromVideo);
-  [$("#timelineRulerBar"), $("#timelineTrack"), $("#timelinePlayhead")].forEach(surface => {
-    surface.addEventListener("pointerdown", event => {
-      if (event.target.closest(".timeline-marker")) return;
-      const frame = event.currentTarget.id === "timelinePlayhead"
-        ? state.timeline.playheadFrame
-        : frameFromPointer(event, 0, event.shiftKey);
-      seekTimelineFrame(frame, "timeline_scrub");
-      beginTimelineDrag(event, { kind: "playhead", anchorFrame: frame });
-    });
-  });
-  $("#timelineTrack").addEventListener("dblclick", event => {
-    if (event.target.closest(".timeline-marker")) return;
-    const frame = frameFromPointer(event, 1, event.shiftKey);
+  $("#timelineRulerBar").addEventListener("pointerdown", event => {
+    const frame = frameFromPointer(event, 0, event.shiftKey);
     seekTimelineFrame(frame, "timeline_scrub");
-    addTimelineBreakpoint(frame, "human_added");
+    beginTimelineDrag(event, { kind: "playhead", anchorFrame: frame });
   });
-  $("#timelineViewport").addEventListener("scroll", renderTimelineRuler);
+  const timelineViewport = $("#timelineViewport");
+  timelineViewport.addEventListener("scroll", renderTimelineRuler);
+  timelineViewport.addEventListener("pointerenter", () => {
+    state.timeline.pointerOverTimeline = true;
+  });
+  timelineViewport.addEventListener("pointerleave", () => {
+    state.timeline.pointerOverTimeline = false;
+  });
+  timelineViewport.addEventListener("wheel", handleTimelineWheel, { passive: false });
   $("#timelineZoomInput").addEventListener("input", event => {
     setTimelineZoom(Number(event.target.value));
   });
@@ -168,6 +166,11 @@ function bindTimelineEvents() {
       scheduleTimelineDragFrame();
     }
     if (!$("#timelineView").classList.contains("active")) return;
+    if (event.code === "Space" && state.timeline.pointerOverTimeline && state.timeline.analysis) {
+      event.preventDefault();
+      if (!event.repeat) toggleTimelinePlayback();
+      return;
+    }
     if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault();
@@ -304,20 +307,47 @@ function fitTimelineToViewport(render = true) {
   if (render) renderTimeline();
 }
 
-function setTimelineZoom(pixelsPerSecond) {
+function setTimelineZoom(pixelsPerSecond, anchorClientX = null) {
   const analysis = state.timeline.analysis;
   if (!analysis) return;
   const viewport = $("#timelineViewport");
   const oldPixelsPerSecond = state.timeline.pixelsPerSecond;
-  const playheadSeconds = state.timeline.playheadFrame / analysis.fps;
-  const playheadViewportX = playheadSeconds * oldPixelsPerSecond - viewport.scrollLeft;
+  let anchorSeconds;
+  let anchorViewportX;
+  if (Number.isFinite(anchorClientX)) {
+    const viewportRect = viewport.getBoundingClientRect();
+    anchorViewportX = Math.max(0, Math.min(viewport.clientWidth, anchorClientX - viewportRect.left));
+    anchorSeconds = (viewport.scrollLeft + anchorViewportX) / oldPixelsPerSecond;
+  } else {
+    anchorSeconds = state.timeline.playheadFrame / analysis.fps;
+    anchorViewportX = anchorSeconds * oldPixelsPerSecond - viewport.scrollLeft;
+  }
   state.timeline.pixelsPerSecond = Math.max(1, Math.min(240, pixelsPerSecond));
   layoutTimelineCanvas();
   viewport.scrollLeft = Math.max(
     0,
-    playheadSeconds * state.timeline.pixelsPerSecond - playheadViewportX,
+    anchorSeconds * state.timeline.pixelsPerSecond - anchorViewportX,
   );
   renderTimeline();
+}
+
+function handleTimelineWheel(event) {
+  if (!event.altKey || !state.timeline.analysis) return;
+  event.preventDefault();
+  const delta = event.deltaY || event.deltaX;
+  if (!delta) return;
+  const zoomFactor = Math.exp(-delta * 0.003);
+  setTimelineZoom(state.timeline.pixelsPerSecond * zoomFactor, event.clientX);
+}
+
+function toggleTimelinePlayback() {
+  const video = $("#timelineVideo");
+  if (video.paused || video.ended) {
+    if (video.ended) video.currentTime = 0;
+    video.play().catch(() => toast("视频暂时无法播放", true));
+  } else {
+    video.pause();
+  }
 }
 
 function bindTimelineMarker(marker) {
@@ -337,7 +367,6 @@ function bindTimelineMarker(marker) {
     state.timeline.selectedFrame = originalFrame;
     marker.classList.add("selected");
     syncSelectedBreakpointControls();
-    seekTimelineFrame(originalFrame, "breakpoint_drag");
     beginTimelineDrag(event, { kind: "breakpoint", anchorFrame: originalFrame, point });
   });
 }
@@ -411,13 +440,14 @@ function applyTimelineDragFrame() {
     maximum,
   );
   drag.targetFrame = snappedTimelineFrame(rawFrame, pointerTimelineX, drag);
-  state.timeline.playheadFrame = drag.targetFrame;
   if (drag.kind === "breakpoint") {
     const marker = $(`.timeline-marker[data-frame="${drag.originalFrame}"]`);
     if (marker) marker.style.left = `${timelineXForFrame(drag.targetFrame)}px`;
     $("#selectedFrameInput").value = String(drag.targetFrame);
+  } else {
+    state.timeline.playheadFrame = drag.targetFrame;
+    seekTimelineFrame(drag.targetFrame, "timeline_scrub");
   }
-  seekTimelineFrame(drag.targetFrame, drag.kind === "breakpoint" ? "breakpoint_drag" : "timeline_scrub");
   updateTimelineSnapVisual();
 }
 
@@ -461,7 +491,7 @@ function finishTimelineDrag(event) {
     }
   }
 
-  seekTimelineFrame(drag.targetFrame, "lower_drag_end");
+  if (drag.kind === "playhead") seekTimelineFrame(drag.targetFrame, "timeline_drag_end");
   renderTimeline();
   if (drag.wasPlaying) $("#timelineVideo").play().catch(() => {});
 }
@@ -487,6 +517,13 @@ function timelineSnapCandidates(drag = null) {
     const current = byFrame.get(frame);
     if (!current || priority > current.priority) byFrame.set(frame, { frame, priority, label });
   };
+  if (
+    drag?.kind === "breakpoint"
+    && state.timeline.playheadFrame > 0
+    && state.timeline.playheadFrame < state.timeline.analysis.frame_count
+  ) {
+    add(state.timeline.playheadFrame, 4, "播放头");
+  }
   state.timeline.breakpoints.forEach(point => {
     if (point === drag?.point) return;
     const human = point.review_status !== "machine_suggested";
