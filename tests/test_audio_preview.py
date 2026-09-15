@@ -49,10 +49,10 @@ def test_probe_config_audio_only_accepts_configured_video(tmp_path: Path) -> Non
             "id": "preview-test",
             "name": "试听测试",
             "source_root": str(tmp_path),
-            "timeline": ["hook", "benefit_video", "ending"],
+            "timeline": ["hook", "benefit_1", "ending"],
             "sources": {
                 category: {"directory": str(source_directory)}
-                for category in ["hook", "benefit_video", "ending"]
+                for category in ["hook", "benefit_1", "ending"]
             },
             "benefit_overlays": {"mode": "disabled"},
             "output": {"directory": str(tmp_path / "output")},

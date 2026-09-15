@@ -23,7 +23,7 @@ def generate_clip(path: Path, color: str, duration: float = 0.35) -> None:
 
 def test_render_three_part_timeline(tmp_path):
     assets = {}
-    for category, color in [("hook", "red"), ("benefit_video", "green"), ("ending", "blue")]:
+    for category, color in [("hook", "red"), ("benefit_1", "green"), ("ending", "blue")]:
         path = tmp_path / f"{category}.mp4"
         generate_clip(path, color)
         probe = probe_media(path)
@@ -40,7 +40,7 @@ def test_render_three_part_timeline(tmp_path):
             "id": "render-test",
             "name": "渲染测试",
             "source_root": str(tmp_path),
-            "timeline": ["hook", "benefit_video", "ending"],
+            "timeline": ["hook", "benefit_1", "ending"],
             "sources": {category: {"directory": "."} for category in assets},
             "benefit_overlays": {"mode": "disabled", "directory": "overlay"},
             "output": {"directory": str(tmp_path / "out"), "width": 180, "height": 320, "fps": 24, "video_preset": "ultrafast"},
@@ -67,7 +67,12 @@ def test_render_three_part_timeline(tmp_path):
 
 def test_render_with_highest_layer_overlay(tmp_path):
     assets = {}
-    for category, color in [("hook", "red"), ("benefit_video", "green"), ("ending", "blue")]:
+    for category, color in [
+        ("hook", "red"),
+        ("benefit_1", "green"),
+        ("benefit_2", "white"),
+        ("ending", "blue"),
+    ]:
         path = tmp_path / f"{category}.mp4"
         generate_clip(path, color)
         assets[category] = Asset(
@@ -96,12 +101,12 @@ def test_render_with_highest_layer_overlay(tmp_path):
             "id": "overlay-test",
             "name": "叠图测试",
             "source_root": str(tmp_path),
-            "timeline": ["hook", "benefit_video", "ending"],
+            "timeline": ["hook", "benefit_1", "benefit_2", "ending"],
             "sources": {category: {"directory": "."} for category in assets},
             "benefit_overlays": {
                 "mode": "required",
                 "file": str(overlay_path),
-                "timing": {"scope": "benefit_video"},
+                "timing": {"scope": "benefits"},
                 "placement": {"x": "(W-w)/2", "y": "(H-h)/2"},
             },
             "output": {"directory": str(tmp_path / "out"), "width": 180, "height": 320, "fps": 24, "video_preset": "ultrafast"},
@@ -112,6 +117,12 @@ def test_render_with_highest_layer_overlay(tmp_path):
     output = tmp_path / "overlay-result.mp4"
     render_item(config, item, output, threading.Event())
     assert output.exists()
+
+    command, _ = build_ffmpeg_command(config, item, tmp_path / "benefits-overlay-result.mp4")
+    filter_complex = command[command.index("-filter_complex") + 1]
+    first_benefit_start = assets["hook"].probe.duration
+    last_benefit_end = first_benefit_start + assets["benefit_1"].probe.duration + assets["benefit_2"].probe.duration
+    assert f"enable='between(t,{first_benefit_start:.6f},{last_benefit_end:.6f})'" in filter_complex
 
     config.benefit_overlays.timing.scope = "full"
     command, _ = build_ffmpeg_command(config, item, tmp_path / "full-overlay-result.mp4")

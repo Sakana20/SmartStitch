@@ -26,7 +26,12 @@ def generate_clip(path: Path, color: str) -> None:
 
 def test_job_manager_writes_outputs_and_manifests(tmp_path):
     source = tmp_path / "source"
-    for category, color in [("hook", "red"), ("benefit_video", "green"), ("ending", "blue")]:
+    for category, color in [
+        ("hook", "red"),
+        ("benefit_1", "green"),
+        ("benefit_2", "white"),
+        ("ending", "blue"),
+    ]:
         generate_clip(source / category / "one.mp4", color)
     config_directory = tmp_path / "config"
     config_directory.mkdir()
@@ -34,10 +39,10 @@ def test_job_manager_writes_outputs_and_manifests(tmp_path):
         "id": "job-test",
         "name": "任务测试",
         "source_root": str(source),
-        "timeline": ["hook", "benefit_video", "ending"],
+        "timeline": ["hook", "benefit_1", "benefit_2", "ending"],
         "sources": {
             category: {"mode": "required", "directory": category, "extensions": [".mp4"]}
-            for category in ["hook", "benefit_video", "ending"]
+            for category in ["hook", "benefit_1", "benefit_2", "ending"]
         },
         "benefit_overlays": {"mode": "disabled", "directory": "overlay"},
         "output": {
@@ -68,6 +73,12 @@ def test_job_manager_writes_outputs_and_manifests(tmp_path):
     assert (output_directory / "manifest.json").exists()
     assert (output_directory / "manifest.csv").exists()
     assert (output_directory / "config.snapshot.yaml").exists()
+    manifest = yaml.safe_load((output_directory / "config.snapshot.yaml").read_text("utf-8"))
+    assert manifest["schema_version"] == 2
+    assert manifest["timeline"] == ["hook", "benefit_1", "benefit_2", "ending"]
+
+    csv_header = (output_directory / "manifest.csv").read_text("utf-8-sig").splitlines()[0]
+    assert csv_header.split(",")[2:6] == ["hook", "benefit_1", "benefit_2", "ending"]
 
     manager.delete(job["id"])
     assert manager.list_jobs() == []

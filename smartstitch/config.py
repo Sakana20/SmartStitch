@@ -86,10 +86,19 @@ class ConfigStore:
             raise ConfigError(str(exc)) from exc
 
     def save_text(self, config_id: str, request: ConfigUpdateRequest) -> AppConfig:
+        try:
+            source_data = yaml.safe_load(request.yaml_text)
+        except yaml.YAMLError as exc:
+            raise ConfigError(str(exc)) from exc
         config = self.validate_text(request.yaml_text)
         if config.id != config_id:
             raise ConfigError(f"YAML 内 id={config.id!r} 与目标配置 {config_id!r} 不一致")
-        self._atomic_save(self.path_for(config_id), request.yaml_text)
+        text = request.yaml_text
+        if not isinstance(source_data, dict) or source_data.get("schema_version", 1) != 2:
+            text = yaml.safe_dump(
+                config.model_dump(mode="json"), allow_unicode=True, sort_keys=False
+            )
+        self._atomic_save(self.path_for(config_id), text)
         return config
 
     def save_config(self, config_id: str, config: AppConfig) -> AppConfig:
@@ -106,8 +115,10 @@ class ConfigStore:
         data = yaml.safe_load(self.raw(source_id))
         data["id"] = new_id
         data["name"] = new_name
-        text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
-        config = self.validate_text(text)
+        config = self.validate_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
+        text = yaml.safe_dump(
+            config.model_dump(mode="json"), allow_unicode=True, sort_keys=False
+        )
         self._atomic_save(destination, text, backup=False)
         return config
 

@@ -35,11 +35,16 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 const categoryNames = {
   pre_roll: "前贴",
   hook: "引子",
-  benefit_video: "利益点视频",
   ending: "结尾",
   end_card: "尾帧",
   benefit_overlay: "利益点图片",
 };
+const benefitCategoryPattern = /^benefit_([1-9][0-9]*)$/;
+function isBenefitCategory(category) { return benefitCategoryPattern.test(category); }
+function categoryLabel(category) {
+  const match = category.match(benefitCategoryPattern);
+  return match ? `利益点 ${match[1]}` : (categoryNames[category] || category);
+}
 const terminalStates = new Set(["completed", "partial_failed", "failed", "cancelled", "interrupted"]);
 const configUiStoragePrefix = "smartstitch.config-ui.";
 
@@ -862,7 +867,7 @@ function renderAssetTabs() {
   if (!categories.includes(state.assetCategory)) state.assetCategory = categories[0];
   $("#assetTabs").innerHTML = categories.map(category => {
     const count = state.scan.assets[category].length;
-    return `<button class="asset-tab ${state.assetCategory === category ? "active" : ""}" data-category="${category}">${categoryNames[category] || category} · ${count}</button>`;
+    return `<button class="asset-tab ${state.assetCategory === category ? "active" : ""}" data-category="${escapeHtml(category)}">${escapeHtml(categoryLabel(category))} · ${count}</button>`;
   }).join("");
   $$(".asset-tab").forEach(button => button.addEventListener("click", () => {
     syncVisibleAssetValues(false);
@@ -938,7 +943,7 @@ async function previewPlan() {
     $("#seedInput").value = state.preview.seed;
     $("#distributionList").innerHTML = Object.entries(state.preview.distribution).filter(([, entries]) => Object.keys(entries).length).map(([category, entries]) => {
       const rows = Object.entries(entries).sort((a,b) => b[1]-a[1]).map(([name, count]) => `<div class="dist-row"><span class="dist-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span><span class="bar"><i style="width:${count/state.preview.count*100}%"></i></span><b>${count}</b></div>`).join("");
-      return `<div class="dist-group"><h4>${categoryNames[category] || category}</h4>${rows}</div>`;
+      return `<div class="dist-group"><h4>${escapeHtml(categoryLabel(category))}</h4>${rows}</div>`;
     }).join("");
     $("#previewWarnings").innerHTML = state.preview.warnings.map(warning => `<div class="warning-box">${escapeHtml(warning)}</div>`).join("");
     toast("组合计划已生成");
@@ -1009,7 +1014,14 @@ function renderJobDetail(job) {
         </div>
       </div>
     </div>` : ""}
-    <div class="item-list">${job.items.map(item => { const [itemLabel,itemCls] = statusInfo(item.status); return `<div class="item-row"><b>${String(item.index).padStart(2,"0")}</b><div><strong>${escapeHtml(item.output_name)}</strong><div class="mini-progress" style="margin-top:7px"><i style="width:${item.progress*100}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`; }).join("")}</div>`;
+    <div class="item-list">${job.items.map(item => {
+      const [itemLabel,itemCls] = statusInfo(item.status);
+      const selections = Object.entries(item.selections || {})
+        .filter(([, asset]) => asset)
+        .map(([category, asset]) => `${categoryLabel(category)}：${asset.name}`)
+        .join("　·　");
+      return `<div class="item-row"><b>${String(item.index).padStart(2,"0")}</b><div><strong>${escapeHtml(item.output_name)}</strong><small class="item-selections">${escapeHtml(selections)}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${item.progress*100}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
+    }).join("")}</div>`;
   $("#cancelJobBtn")?.addEventListener("click", () => cancelJob(job.id));
   $("#showDeleteJobBtn")?.addEventListener("click", () => {
     $("#showDeleteJobBtn").classList.add("hidden");
@@ -1239,9 +1251,22 @@ function configSwitch(label, path, value, help = "") {
 function renderVisualConfig() {
   const config = state.configDraft;
   const modeChoices = [["required", "必需"], ["optional", "可选"], ["disabled", "停用"]];
-  const sourceCards = Object.entries(config.sources).map(([category, group]) => `
+  const orderedCategories = [
+    ...config.timeline,
+    ...Object.keys(config.sources).filter(category => !config.timeline.includes(category)),
+  ];
+  const benefitCategories = config.timeline.filter(isBenefitCategory);
+  const sourceCards = orderedCategories.map(category => {
+    const group = config.sources[category];
+    const benefitIndex = benefitCategories.indexOf(category);
+    const benefitControls = benefitIndex >= 0 ? `<div class="source-config-actions">
+      <button type="button" class="text-btn" data-benefit-action="up" data-benefit-category="${category}" ${benefitIndex === 0 ? "disabled" : ""}>上移</button>
+      <button type="button" class="text-btn" data-benefit-action="down" data-benefit-category="${category}" ${benefitIndex === benefitCategories.length - 1 ? "disabled" : ""}>下移</button>
+      <button type="button" class="text-btn danger-text" data-benefit-action="delete" data-benefit-category="${category}" ${benefitCategories.length <= 1 ? "disabled" : ""}>删除</button>
+    </div>` : "";
+    return `
     <div class="source-config-card">
-      <div class="source-config-title"><i></i>${categoryNames[category] || category}</div>
+      <div class="source-config-heading"><div class="source-config-title"><i></i>${escapeHtml(categoryLabel(category))} <small>${escapeHtml(category)}</small></div>${benefitControls}</div>
       <div class="config-form-grid three">
         ${configSelect("使用方式", `sources.${category}.mode`, group.mode, modeChoices)}
         ${configInput("默认权重", `sources.${category}.default_weight`, group.default_weight, { type: "number" })}
@@ -1249,7 +1274,8 @@ function renderVisualConfig() {
         ${configInput("素材目录", `sources.${category}.directory`, group.directory, { wide: true })}
         ${category === "end_card" ? configInput("静态尾帧时长", `sources.${category}.image_duration_seconds`, group.image_duration_seconds, { type: "number", hint: "秒" }) : ""}
       </div>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 
   const overlay = config.benefit_overlays;
   const output = config.output;
@@ -1267,7 +1293,7 @@ function renderVisualConfig() {
       .map(asset => ({ ...asset, category }))
   );
   const previewOptions = previewAssets.map(asset =>
-    `<option value="${escapeHtml(asset.path)}">${escapeHtml(categoryNames[asset.category] || asset.category)} · ${escapeHtml(asset.name)}</option>`
+    `<option value="${escapeHtml(asset.path)}">${escapeHtml(categoryLabel(asset.category))} · ${escapeHtml(asset.name)}</option>`
   ).join("");
   $("#visualConfigEditor").innerHTML = `
     <details class="config-section" data-config-section="basic" open>
@@ -1283,8 +1309,11 @@ function renderVisualConfig() {
     </details>
 
     <details class="config-section" data-config-section="sources" open>
-      <summary>视频素材 <small>前贴、引子、利益点视频、结尾和尾帧</small></summary>
-      <div class="config-section-body">${sourceCards}</div>
+      <summary>视频素材 <small>利益点段可独立增删和排序</small></summary>
+      <div class="config-section-body">
+        <div class="benefit-config-toolbar"><div><strong>多人利益点</strong><small>每段从自己的素材池中抽取 1 个片段</small></div><button id="addBenefitBtn" class="button secondary small" type="button" ${benefitCategories.length >= 20 ? "disabled" : ""}>+添加利益点</button></div>
+        ${sourceCards}
+      </div>
     </details>
 
     <details class="config-section" data-config-section="benefit-overlay" open>
@@ -1297,7 +1326,7 @@ function renderVisualConfig() {
         ${configSwitch("超出画布时自动缩小", "benefit_overlays.placement.shrink_if_oversized", overlay.placement.shrink_if_oversized)}
         ${configInput("横向位置 X", "benefit_overlays.placement.x", overlay.placement.x, { placeholder: "0 或 (W-w)/2" })}
         ${configInput("纵向位置 Y", "benefit_overlays.placement.y", overlay.placement.y, { placeholder: "0 或 (H-h)/2" })}
-        ${configSelect("显示时段", "benefit_overlays.timing.scope", overlay.timing.scope, [["full", "整条成片"], ["main", "主片段"], ["benefit_video", "仅利益点视频"], ["custom", "自定义时段"]])}
+        ${configSelect("显示时段", "benefit_overlays.timing.scope", overlay.timing.scope, [["full", "整条成片"], ["main", "主片段"], ["benefits", "全部利益点段"], ["custom", "自定义时段"]])}
         ${configInput("自定义开始", "benefit_overlays.timing.start_seconds", overlay.timing.start_seconds, { type: "number", hint: "秒" })}
         ${configInput("自定义结束", "benefit_overlays.timing.end_seconds", overlay.timing.end_seconds, { type: "nullable-number", hint: "留空到片尾" })}
       </div>
@@ -1313,7 +1342,7 @@ function renderVisualConfig() {
             ["逐条独立随机：", "每生成一条都重新抽一次。结果更随机，小批量时可能和设置的比例有偏差。"],
           ],
         })}
-        ${configSelect("核心组合去重策略", "randomization.duplicate_policy", config.randomization.duplicate_policy, [["allow", "允许重复（权重优先）"], ["best_effort", "尽量去重（权重优先）— 推荐"], ["strict", "严格去重（组合优先）"]], "引子 + 利益点视频 + 结尾", {
+        ${configSelect("核心组合去重策略", "randomization.duplicate_policy", config.randomization.duplicate_policy, [["allow", "允许重复（权重优先）"], ["best_effort", "尽量去重（权重优先）— 推荐"], ["strict", "严格去重（组合优先）"]], "引子 + 全部利益点段 + 结尾", {
           title: "去重策略怎么选？",
           items: [
             ["允许重复：", "完全按权重选择，相同的引子、利益点和结尾组合可以再次出现。"],
@@ -1388,7 +1417,58 @@ function renderVisualConfig() {
 
   const idInput = $('[data-config-path="id"]');
   if (idInput) idInput.disabled = true;
+  bindBenefitConfigControls();
   bindOutputControls();
+}
+
+function mutateBenefitConfig(mutator) {
+  state.configDraft = collectVisualConfig();
+  const scrollTop = $("#visualConfigEditor").scrollTop;
+  mutator(state.configDraft);
+  renderVisualConfig();
+  $("#visualConfigEditor").scrollTop = scrollTop;
+}
+
+function bindBenefitConfigControls() {
+  $("#addBenefitBtn")?.addEventListener("click", () => mutateBenefitConfig(config => {
+    const numbers = Object.keys(config.sources)
+      .map(category => category.match(benefitCategoryPattern))
+      .filter(Boolean)
+      .map(match => Number(match[1]));
+    const nextNumber = Math.max(0, ...numbers) + 1;
+    const category = `benefit_${nextNumber}`;
+    config.sources[category] = {
+      mode: "required",
+      directory: `利益点/${nextNumber}`,
+      extensions: [".mp4"],
+      default_weight: 1,
+      image_duration_seconds: 1.5,
+      items: [],
+    };
+    const endingIndex = config.timeline.indexOf("ending");
+    config.timeline.splice(endingIndex >= 0 ? endingIndex : config.timeline.length, 0, category);
+  }));
+
+  $$('[data-benefit-action]').forEach(button => button.addEventListener("click", () => {
+    const category = button.dataset.benefitCategory;
+    const action = button.dataset.benefitAction;
+    if (action === "delete" && !window.confirm(`删除${categoryLabel(category)}的配置？\n本地素材文件不会被删除。`)) return;
+    mutateBenefitConfig(config => {
+      const benefits = config.timeline.filter(isBenefitCategory);
+      if (action === "delete") {
+        if (benefits.length <= 1) { toast("至少需要保留一个利益点段", true); return; }
+        config.timeline = config.timeline.filter(item => item !== category);
+        delete config.sources[category];
+        return;
+      }
+      const position = benefits.indexOf(category);
+      const other = action === "up" ? benefits[position - 1] : benefits[position + 1];
+      if (!other) return;
+      const currentIndex = config.timeline.indexOf(category);
+      const otherIndex = config.timeline.indexOf(other);
+      [config.timeline[currentIndex], config.timeline[otherIndex]] = [config.timeline[otherIndex], config.timeline[currentIndex]];
+    });
+  }));
 }
 
 function bindOutputControls() {

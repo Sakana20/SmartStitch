@@ -150,10 +150,13 @@ class JobManager:
             "short_id": short_id,
             "config_id": config.id,
             "config_name": config.name,
+            "schema_version": config.schema_version,
+            "timeline": list(config.timeline),
             "status": "draft",
             "count": plan.count,
             "seed": plan.seed,
             "algorithm": plan.algorithm,
+            "algorithm_version": 2,
             "distribution": plan.distribution,
             "warnings": plan.warnings,
             "output_directory": str(batch_directory),
@@ -357,7 +360,9 @@ class JobManager:
 
     def _write_csv(self, job: dict[str, Any]) -> None:
         path = Path(job["output_directory"]) / "manifest.csv"
-        categories = sorted({key for item in job["items"] for key in item["selections"]})
+        available = {key for item in job["items"] for key in item["selections"]}
+        categories = [category for category in job.get("timeline", []) if category in available]
+        categories.extend(sorted(available - set(categories)))
         with path.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(
                 handle,

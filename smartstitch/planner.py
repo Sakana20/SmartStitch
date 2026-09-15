@@ -16,7 +16,11 @@ class PlanError(ValueError):
     pass
 
 
-CORE_CATEGORIES = ("hook", "benefit_video", "ending")
+EXACT_STRICT_COMBINATION_LIMIT = 250_000
+
+
+def _core_categories(config: AppConfig) -> tuple[str, ...]:
+    return ("hook", *config.benefit_categories(active_only=True), "ending")
 
 
 def _quota_sequence(assets: list[Asset], count: int, rng: random.Random) -> list[Asset]:
@@ -48,18 +52,24 @@ def _selectable(scan: ScanResult, category: str) -> list[Asset]:
     return [asset for asset in scan.assets.get(category, []) if asset.selectable]
 
 
-def _core_signature(selections: dict[str, Asset | None]) -> tuple[str | None, ...]:
+def _core_signature(
+    selections: dict[str, Asset | None], core_categories: tuple[str, ...]
+) -> tuple[str | None, ...]:
     return tuple(
         selections[category].id if selections.get(category) is not None else None
-        for category in CORE_CATEGORIES
+        for category in core_categories
     )
 
 
-def _sequence_score(sequences: dict[str, list[Asset | None]], count: int) -> tuple[int, int]:
+def _sequence_score(
+    sequences: dict[str, list[Asset | None]],
+    core_categories: tuple[str, ...],
+    count: int,
+) -> tuple[int, int]:
     signatures = [
         tuple(
             sequences[category][index].id if sequences[category][index] else None
-            for category in CORE_CATEGORIES
+            for category in core_categories
         )
         for index in range(count)
     ]
@@ -68,68 +78,145 @@ def _sequence_score(sequences: dict[str, list[Asset | None]], count: int) -> tup
         sequences[category][index] is not None
         and sequences[category][index - 1] is not None
         and sequences[category][index].id == sequences[category][index - 1].id
-        for category in CORE_CATEGORIES
+        for category in core_categories
         for index in range(1, count)
     )
     return duplicates, adjacent_reuse
 
 
 def _arrange_core_best_effort(
-    sequences: dict[str, list[Asset | None]], count: int, rng: random.Random
+    sequences: dict[str, list[Asset | None]],
+    core_categories: tuple[str, ...],
+    count: int,
+    rng: random.Random,
 ) -> None:
     """Keep each category's selected quota while searching for fewer repeated core combinations."""
-    best = {category: list(sequences[category]) for category in CORE_CATEGORIES}
-    best_score = _sequence_score(best, count)
+    best = {category: list(sequences[category]) for category in core_categories}
+    best_score = _sequence_score(best, core_categories, count)
     for _ in range(128):
-        candidate = {category: list(sequences[category]) for category in CORE_CATEGORIES}
+        candidate = {category: list(sequences[category]) for category in core_categories}
         for values in candidate.values():
             rng.shuffle(values)
-        score = _sequence_score(candidate, count)
+        score = _sequence_score(candidate, core_categories, count)
         if score < best_score:
             best, best_score = candidate, score
-    for category in CORE_CATEGORIES:
+    for category in core_categories:
         sequences[category] = best[category]
 
 
+def _combination_at_index(
+    candidates: dict[str, list[Asset | None]],
+    core_categories: tuple[str, ...],
+    index: int,
+) -> tuple[Asset | None, ...]:
+    selected: list[Asset | None] = []
+    for category in reversed(core_categories):
+        choices = candidates[category]
+        index, choice_index = divmod(index, len(choices))
+        selected.append(choices[choice_index])
+    return tuple(reversed(selected))
+
+
+def _large_unique_core_sample(
+    candidates: dict[str, list[Asset | None]],
+    core_categories: tuple[str, ...],
+    combination_count: int,
+    count: int,
+    rng: random.Random,
+) -> list[tuple[Asset | None, ...]]:
+    """Favor configured weights without enumerating a potentially enormous product."""
+    selected: dict[tuple[str | None, ...], tuple[Asset | None, ...]] = {}
+    attempts = 0
+    max_attempts = max(1_000, count * 200)
+    while len(selected) < count and attempts < max_attempts:
+        combination = tuple(
+            rng.choices(
+                candidates[category],
+                weights=[
+                    asset.weight if asset is not None else 1
+                    for asset in candidates[category]
+                ],
+                k=1,
+            )[0]
+            for category in core_categories
+        )
+        signature = tuple(asset.id if asset is not None else None for asset in combination)
+        selected.setdefault(signature, combination)
+        attempts += 1
+
+    # Extreme weights can make rejection sampling stall. Strict uniqueness takes
+    # precedence, so fill the small remainder from uniformly sampled product indexes.
+    if len(selected) < count:
+        index = rng.randrange(combination_count)
+        step = rng.randrange(1, combination_count)
+        while math.gcd(step, combination_count) != 1:
+            step = rng.randrange(1, combination_count)
+        while len(selected) < count:
+            combination = _combination_at_index(candidates, core_categories, index)
+            signature = tuple(asset.id if asset is not None else None for asset in combination)
+            selected.setdefault(signature, combination)
+            index = (index + step) % combination_count
+    return list(selected.values())
+
+
 def _strict_unique_core_sequences(
-    candidates: dict[str, list[Asset]], count: int, rng: random.Random
-) -> dict[str, list[Asset]]:
-    combination_count = math.prod(len(candidates[category]) for category in CORE_CATEGORIES)
+    candidates: dict[str, list[Asset | None]],
+    core_categories: tuple[str, ...],
+    count: int,
+    rng: random.Random,
+) -> dict[str, list[Asset | None]]:
+    combination_count = math.prod(len(candidates[category]) for category in core_categories)
     if count > combination_count:
         raise PlanError(
-            f"严格去重无法满足：本次需要 {count} 条，但只有 {combination_count} 种可用核心组合"
+            f"严格去重无法满足：本次需要 {count} 条，"
+            f"但只有 {combination_count} 种可用核心组合"
         )
 
-    # Weighted sampling without replacement. A material's weight remains influential,
-    # while every selected hook + benefit_video + ending signature stays unique.
-    selected_heap: list[tuple[float, int, tuple[Asset, ...]]] = []
-    combinations = product(*(candidates[category] for category in CORE_CATEGORIES))
-    for order, combination in enumerate(combinations):
-        combination_weight = math.prod(asset.weight for asset in combination)
-        key = math.log(max(rng.random(), 1e-300)) / combination_weight
-        entry = (key, order, combination)
-        if len(selected_heap) < count:
-            heapq.heappush(selected_heap, entry)
-        elif key > selected_heap[0][0]:
-            heapq.heapreplace(selected_heap, entry)
-
-    selected = [entry[2] for entry in selected_heap]
+    if combination_count <= EXACT_STRICT_COMBINATION_LIMIT:
+        # Weighted sampling without replacement. Every complete dynamic core
+        # signature remains unique while each source weight stays influential.
+        selected_heap: list[tuple[float, int, tuple[Asset | None, ...]]] = []
+        combinations = product(*(candidates[category] for category in core_categories))
+        for order, combination in enumerate(combinations):
+            combination_weight = math.prod(
+                asset.weight if asset is not None else 1 for asset in combination
+            )
+            key = math.log(max(rng.random(), 1e-300)) / combination_weight
+            entry = (key, order, combination)
+            if len(selected_heap) < count:
+                heapq.heappush(selected_heap, entry)
+            elif key > selected_heap[0][0]:
+                heapq.heapreplace(selected_heap, entry)
+        selected = [entry[2] for entry in selected_heap]
+    else:
+        selected = _large_unique_core_sample(
+            candidates, core_categories, combination_count, count, rng
+        )
     best_order = list(selected)
     best_adjacent = math.inf
     for _ in range(128):
         candidate_order = list(selected)
         rng.shuffle(candidate_order)
         adjacent = sum(
-            candidate_order[index][category_index].id == candidate_order[index - 1][category_index].id
+            (
+                candidate_order[index][category_index].id
+                if candidate_order[index][category_index] is not None
+                else None
+            )
+            == (
+                candidate_order[index - 1][category_index].id
+                if candidate_order[index - 1][category_index] is not None
+                else None
+            )
             for index in range(1, count)
-            for category_index in range(len(CORE_CATEGORIES))
+            for category_index in range(len(core_categories))
         )
         if adjacent < best_adjacent:
             best_order, best_adjacent = candidate_order, adjacent
 
     return {
         category: [combination[index] for combination in best_order]
-        for index, category in enumerate(CORE_CATEGORIES)
+        for index, category in enumerate(core_categories)
     }
 
 
@@ -175,11 +262,22 @@ def build_plan(
             continue
         sequences[category] = list(_sequence(candidates, count, config.randomization.mode, rng))
 
-    core_candidates = {category: _selectable(scan, category) for category in CORE_CATEGORIES}
+    core_categories = _core_categories(config)
+    core_candidates: dict[str, list[Asset | None]] = {}
+    for category in core_categories:
+        candidates = _selectable(scan, category)
+        if candidates:
+            core_candidates[category] = list(candidates)
+        elif config.sources[category].mode == SourceMode.REQUIRED:
+            raise PlanError(f"{category} 没有可用素材")
+        else:
+            core_candidates[category] = [None]
     if config.randomization.duplicate_policy == "strict":
-        sequences.update(_strict_unique_core_sequences(core_candidates, count, rng))
+        sequences.update(
+            _strict_unique_core_sequences(core_candidates, core_categories, count, rng)
+        )
     elif config.randomization.duplicate_policy == "best_effort":
-        _arrange_core_best_effort(sequences, count, rng)
+        _arrange_core_best_effort(sequences, core_categories, count, rng)
 
     overlay_assets = _selectable(scan, "benefit_overlay")
     overlays: list[Asset | None] = [None] * count
@@ -197,7 +295,7 @@ def build_plan(
     items: list[PlanItem] = []
     for index in range(count):
         selections = {category: sequence[index] for category, sequence in sequences.items()}
-        signature = _core_signature(selections)
+        signature = _core_signature(selections, core_categories)
         if signature in signatures:
             duplicate_count += 1
         signatures.add(signature)

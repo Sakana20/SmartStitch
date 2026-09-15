@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import copy
+import re
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+BENEFIT_CATEGORY_PATTERN = re.compile(r"^benefit_[1-9][0-9]*$")
+MAX_BENEFIT_CATEGORIES = 20
+
+
+def is_benefit_category(category: str) -> bool:
+    return BENEFIT_CATEGORY_PATTERN.fullmatch(category) is not None
 
 
 class SourceMode(StrEnum):
@@ -54,7 +64,7 @@ class OverlayPlacement(BaseModel):
 
 
 class OverlayTiming(BaseModel):
-    scope: Literal["full", "main", "benefit_video", "custom"] = "benefit_video"
+    scope: Literal["full", "main", "benefits", "custom"] = "benefits"
     start_seconds: float = Field(default=0, ge=0)
     end_seconds: float | None = Field(default=None, gt=0)
 
@@ -142,14 +152,14 @@ class ScannerConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    schema_version: int = 1
+    schema_version: Literal[2] = 2
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
     name: str
     enabled: bool = True
     description: str = ""
     source_root: str
     timeline: list[str] = Field(
-        default_factory=lambda: ["pre_roll", "hook", "benefit_video", "ending", "end_card"]
+        default_factory=lambda: ["pre_roll", "hook", "benefit_1", "ending", "end_card"]
     )
     sources: dict[str, SourceGroupConfig]
     benefit_overlays: BenefitOverlayConfig
@@ -159,9 +169,44 @@ class AppConfig(BaseModel):
     batch: BatchConfig = Field(default_factory=BatchConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_schema_v1(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = copy.deepcopy(value)
+        version = data.get("schema_version", 1)
+        if version == 2:
+            return data
+        if version != 1:
+            raise ValueError(f"不支持的 schema_version: {version}")
+
+        sources = data.get("sources")
+        if isinstance(sources, dict) and "benefit_video" in sources:
+            if "benefit_1" in sources:
+                raise ValueError(
+                    "旧配置同时包含 benefit_video 和 benefit_1，无法自动迁移"
+                )
+            sources["benefit_1"] = sources.pop("benefit_video")
+
+        timeline = data.get("timeline")
+        if isinstance(timeline, list):
+            data["timeline"] = [
+                "benefit_1" if item == "benefit_video" else item for item in timeline
+            ]
+
+        overlays = data.get("benefit_overlays")
+        if isinstance(overlays, dict):
+            timing = overlays.get("timing")
+            if isinstance(timing, dict) and timing.get("scope") == "benefit_video":
+                timing["scope"] = "benefits"
+
+        data["schema_version"] = 2
+        return data
+
     @model_validator(mode="after")
     def require_core_groups(self) -> AppConfig:
-        core_groups = {"hook", "benefit_video", "ending"}
+        core_groups = {"hook", "ending"}
         missing = core_groups - set(self.sources)
         if missing:
             raise ValueError(f"缺少必需素材组: {', '.join(sorted(missing))}")
@@ -173,7 +218,58 @@ class AppConfig(BaseModel):
         unknown = set(self.timeline) - set(self.sources)
         if unknown:
             raise ValueError(f"timeline 引用了未知素材组: {', '.join(sorted(unknown))}")
+
+        if len(self.timeline) != len(set(self.timeline)):
+            raise ValueError("timeline 中的素材组不得重复")
+
+        malformed_benefits = {
+            category
+            for category in set(self.sources) | set(self.timeline)
+            if category.startswith("benefit_")
+            and category != "benefit_overlay"
+            and not is_benefit_category(category)
+        }
+        if malformed_benefits:
+            raise ValueError(
+                "利益点素材组必须命名为 benefit_<正整数>: "
+                + ", ".join(sorted(malformed_benefits))
+            )
+
+        source_benefits = [category for category in self.sources if is_benefit_category(category)]
+        benefit_categories = [
+            category for category in self.timeline if is_benefit_category(category)
+        ]
+        if len(source_benefits) > MAX_BENEFIT_CATEGORIES:
+            raise ValueError(f"利益点段最多 {MAX_BENEFIT_CATEGORIES} 个")
+        active_benefits = [
+            category
+            for category in benefit_categories
+            if self.sources[category].mode != SourceMode.DISABLED
+        ]
+        if not active_benefits:
+            raise ValueError("timeline 至少需要一个未停用的利益点段")
+
+        unreferenced_enabled = [
+            category
+            for category, group in self.sources.items()
+            if category not in self.timeline and group.mode != SourceMode.DISABLED
+        ]
+        if unreferenced_enabled:
+            raise ValueError(
+                "sources 中的启用素材组未被 timeline 引用: "
+                + ", ".join(sorted(unreferenced_enabled))
+            )
         return self
+
+    def benefit_categories(self, *, active_only: bool = False) -> list[str]:
+        categories = [category for category in self.timeline if is_benefit_category(category)]
+        if active_only:
+            return [
+                category
+                for category in categories
+                if self.sources[category].mode != SourceMode.DISABLED
+            ]
+        return categories
 
 
 class MediaProbe(BaseModel):

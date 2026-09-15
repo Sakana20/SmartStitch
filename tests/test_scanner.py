@@ -12,10 +12,10 @@ def test_missing_required_directory_is_error(tmp_path):
             "id": "missing-test",
             "name": "缺失测试",
             "source_root": str(tmp_path),
-            "timeline": ["hook", "benefit_video", "ending"],
+            "timeline": ["hook", "benefit_1", "ending"],
             "sources": {
                 category: {"mode": "required", "directory": category}
-                for category in ["hook", "benefit_video", "ending"]
+                for category in ["hook", "benefit_1", "ending"]
             },
             "benefit_overlays": {"mode": "disabled", "directory": "overlay"},
             "output": {"directory": str(tmp_path / "out")},
@@ -42,10 +42,10 @@ def test_fixed_overlay_accepts_one_image_file(tmp_path):
             "id": "fixed-overlay",
             "name": "固定图片",
             "source_root": str(tmp_path),
-            "timeline": ["hook", "benefit_video", "ending"],
+            "timeline": ["hook", "benefit_1", "ending"],
             "sources": {
                 category: {"mode": "optional", "directory": category}
-                for category in ["hook", "benefit_video", "ending"]
+                for category in ["hook", "benefit_1", "ending"]
             },
             "benefit_overlays": {"mode": "required", "file": str(overlay)},
             "output": {"directory": str(tmp_path / "out")},

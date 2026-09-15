@@ -198,6 +198,7 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .job-detail-header { padding-top: 40px; }.job-detail-header h2 { font-family: Georgia, "Songti SC", serif; font-size: 28px; margin: 9px 0; }.job-detail-header p { color: var(--muted); font-size: 11px; word-break: break-all; }
 .big-progress { margin: 24px 0; }.big-progress .bar { height: 10px; }.big-progress > div:first-child { display: flex; justify-content: space-between; margin-bottom: 9px; font-size: 12px; }
 .item-list { display: grid; gap: 8px; margin-top: 25px; }.item-row { display: grid; grid-template-columns: 30px 1fr 70px; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; align-items: center; font-size: 11px; }.item-row .error-text { color: #a64631; grid-column: 2 / -1; line-height: 1.5; white-space: pre-wrap; max-height: 90px; overflow: auto; }
+.item-selections { display: block; margin-top: 5px; color: var(--muted); font-size: 9px; line-height: 1.5; overflow-wrap: anywhere; }
 .record-delete-zone { margin-top: 4px; text-align: right; }
 .danger-text { color: #9c4937; }
 .record-delete-confirm { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 15px; border: 1px solid rgba(166,75,56,.18); border-radius: 12px; background: #f8ece8; text-align: left; }
@@ -251,8 +252,17 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .switch-input:checked::after { transform: translateX(15px); }
 .source-config-card { border: 1px solid rgba(23,33,28,.09); background: rgba(242,244,239,.75); border-radius: 13px; padding: 14px; margin-bottom: 10px; }
 .source-config-card:last-child { margin-bottom: 0; }
-.source-config-title { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 11px; font-weight: 750; }
+.source-config-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.source-config-title { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 750; }
+.source-config-title small { color: var(--muted); font: 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .source-config-title i { width: 7px; height: 7px; border-radius: 50%; background: var(--green-2); }
+.source-config-actions { display: flex; align-items: center; gap: 4px; }
+.source-config-actions .text-btn { padding: 4px 7px; font-size: 9px; }
+.source-config-actions .text-btn:disabled { opacity: .35; cursor: default; }
+.benefit-config-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 12px; padding: 12px 14px; border-radius: 12px; background: #eaf1ec; }
+.benefit-config-toolbar strong, .benefit-config-toolbar small { display: block; }
+.benefit-config-toolbar strong { font-size: 11px; }
+.benefit-config-toolbar small { margin-top: 4px; color: var(--muted); font-size: 9px; }
 .range-number-control { display: grid; grid-template-columns: minmax(120px, 1fr) 116px; gap: 10px; align-items: center; }
 .range-number-control > input[type="range"] { appearance: none; height: 5px; padding: 0; border: 0; border-radius: 999px; background: linear-gradient(90deg, var(--green), #b9cfc2); box-shadow: none; accent-color: var(--green); }
 .range-number-control > input[type="range"]::-webkit-slider-thumb { appearance: none; width: 17px; height: 17px; border-radius: 50%; background: white; border: 2px solid var(--green); box-shadow: 0 2px 7px rgba(23,33,28,.18); }

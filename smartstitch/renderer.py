@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-from .models import AppConfig, Asset, PlanItem
+from .models import AppConfig, Asset, PlanItem, is_benefit_category
 
 
 class RenderError(RuntimeError):
@@ -72,18 +72,21 @@ def _overlay_range(config: AppConfig, timeline: list[tuple[str, Asset]]) -> tupl
         return timing.start_seconds, timing.end_seconds
 
     elapsed = 0.0
-    ranges: dict[str, tuple[float, float]] = {}
+    ranges: list[tuple[str, float, float]] = []
     for category, asset in timeline:
         duration = asset.probe.duration if asset.probe else 0
-        ranges[category] = (elapsed, elapsed + duration)
+        ranges.append((category, elapsed, elapsed + duration))
         elapsed += duration
-    if timing.scope == "benefit_video":
-        return ranges.get("benefit_video", (0, total))
+    if timing.scope == "benefits":
+        benefit_ranges = [item for item in ranges if is_benefit_category(item[0])]
+        if not benefit_ranges:
+            return 1.0, 0.0
+        return benefit_ranges[0][1], benefit_ranges[-1][2]
 
-    main_categories = [item for item in timeline if item[0] not in {"pre_roll", "end_card"}]
+    main_categories = [item for item in ranges if item[0] not in {"pre_roll", "end_card"}]
     if not main_categories:
         return 0, total
-    return ranges[main_categories[0][0]][0], ranges[main_categories[-1][0]][1]
+    return main_categories[0][1], main_categories[-1][2]
 
 
 def build_ffmpeg_command(

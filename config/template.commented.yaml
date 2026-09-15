@@ -1,6 +1,6 @@
 # SmartStitch 配置模板（完整字段说明见 doc/03-配置文件规范.md）
 # 复制此文件并改名为 <配置ID>.yaml 后再编辑；配置 ID 只能使用小写英文、数字和短横线。
-schema_version: 1
+schema_version: 2
 id: new-config
 name: 新配置
 enabled: true
@@ -8,7 +8,7 @@ description: 请填写配置用途
 
 # 主素材根目录。相对的“引子/利益点/结尾”目录都基于此处解析。
 source_root: /请替换为/主素材目录
-timeline: [pre_roll, hook, benefit_video, ending, end_card]
+timeline: [pre_roll, hook, benefit_1, benefit_2, benefit_3, ending, end_card]
 
 sources:
   pre_roll:
@@ -30,9 +30,22 @@ sources:
     extensions: [.mp4]
     default_weight: 1
     items: []
-  benefit_video:
+  # 利益点段可增删和排序；每段会独立抽取一个人物片段。
+  benefit_1:
     mode: required
-    directory: /请替换为/主素材目录/利益点
+    directory: /请替换为/主素材目录/利益点/1
+    extensions: [.mp4]
+    default_weight: 1
+    items: []
+  benefit_2:
+    mode: required
+    directory: /请替换为/主素材目录/利益点/2
+    extensions: [.mp4]
+    default_weight: 1
+    items: []
+  benefit_3:
+    mode: required
+    directory: /请替换为/主素材目录/利益点/3
     extensions: [.mp4]
     default_weight: 1
     items: []
@@ -64,8 +77,8 @@ benefit_overlays:
     shrink_if_oversized: true
     opacity: 1.0
   timing:
-    # full=全片；main=不含前贴和尾帧；benefit_video=仅利益点视频；custom=自定义秒数。
-    scope: benefit_video
+    # full=全片；main=不含前贴和尾帧；benefits=全部利益点段；custom=自定义秒数。
+    scope: benefits
     start_seconds: 0
     end_seconds: null
 
@@ -79,7 +92,7 @@ matching:
 randomization:
   # quota_shuffle=整批按权重分配次数后打乱；independent_random=逐条独立随机。
   mode: quota_shuffle
-  # 核心组合仅指“引子 + 利益点视频 + 结尾”，不包含前贴、叠图和尾帧。
+  # 核心组合指“引子 + 全部启用利益点段 + 结尾”，不包含前贴、叠图和尾帧。
   # allow=允许重复，权重优先。
   # best_effort=保持权重次数并主动重排，尽量减少完整组合重复（推荐）。
   # strict=从唯一组合中加权无放回选择；组合唯一优先，素材次数可能偏离权重。

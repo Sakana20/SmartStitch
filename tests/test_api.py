@@ -8,13 +8,14 @@ from smartstitch.api import create_app
 
 def write_config_template(config_directory, tmp_path):
     template = {
+        "schema_version": 2,
         "id": "new-config",
         "name": "新配置",
         "source_root": str(tmp_path),
-        "timeline": ["hook", "benefit_video", "ending"],
+        "timeline": ["hook", "benefit_1", "ending"],
         "sources": {
             category: {"mode": "required", "directory": category}
-            for category in ["hook", "benefit_video", "ending"]
+            for category in ["hook", "benefit_1", "ending"]
         },
         "benefit_overlays": {"mode": "disabled", "file": ""},
         "output": {"directory": str(tmp_path / "output")},
@@ -53,6 +54,10 @@ def test_structured_config_update(tmp_path):
     )
     client = TestClient(create_app(tmp_path))
     loaded = client.get("/api/v1/configs/visual-test").json()["config"]
+    assert loaded["schema_version"] == 2
+    assert loaded["timeline"] == ["hook", "benefit_1", "ending"]
+    assert "benefit_1" in loaded["sources"]
+    assert "benefit_video" not in loaded["sources"]
     loaded["name"] = "网页修改后的配置"
     loaded["output"]["fps"] = 25
     response = client.put(
@@ -62,6 +67,9 @@ def test_structured_config_update(tmp_path):
     saved = client.get("/api/v1/configs/visual-test").json()["config"]
     assert saved["name"] == "网页修改后的配置"
     assert saved["output"]["fps"] == 25
+    saved_yaml = yaml.safe_load((config_directory / "visual-test.yaml").read_text("utf-8"))
+    assert saved_yaml["schema_version"] == 2
+    assert saved_yaml["timeline"] == ["hook", "benefit_1", "ending"]
     assert list((config_directory / "backups").glob("*.yaml"))
 
 
