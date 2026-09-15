@@ -291,6 +291,17 @@ class LoudnessPreviewRequest(BaseModel):
     duration_seconds: float = Field(default=12, ge=3, le=30)
 
 
+class TimelineAnalyzeRequest(BaseModel):
+    source_path: str = Field(min_length=1)
+    scene_threshold: float = Field(default=0.3, ge=0.05, le=0.9)
+    silence_duration_seconds: float = Field(default=0.35, ge=0.1, le=3)
+
+
+class TimelineDecisionRequest(BaseModel):
+    analysis_id: str = Field(pattern=r"^[a-f0-9]{24}$")
+    frame_indexes: list[int]
+
+
 def resolve_directory(config: AppConfig, directory: str) -> Path:
     path = Path(directory).expanduser()
     return path if path.is_absolute() else Path(config.source_root).expanduser() / path

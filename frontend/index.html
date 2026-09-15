@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260914-6" />
+    <link rel="stylesheet" href="/styles.css?v=20260915-1" />
   </head>
   <body>
     <div class="noise"></div>
@@ -32,6 +32,7 @@
 
       <nav class="section-tabs" aria-label="页面区域">
         <button class="section-tab active" data-view="create">创建任务</button>
+        <button class="section-tab" data-view="timeline">时间线切片</button>
         <button class="section-tab" data-view="assets">素材权重</button>
         <button class="section-tab" data-view="jobs">任务记录</button>
       </nav>
@@ -106,6 +107,68 @@
             </div>
           </article>
         </div>
+      </section>
+
+      <section id="timelineView" class="view">
+        <article class="panel timeline-panel">
+          <div class="panel-heading">
+            <div><span class="step">切片</span><h2>时间线审核台</h2></div>
+            <span id="timelineStatus" class="status neutral">等待视频</span>
+          </div>
+          <div class="timeline-source-row">
+            <label class="field timeline-path-field">
+              <span>原始视频路径 <small>支持 MP4、MOV、MKV、M4V、WebM</small></span>
+              <input id="timelinePathInput" type="text" placeholder="粘贴本地视频绝对路径" />
+            </label>
+            <label class="field timeline-threshold-field">
+              <span>转场敏感度 <small>越低候选越多</small></span>
+              <input id="timelineThresholdInput" type="number" min="0.05" max="0.9" step="0.05" value="0.30" />
+            </label>
+            <button id="analyzeTimelineBtn" class="button primary timeline-analyze-button">机器粗分析</button>
+          </div>
+
+          <div id="timelineEmpty" class="timeline-empty">
+            <strong>先由机器找出可能的断点</strong>
+            <p>分析完成后，可以双击时间线添加断点、拖动断点，或用上一帧/下一帧进行精确调整。</p>
+          </div>
+
+          <div id="timelineWorkspace" class="hidden">
+            <div class="timeline-media-grid">
+              <div class="video-stage"><video id="timelineVideo" controls preload="metadata"></video></div>
+              <aside class="timeline-inspector">
+                <span class="eyebrow">FRAME INSPECTOR</span>
+                <strong id="timelineTimecode">00:00:00:00</strong>
+                <small id="timelineFrameMeta">第 0 帧</small>
+                <div class="frame-stepper">
+                  <button id="previousFrameBtn" class="button secondary small" type="button">← 上一帧</button>
+                  <button id="nextFrameBtn" class="button secondary small" type="button">下一帧 →</button>
+                </div>
+                <label class="field compact-field">
+                  <span>选中断点帧</span>
+                  <input id="selectedFrameInput" type="number" min="1" disabled />
+                </label>
+                <div class="frame-stepper">
+                  <button id="addBreakpointBtn" class="button primary small" type="button">在当前帧打点</button>
+                  <button id="deleteBreakpointBtn" class="button danger-secondary small" type="button" disabled>删除断点</button>
+                </div>
+              </aside>
+            </div>
+
+            <div class="timeline-meta" id="timelineMeta"></div>
+            <div id="timelineTrack" class="timeline-track" title="单击定位；双击添加断点">
+              <div id="timelineSegments" class="timeline-segments"></div>
+              <div id="timelinePlayhead" class="timeline-playhead"></div>
+              <div id="timelineMarkers"></div>
+            </div>
+            <div class="timeline-ruler"><span>00:00</span><span id="timelineMidLabel">—</span><span id="timelineEndLabel">—</span></div>
+
+            <div class="timeline-review-heading">
+              <div><strong>断点列表</strong><small id="timelineBreakpointSummary"></small></div>
+              <button id="saveTimelineBtn" class="button primary small" type="button">保存人工审核</button>
+            </div>
+            <div id="timelineBreakpointList" class="breakpoint-list"></div>
+          </div>
+        </article>
       </section>
 
       <section id="assetsView" class="view">
@@ -199,6 +262,6 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/app.js?v=20260914-6" defer></script>
+    <script src="/app.js?v=20260915-1" defer></script>
   </body>
 </html>

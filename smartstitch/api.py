@@ -21,20 +21,25 @@ from .models import (
     LoudnessPreviewRequest,
     PreviewRequest,
     StructuredConfigUpdateRequest,
+    TimelineAnalyzeRequest,
+    TimelineDecisionRequest,
     WeightUpdateRequest,
 )
 from .planner import PlanError, build_plan
 from .scanner import probe_config_audio, scan_config
+from .timeline import TimelineAnalyzer, TimelineError
 
 
 def create_app(base_directory: Path | None = None) -> FastAPI:
     root = (base_directory or Path(__file__).resolve().parent.parent).resolve()
     config_store = ConfigStore(root / "config")
     job_manager = JobManager(config_store, root / "data")
+    timeline_analyzer = TimelineAnalyzer(root / "data" / "timelines")
     app = FastAPI(title="SmartStitch", version=__version__)
     app.state.root = root
     app.state.config_store = config_store
     app.state.job_manager = job_manager
+    app.state.timeline_analyzer = timeline_analyzer
 
     @app.get("/api/v1/system/health")
     def health() -> dict[str, object]:
@@ -169,6 +174,31 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         return audio_preview_response(request)
+
+    @app.post("/api/v1/timeline/analyze")
+    def analyze_timeline(request: TimelineAnalyzeRequest) -> dict[str, object]:
+        try:
+            return timeline_analyzer.analyze(
+                request.source_path,
+                request.scene_threshold,
+                request.silence_duration_seconds,
+            )
+        except (TimelineError, OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/timeline/media/{media_token}")
+    def timeline_media(media_token: str) -> FileResponse:
+        try:
+            return FileResponse(timeline_analyzer.media_path(media_token))
+        except TimelineError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.put("/api/v1/timeline/decisions")
+    def save_timeline_decision(request: TimelineDecisionRequest) -> dict[str, object]:
+        try:
+            return timeline_analyzer.save_decision(request.analysis_id, request.frame_indexes)
+        except (TimelineError, OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.post("/api/v1/jobs")
     def create_job(request: JobCreateRequest) -> dict[str, object]:

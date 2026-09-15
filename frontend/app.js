@@ -12,6 +12,12 @@ const state = {
   configMode: "visual",
   configDraft: null,
   previewAudioCleanup: null,
+  timeline: {
+    analysis: null,
+    breakpoints: [],
+    selectedFrame: null,
+    dragging: false,
+  },
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -100,12 +106,319 @@ function bindEvents() {
   $$('[data-close-modal]').forEach(element => element.addEventListener("click", closeConfig));
   $$('[data-close-new-config]').forEach(element => element.addEventListener("click", closeNewConfig));
   $$('[data-close-drawer]').forEach(element => element.addEventListener("click", closeDrawer));
+  bindTimelineEvents();
 }
 
 function switchView(view) {
   $$(".section-tab").forEach(button => button.classList.toggle("active", button.dataset.view === view));
   $$(".view").forEach(element => element.classList.toggle("active", element.id === `${view}View`));
   if (view === "jobs") loadJobs();
+}
+
+function bindTimelineEvents() {
+  $("#analyzeTimelineBtn").addEventListener("click", analyzeTimeline);
+  $("#previousFrameBtn").addEventListener("click", () => stepTimelineFrame(-1));
+  $("#nextFrameBtn").addEventListener("click", () => stepTimelineFrame(1));
+  $("#addBreakpointBtn").addEventListener("click", addBreakpointAtPlayhead);
+  $("#deleteBreakpointBtn").addEventListener("click", deleteSelectedBreakpoint);
+  $("#saveTimelineBtn").addEventListener("click", saveTimelineDecision);
+  $("#selectedFrameInput").addEventListener("change", event => moveSelectedBreakpoint(Number(event.target.value)));
+  $("#timelineVideo").addEventListener("timeupdate", renderTimelinePlayhead);
+  $("#timelineVideo").addEventListener("seeked", renderTimelinePlayhead);
+  $("#timelineTrack").addEventListener("click", event => {
+    if (event.target.closest(".timeline-marker") || state.timeline.dragging) return;
+    seekTimelineFrame(frameFromPointer(event));
+  });
+  $("#timelineTrack").addEventListener("dblclick", event => {
+    if (event.target.closest(".timeline-marker")) return;
+    const frame = frameFromPointer(event);
+    seekTimelineFrame(frame);
+    addTimelineBreakpoint(frame, "human_added");
+  });
+  document.addEventListener("keydown", event => {
+    if (!$("#timelineView").classList.contains("active")) return;
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      stepTimelineFrame(event.key === "ArrowLeft" ? -1 : 1);
+    }
+  });
+}
+
+async function analyzeTimeline() {
+  const sourcePath = $("#timelinePathInput").value.trim();
+  if (!sourcePath) return toast("请先填写原始视频路径", true);
+  const button = $("#analyzeTimelineBtn");
+  button.disabled = true;
+  button.textContent = "正在分析画面与静音…";
+  setTimelineStatus("分析中", "running");
+  try {
+    const analysis = await api("/timeline/analyze", {
+      method: "POST",
+      body: JSON.stringify({
+        source_path: sourcePath,
+        scene_threshold: Number($("#timelineThresholdInput").value),
+        silence_duration_seconds: 0.35,
+      }),
+    });
+    state.timeline.analysis = analysis;
+    state.timeline.breakpoints = analysis.breakpoints.map(point => ({ ...point }));
+    state.timeline.selectedFrame = null;
+    const video = $("#timelineVideo");
+    video.src = analysis.media_url;
+    video.load();
+    $("#timelineEmpty").classList.add("hidden");
+    $("#timelineWorkspace").classList.remove("hidden");
+    renderTimeline();
+    setTimelineStatus("待人工审核", "running");
+    toast(`机器给出了 ${state.timeline.breakpoints.length} 个候选断点`);
+  } catch (error) {
+    setTimelineStatus("分析失败", "danger");
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "机器粗分析";
+  }
+}
+
+function setTimelineStatus(text, type) {
+  const element = $("#timelineStatus");
+  element.textContent = text;
+  element.className = `status ${type}`;
+}
+
+function renderTimeline() {
+  const analysis = state.timeline.analysis;
+  if (!analysis) return;
+  const boundaries = [0, ...state.timeline.breakpoints.map(point => point.frame_index), analysis.frame_count];
+  $("#timelineSegments").innerHTML = boundaries.slice(0, -1).map((start, index) => {
+    const end = boundaries[index + 1];
+    return `<span style="left:${start / analysis.frame_count * 100}%;width:${(end - start) / analysis.frame_count * 100}%" title="片段 ${index + 1} · ${end - start} 帧"></span>`;
+  }).join("");
+  $("#timelineMarkers").innerHTML = state.timeline.breakpoints.map(point => `
+    <button class="timeline-marker ${point.frame_index === state.timeline.selectedFrame ? "selected" : ""} ${point.review_status === "machine_suggested" ? "machine" : "human"}"
+      style="left:${point.frame_index / analysis.frame_count * 100}%" data-frame="${point.frame_index}"
+      title="第 ${point.frame_index} 帧 · ${timelineReasonLabel(point)}"><i></i></button>`).join("");
+  $$(".timeline-marker").forEach(marker => bindTimelineMarker(marker));
+  $("#timelineMeta").innerHTML = `<span>${escapeHtml(analysis.source_name)}</span><span>${analysis.width}×${analysis.height}</span><span>${analysis.fps.toFixed(3)} fps</span><span>${analysis.frame_count} 帧</span><span>${formatPreciseTime(analysis.duration)}</span>`;
+  $("#timelineMidLabel").textContent = formatClock(analysis.duration / 2);
+  $("#timelineEndLabel").textContent = formatClock(analysis.duration);
+  $("#timelineBreakpointSummary").textContent = `${state.timeline.breakpoints.length} 个断点 · ${boundaries.length - 1} 个片段`;
+  renderBreakpointList();
+  syncSelectedBreakpointControls();
+  renderTimelinePlayhead();
+}
+
+function bindTimelineMarker(marker) {
+  marker.addEventListener("click", event => {
+    event.stopPropagation();
+    const frame = Number(marker.dataset.frame);
+    selectTimelineBreakpoint(frame);
+    seekTimelineFrame(frame);
+  });
+  marker.addEventListener("pointerdown", event => {
+    event.preventDefault();
+    state.timeline.dragging = true;
+    const originalFrame = Number(marker.dataset.frame);
+    const point = state.timeline.breakpoints.find(item => item.frame_index === originalFrame);
+    let targetFrame = originalFrame;
+    state.timeline.selectedFrame = originalFrame;
+    marker.classList.add("selected");
+    syncSelectedBreakpointControls();
+    const onMove = moveEvent => {
+      targetFrame = frameFromPointer(moveEvent);
+      marker.style.left = `${targetFrame / state.timeline.analysis.frame_count * 100}%`;
+      $("#selectedFrameInput").value = String(targetFrame);
+      renderTimelinePlayhead(targetFrame);
+    };
+    const onUp = () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      state.timeline.dragging = false;
+      const occupied = state.timeline.breakpoints.some(item => item !== point && item.frame_index === targetFrame);
+      if (point && !occupied && targetFrame !== originalFrame) {
+        point.frame_index = targetFrame;
+        point.time_seconds = targetFrame / state.timeline.analysis.fps;
+        point.review_status = "human_adjusted";
+        point.reasons = ["human_adjusted"];
+        state.timeline.selectedFrame = targetFrame;
+        sortTimelineBreakpoints();
+      } else {
+        state.timeline.selectedFrame = originalFrame;
+      }
+      seekTimelineFrame(state.timeline.selectedFrame);
+      renderTimeline();
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp, { once: true });
+  });
+}
+
+function frameFromPointer(event) {
+  const analysis = state.timeline.analysis;
+  const rect = $("#timelineTrack").getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  return Math.max(1, Math.min(analysis.frame_count - 1, Math.round(ratio * analysis.frame_count)));
+}
+
+function currentTimelineFrame() {
+  const analysis = state.timeline.analysis;
+  return analysis ? Math.max(0, Math.min(analysis.frame_count - 1, Math.round($("#timelineVideo").currentTime * analysis.fps))) : 0;
+}
+
+function seekTimelineFrame(frame) {
+  const analysis = state.timeline.analysis;
+  if (!analysis) return;
+  const normalized = Math.max(0, Math.min(analysis.frame_count - 1, Math.round(frame)));
+  $("#timelineVideo").currentTime = normalized / analysis.fps;
+  renderTimelinePlayhead(normalized);
+}
+
+function stepTimelineFrame(delta) {
+  const base = state.timeline.selectedFrame ?? currentTimelineFrame();
+  const next = base + delta;
+  if (state.timeline.selectedFrame !== null) moveSelectedBreakpoint(next);
+  else seekTimelineFrame(next);
+}
+
+function addBreakpointAtPlayhead() {
+  addTimelineBreakpoint(currentTimelineFrame(), "human_added");
+}
+
+function addTimelineBreakpoint(frame, reviewStatus) {
+  const analysis = state.timeline.analysis;
+  frame = Math.max(1, Math.min(analysis.frame_count - 1, Math.round(frame)));
+  if (state.timeline.breakpoints.some(point => point.frame_index === frame)) {
+    selectTimelineBreakpoint(frame);
+    return;
+  }
+  state.timeline.breakpoints.push({
+    frame_index: frame,
+    time_seconds: frame / analysis.fps,
+    reasons: ["human_added"],
+    confidence: 1,
+    review_status: reviewStatus,
+  });
+  sortTimelineBreakpoints();
+  state.timeline.selectedFrame = frame;
+  renderTimeline();
+}
+
+function moveSelectedBreakpoint(frame) {
+  const analysis = state.timeline.analysis;
+  if (!analysis || state.timeline.selectedFrame === null || !Number.isFinite(frame)) return;
+  frame = Math.max(1, Math.min(analysis.frame_count - 1, Math.round(frame)));
+  const point = state.timeline.breakpoints.find(item => item.frame_index === state.timeline.selectedFrame);
+  if (!point) return;
+  if (state.timeline.breakpoints.some(item => item !== point && item.frame_index === frame)) return;
+  point.frame_index = frame;
+  point.time_seconds = frame / analysis.fps;
+  point.review_status = "human_adjusted";
+  point.reasons = ["human_adjusted"];
+  state.timeline.selectedFrame = frame;
+  sortTimelineBreakpoints();
+  seekTimelineFrame(frame);
+  renderTimeline();
+}
+
+function deleteSelectedBreakpoint() {
+  const frame = state.timeline.selectedFrame;
+  if (frame === null) return;
+  state.timeline.breakpoints = state.timeline.breakpoints.filter(point => point.frame_index !== frame);
+  state.timeline.selectedFrame = null;
+  renderTimeline();
+}
+
+function selectTimelineBreakpoint(frame) {
+  state.timeline.selectedFrame = frame;
+  renderTimeline();
+}
+
+function sortTimelineBreakpoints() {
+  state.timeline.breakpoints.sort((a, b) => a.frame_index - b.frame_index);
+}
+
+function syncSelectedBreakpointControls() {
+  const selected = state.timeline.selectedFrame;
+  const input = $("#selectedFrameInput");
+  input.disabled = selected === null;
+  input.value = selected ?? "";
+  input.max = String((state.timeline.analysis?.frame_count || 1) - 1);
+  $("#deleteBreakpointBtn").disabled = selected === null;
+}
+
+function renderTimelinePlayhead(forcedFrame = null) {
+  const analysis = state.timeline.analysis;
+  if (!analysis) return;
+  const frame = forcedFrame ?? currentTimelineFrame();
+  $("#timelinePlayhead").style.left = `${frame / analysis.frame_count * 100}%`;
+  $("#timelineTimecode").textContent = frameTimecode(frame, analysis.fps);
+  $("#timelineFrameMeta").textContent = `第 ${frame} 帧 · ${formatPreciseTime(frame / analysis.fps)}`;
+}
+
+function renderBreakpointList() {
+  const analysis = state.timeline.analysis;
+  $("#timelineBreakpointList").innerHTML = state.timeline.breakpoints.length ? state.timeline.breakpoints.map((point, index) => `
+    <button class="breakpoint-row ${point.frame_index === state.timeline.selectedFrame ? "selected" : ""}" data-frame="${point.frame_index}">
+      <span>${String(index + 1).padStart(2, "0")}</span>
+      <strong>${frameTimecode(point.frame_index, analysis.fps)}</strong>
+      <small>第 ${point.frame_index} 帧</small>
+      <i>${escapeHtml(timelineReasonLabel(point))}</i>
+    </button>`).join("") : '<div class="breakpoint-empty">当前没有断点，双击时间线或在播放位置打点。</div>';
+  $$(".breakpoint-row").forEach(row => row.addEventListener("click", () => {
+    const frame = Number(row.dataset.frame);
+    selectTimelineBreakpoint(frame);
+    seekTimelineFrame(frame);
+  }));
+}
+
+function timelineReasonLabel(point) {
+  if (point.review_status === "human_added") return "人工添加";
+  if (point.review_status === "human_adjusted") return "人工调整";
+  const labels = { scene_change: "画面转场", silence_end: "静音结束" };
+  return (point.reasons || []).map(reason => labels[reason] || reason).join(" + ") || "机器建议";
+}
+
+async function saveTimelineDecision() {
+  const analysis = state.timeline.analysis;
+  if (!analysis) return;
+  const button = $("#saveTimelineBtn");
+  button.disabled = true;
+  button.textContent = "保存中…";
+  try {
+    await api("/timeline/decisions", {
+      method: "PUT",
+      body: JSON.stringify({
+        analysis_id: analysis.analysis_id,
+        frame_indexes: state.timeline.breakpoints.map(point => point.frame_index),
+      }),
+    });
+    state.timeline.breakpoints.forEach(point => { point.review_status = "human_confirmed"; });
+    setTimelineStatus("已保存审核", "success");
+    renderTimeline();
+    toast("审核断点已按帧保存");
+  } catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; button.textContent = "保存人工审核"; }
+}
+
+function frameTimecode(frame, fps) {
+  const nominalFps = Math.max(1, Math.round(fps));
+  const totalSeconds = Math.floor(frame / nominalFps);
+  const frames = frame % nominalFps;
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
+  return [hours, minutes, seconds, frames].map(value => String(value).padStart(2, "0")).join(":");
+}
+
+function formatClock(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+}
+
+function formatPreciseTime(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${(seconds % 60).toFixed(3).padStart(6, "0")}`;
 }
 
 async function loadConfigs(preferredId = null) {
