@@ -78,7 +78,7 @@ class OverlayTiming(BaseModel):
 
 class BenefitOverlayConfig(BaseModel):
     mode: SourceMode = SourceMode.DISABLED
-    # 每个配置固定使用唯一一张利益点图片；directory 仅用于兼容旧配置。
+    # 每个配置固定使用唯一一张风险提示语图片；directory 仅用于兼容旧配置。
     file: str = ""
     directory: str | None = Field(default=None, exclude=True)
     image_duration_seconds: float = Field(default=1.5, gt=0)

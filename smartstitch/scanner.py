@@ -226,7 +226,7 @@ def scan_fixed_overlay(config: AppConfig) -> tuple[list[Asset], list[str]]:
     if group.mode == SourceMode.DISABLED:
         return [], []
     if not group.file.strip():
-        message = "benefit_overlay: 请指定唯一的利益点图片文件"
+        message = "benefit_overlay: 请指定唯一的风险提示语图片文件"
         return [], [message] if group.mode == SourceMode.REQUIRED else []
 
     path = Path(group.file).expanduser()
@@ -236,7 +236,7 @@ def scan_fixed_overlay(config: AppConfig) -> tuple[list[Asset], list[str]]:
     exists = path.exists() and path.is_file()
     error: str | None = None
     if path.exists() and path.is_dir():
-        error = "利益点图片必须指定具体图片文件，不能填写目录"
+        error = "风险提示语图片必须指定具体图片文件，不能填写目录"
     elif not exists:
         error = "图片文件不存在或外接磁盘未挂载"
     elif path.suffix.lower() not in IMAGE_EXTENSIONS:
@@ -265,7 +265,7 @@ def scan_fixed_overlay(config: AppConfig) -> tuple[list[Asset], list[str]]:
 
     errors = []
     if group.mode == SourceMode.REQUIRED and not asset.selectable:
-        errors.append(f"benefit_overlay: {asset.error or '唯一利益点图片不可用'}: {path}")
+        errors.append(f"benefit_overlay: {asset.error or '唯一风险提示语图片不可用'}: {path}")
     return [asset], errors
 
 

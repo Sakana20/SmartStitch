@@ -284,10 +284,10 @@ def build_plan(
     overlay_required = config.benefit_overlays.mode == SourceMode.REQUIRED
     if overlay_assets:
         if len(overlay_assets) != 1:
-            raise PlanError("每个配置必须且只能有一张利益点图片")
+            raise PlanError("每个配置必须且只能有一张风险提示语图片")
         overlays = [overlay_assets[0]] * count
     elif overlay_required:
-        raise PlanError("利益点图片为必需，但没有可用图片")
+        raise PlanError("风险提示语图片为必需，但没有可用图片")
 
     warnings = list(scan.warnings)
     signatures: set[tuple[str | None, ...]] = set()

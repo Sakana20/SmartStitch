@@ -66,6 +66,9 @@ def test_create_library_builds_complete_tree_and_config(tmp_path):
     assert marker["layout_version"] == 1
     assert marker["created_for_config_id"] == "summer-sale"
     assert marker["next_benefit_number"] == 2
+    assert marker["paths"]["overlays"] == "风险提示语图片"
+    assert (root / "风险提示语图片").is_dir()
+    assert not (root / "利益点图片").exists()
 
     config = store.load("summer-sale")
     assert config.source_root == str(root)

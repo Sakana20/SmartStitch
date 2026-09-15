@@ -199,7 +199,7 @@ class ConfigStore:
 
             for category, category_updates in grouped.items():
                 if category == "benefit_overlay":
-                    # 利益点图片是配置级唯一固定图片，不参与素材权重更新。
+                    # 风险提示语图片是配置级唯一固定图片，不参与素材权重更新。
                     continue
                 elif category in config.sources:
                     group = config.sources[category]

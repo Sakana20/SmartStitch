@@ -64,11 +64,11 @@ sources:
     image_duration_seconds: 1.5
     items: []
 
-# 透明利益点图片始终覆盖在最终画面的最高层。
+# 透明风险提示语图片始终覆盖在最终画面的最高层。
 # 每个配置只指定一张固定图片；它会用于该配置生成的所有成片，不参与随机抽取。
 benefit_overlays:
   mode: disabled
-  file: /请替换为/唯一利益点图片.png
+  file: /请替换为/唯一风险提示语图片.png
   placement:
     # original=原尺寸；fit=等比适配画布；stretch=拉伸铺满。
     scale_mode: original
@@ -83,7 +83,7 @@ benefit_overlays:
     end_seconds: null
 
 matching:
-  # 预留的素材标签匹配设置；固定利益点图片不使用此项。
+  # 预留的素材标签匹配设置；固定风险提示语图片不使用此项。
   enabled: false
   strategy: product_tag
   allow_untagged_as_global: true

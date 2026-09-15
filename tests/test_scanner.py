@@ -28,7 +28,7 @@ def test_missing_required_directory_is_error(tmp_path):
 
 
 def test_fixed_overlay_accepts_one_image_file(tmp_path):
-    overlay = tmp_path / "固定利益点.png"
+    overlay = tmp_path / "固定风险提示语.png"
     subprocess.run(
         [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -54,4 +54,4 @@ def test_fixed_overlay_accepts_one_image_file(tmp_path):
     result = scan_config(config)
     assert not any("benefit_overlay" in error for error in result.errors)
     assert len(result.assets["benefit_overlay"]) == 1
-    assert result.assets["benefit_overlay"][0].name == "固定利益点.png"
+    assert result.assets["benefit_overlay"][0].name == "固定风险提示语.png"
