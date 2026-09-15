@@ -493,7 +493,7 @@ function finishTimelineDrag(event) {
 
   if (drag.kind === "playhead") seekTimelineFrame(drag.targetFrame, "timeline_drag_end");
   renderTimeline();
-  if (drag.wasPlaying) $("#timelineVideo").play().catch(() => {});
+  if (drag.wasPlaying && drag.kind === "breakpoint") $("#timelineVideo").play().catch(() => {});
 }
 
 function snappedTimelineFrame(rawFrame, pointerTimelineX, drag) {
@@ -565,7 +565,12 @@ function frameFromPointer(event, minimum = 0, snapEnabled = false) {
 
 function currentTimelineFrame() {
   const analysis = state.timeline.analysis;
-  return analysis ? Math.max(0, Math.min(analysis.frame_count - 1, Math.round($("#timelineVideo").currentTime * analysis.fps))) : 0;
+  return analysis ? TimelineMath.frameFromPlaybackTime(
+    $("#timelineVideo").currentTime,
+    analysis.fps,
+    0,
+    analysis.frame_count - 1,
+  ) : 0;
 }
 
 function seekTimelineFrame(frame, source = "programmatic") {
@@ -575,8 +580,12 @@ function seekTimelineFrame(frame, source = "programmatic") {
   state.timeline.playheadFrame = normalized;
   state.timeline.syncSource = source;
   const video = $("#timelineVideo");
-  const targetTime = normalized / analysis.fps;
-  if (Math.abs(video.currentTime - targetTime) >= 0.25 / analysis.fps) video.currentTime = targetTime;
+  const targetTime = TimelineMath.previewTimeForFrame(
+    normalized,
+    analysis.fps,
+    analysis.duration,
+  );
+  if (Math.abs(video.currentTime - targetTime) > 1e-9) video.currentTime = targetTime;
   renderTimelinePlayhead(normalized);
 }
 
@@ -584,7 +593,12 @@ function syncTimelineFromVideo(event = null) {
   if (!state.timeline.analysis || state.timeline.dragging) return;
   const mediaTime = event?.mediaTime;
   const frame = Number.isFinite(mediaTime)
-    ? Math.round(mediaTime * state.timeline.analysis.fps)
+    ? TimelineMath.frameFromPresentedTime(
+      mediaTime,
+      state.timeline.analysis.fps,
+      0,
+      state.timeline.analysis.frame_count - 1,
+    )
     : currentTimelineFrame();
   state.timeline.playheadFrame = Math.max(
     0,

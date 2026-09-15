@@ -8,6 +8,21 @@
     return Math.max(minimum, Math.min(maximum, frame));
   }
 
+  function frameFromPlaybackTime(mediaTime, fps, minimum, maximum) {
+    const frame = Math.floor(Math.max(0, mediaTime) * fps + 1e-4);
+    return Math.max(minimum, Math.min(maximum, frame));
+  }
+
+  function frameFromPresentedTime(mediaTime, fps, minimum, maximum) {
+    const frame = Math.round(Math.max(0, mediaTime) * fps);
+    return Math.max(minimum, Math.min(maximum, frame));
+  }
+
+  function previewTimeForFrame(frame, fps, duration = Number.POSITIVE_INFINITY) {
+    const midpoint = (Math.max(0, frame) + 0.5) / fps;
+    return Math.min(midpoint, Math.max(0, duration - 1e-6));
+  }
+
   function ranked(matches) {
     return matches.sort((left, right) => (
       left.distance - right.distance
@@ -58,5 +73,12 @@
     return { majorSeconds, minorSeconds: majorSeconds / divisor };
   }
 
-  return { choosePointerSnap, chooseRulerStep, frameFromTimelineX };
+  return {
+    choosePointerSnap,
+    chooseRulerStep,
+    frameFromPlaybackTime,
+    frameFromPresentedTime,
+    frameFromTimelineX,
+    previewTimeForFrame,
+  };
 }));
