@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260915-9" />
+    <link rel="stylesheet" href="/styles.css?v=20260915-10" />
   </head>
   <body>
     <div class="noise"></div>
@@ -182,9 +182,11 @@
               <button id="sliceTimelineBtn" class="button primary small" type="button" disabled>切割并入库</button>
             </div>
             <div id="timelineSegmentList" class="segment-list"></div>
-            <p class="timeline-export-help">点击时间轴可连续标记多个片段；为列表中的每个片段选择类型后，点击右上角即可统一交给 FFmpeg 切割并入库。</p>
-            <small id="timelineSliceLibrary" class="timeline-slice-library">请先选择受管视频库</small>
-            <div id="timelineSliceResult" class="timeline-slice-result"></div>
+            <div class="timeline-list-footer">
+              <p class="timeline-export-help">点击时间轴可连续标记多个片段；为列表中的每个片段选择类型后，点击右上角即可统一交给 FFmpeg 切割并入库。</p>
+              <small id="timelineSliceLibrary" class="timeline-slice-library">请先选择受管视频库</small>
+              <div id="timelineSliceResult" class="timeline-slice-result"></div>
+            </div>
           </div>
         </article>
       </section>

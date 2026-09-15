@@ -176,7 +176,7 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .timeline-review-heading { display: flex; align-items: center; justify-content: space-between; margin: 26px 0 10px; }
 .timeline-review-heading strong { display: block; font-family: Georgia, "Songti SC", serif; font-size: 19px; font-weight: 500; }
 .timeline-review-heading small { display: block; margin-top: 4px; color: var(--muted); }
-.segment-list { display: grid; gap: 7px; max-height: 330px; overflow: auto; }
+.segment-list { display: grid; align-content: start; gap: 7px; min-height: 210px; max-height: 330px; overflow: auto; }
 .segment-row { width: 100%; display: grid; grid-template-columns: 35px minmax(250px, 1.3fr) minmax(130px, .7fr) minmax(125px, 170px) minmax(105px, .7fr) 48px; align-items: center; gap: 12px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 10px; text-align: left; color: var(--ink); background: rgba(255,255,255,.45); cursor: pointer; }
 .segment-row:hover, .segment-row.selected { border-color: rgba(29,92,67,.42); background: #edf4ef; }
 .segment-row > span { color: var(--muted); }
@@ -190,8 +190,10 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .segment-remove-button { padding: 5px 0; border: 0; color: #9c4937; background: transparent; font-size: 10px; cursor: pointer; }
 .segment-remove-button:hover { text-decoration: underline; }
 .breakpoint-empty { padding: 35px; border: 1px dashed var(--line); border-radius: 12px; color: var(--muted); text-align: center; font-size: 11px; }
-.timeline-export-help { margin: -2px 0 12px; color: var(--muted); font-size: 10px; line-height: 1.6; }
-.timeline-slice-library { display: block; margin-top: 10px; color: var(--muted); font-size: 10px; }
+.segment-list > .breakpoint-empty { display: grid; min-height: 210px; box-sizing: border-box; place-items: center; }
+.timeline-list-footer { min-height: 76px; margin-top: 18px; padding: 14px 2px 2px; border-top: 1px solid var(--line); box-sizing: border-box; }
+.timeline-export-help { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.timeline-slice-library { display: block; margin-top: 9px; color: var(--muted); font-size: 10px; }
 .timeline-segments .timeline-segment.selected { outline: 3px solid rgba(226,80,56,.55); outline-offset: -3px; }
 .timeline-segments .timeline-segment.queued { box-shadow: inset 0 0 0 3px rgba(29,92,67,.55); }
 .timeline-segments .timeline-segment.selected.queued { box-shadow: inset 0 0 0 3px rgba(226,80,56,.62); }
