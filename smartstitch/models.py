@@ -365,6 +365,34 @@ class CreateConfigRequest(BaseModel):
     new_name: str = Field(min_length=1)
 
 
+class LibraryPreflightRequest(BaseModel):
+    parent_directory: str = Field(min_length=1)
+    folder_name: str = Field(min_length=1)
+
+
+class CreateLibraryRequest(LibraryPreflightRequest):
+    new_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
+    new_name: str = Field(min_length=1)
+    client_request_id: str = Field(min_length=8, max_length=128)
+
+
+class AddBenefitRequest(BaseModel):
+    client_request_id: str = Field(min_length=8, max_length=128)
+    current_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class SliceAssignment(BaseModel):
+    segment_index: int = Field(ge=1)
+    category: str = Field(min_length=1)
+
+
+class TimelineSliceRequest(BaseModel):
+    analysis_id: str = Field(pattern=r"^[a-f0-9]{24}$")
+    config_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
+    assignments: list[SliceAssignment] = Field(min_length=1)
+    client_request_id: str = Field(min_length=8, max_length=128)
+
+
 class WeightUpdate(BaseModel):
     category: str
     path: str

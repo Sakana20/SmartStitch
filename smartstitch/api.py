@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -10,36 +11,46 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .config import ConfigError, ConfigStore
 from .audio_preview import AudioPreviewError, create_audio_preview
+from .config import ConfigError, ConfigStore
 from .jobs import JobManager, TERMINAL_STATES
+from .library import LibraryConflictError, LibraryError, LibraryService, pick_directory
 from .models import (
+    AddBenefitRequest,
     CloneConfigRequest,
     ConfigUpdateRequest,
     CreateConfigRequest,
+    CreateLibraryRequest,
     JobCreateRequest,
+    LibraryPreflightRequest,
     LoudnessPreviewRequest,
     PreviewRequest,
     StructuredConfigUpdateRequest,
     TimelineAnalyzeRequest,
     TimelineDecisionRequest,
+    TimelineSliceRequest,
     WeightUpdateRequest,
 )
 from .planner import PlanError, build_plan
 from .scanner import probe_config_audio, scan_config
+from .slicer import SliceError, TimelineSlicer
 from .timeline import TimelineAnalyzer, TimelineError
 
 
 def create_app(base_directory: Path | None = None) -> FastAPI:
     root = (base_directory or Path(__file__).resolve().parent.parent).resolve()
     config_store = ConfigStore(root / "config")
+    library_service = LibraryService(config_store)
     job_manager = JobManager(config_store, root / "data")
     timeline_analyzer = TimelineAnalyzer(root / "data" / "timelines")
+    timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
     app = FastAPI(title="SmartStitch", version=__version__)
     app.state.root = root
     app.state.config_store = config_store
+    app.state.library_service = library_service
     app.state.job_manager = job_manager
     app.state.timeline_analyzer = timeline_analyzer
+    app.state.timeline_slicer = timeline_slicer
 
     @app.get("/api/v1/system/health")
     def health() -> dict[str, object]:
@@ -50,6 +61,56 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
             "ffprobe": shutil.which("ffprobe"),
         }
 
+    @app.post("/api/v1/system/directory-picker")
+    def directory_picker() -> dict[str, object]:
+        try:
+            return pick_directory()
+        except (LibraryError, OSError, subprocess.SubprocessError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/libraries/preflight")
+    def preflight_library(request: LibraryPreflightRequest) -> dict[str, object]:
+        try:
+            return library_service.preflight(request)
+        except LibraryConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (LibraryError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/libraries")
+    def create_library(request: CreateLibraryRequest) -> dict[str, object]:
+        try:
+            return library_service.create(request)
+        except LibraryConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (LibraryError, ConfigError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/libraries/by-config/{config_id}")
+    def get_library(config_id: str) -> dict[str, object]:
+        try:
+            return library_service.inspect_by_config(config_id)
+        except (ConfigError, FileNotFoundError) as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/api/v1/libraries/by-config/{config_id}/slice-targets")
+    def get_slice_targets(config_id: str) -> dict[str, object]:
+        try:
+            return {"targets": library_service.slice_targets(config_id)}
+        except (ConfigError, FileNotFoundError) as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except (LibraryError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/configs/{config_id}/benefits")
+    def add_benefit(config_id: str, request: AddBenefitRequest) -> dict[str, object]:
+        try:
+            return library_service.add_benefit(config_id, request)
+        except LibraryConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/v1/configs")
     def list_configs() -> list[dict[str, object]]:
         return config_store.list()
@@ -58,7 +119,11 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
     def create_config(request: CreateConfigRequest) -> dict[str, object]:
         try:
             config = config_store.create(request.new_id, request.new_name.strip())
-            return {"ok": True, "config": config.model_dump(mode="json")}
+            return {
+                "ok": True,
+                "config": config.model_dump(mode="json"),
+                "content_hash": config_store.content_hash(config.id),
+            }
         except ConfigError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -66,7 +131,11 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
     def get_config(config_id: str) -> dict[str, object]:
         try:
             config = config_store.load(config_id)
-            return {"config": config.model_dump(mode="json"), "yaml_text": config_store.raw(config_id)}
+            return {
+                "config": config.model_dump(mode="json"),
+                "yaml_text": config_store.raw(config_id),
+                "content_hash": config_store.content_hash(config_id),
+            }
         except (ConfigError, FileNotFoundError) as exc:
             raise HTTPException(404, str(exc)) from exc
 
@@ -74,7 +143,11 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
     def update_config(config_id: str, request: ConfigUpdateRequest) -> dict[str, object]:
         try:
             config = config_store.save_text(config_id, request)
-            return {"ok": True, "config": config.model_dump(mode="json")}
+            return {
+                "ok": True,
+                "config": config.model_dump(mode="json"),
+                "content_hash": config_store.content_hash(config_id),
+            }
         except ConfigError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -84,7 +157,11 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
     ) -> dict[str, object]:
         try:
             config = config_store.save_config(config_id, request.config)
-            return {"ok": True, "config": config.model_dump(mode="json")}
+            return {
+                "ok": True,
+                "config": config.model_dump(mode="json"),
+                "content_hash": config_store.content_hash(config_id),
+            }
         except ConfigError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -92,7 +169,11 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
     def clone_config(config_id: str, request: CloneConfigRequest) -> dict[str, object]:
         try:
             config = config_store.clone(config_id, request.new_id, request.new_name)
-            return {"ok": True, "config": config.model_dump(mode="json")}
+            return {
+                "ok": True,
+                "config": config.model_dump(mode="json"),
+                "content_hash": config_store.content_hash(config.id),
+            }
         except (ConfigError, FileNotFoundError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -198,6 +279,13 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
         try:
             return timeline_analyzer.save_decision(request.analysis_id, request.frame_indexes)
         except (TimelineError, OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/timeline/slices")
+    def export_timeline_slices(request: TimelineSliceRequest) -> dict[str, object]:
+        try:
+            return timeline_slicer.export(request)
+        except (SliceError, TimelineError, LibraryError, ConfigError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.post("/api/v1/jobs")

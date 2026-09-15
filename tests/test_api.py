@@ -101,6 +101,78 @@ def test_create_and_delete_config_with_recoverable_backup(tmp_path):
     assert yaml.safe_load(backups[0].read_text(encoding="utf-8"))["name"] == "夏日促销"
 
 
+def test_create_managed_library_and_add_benefit(tmp_path):
+    (tmp_path / "config").mkdir()
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    client = TestClient(create_app(tmp_path))
+
+    preflight = client.post(
+        "/api/v1/libraries/preflight",
+        json={"parent_directory": str(storage), "folder_name": "商品 视频库"},
+    )
+    assert preflight.status_code == 200
+    assert preflight.json()["root_path"] == str(storage / "商品 视频库")
+
+    response = client.post(
+        "/api/v1/libraries",
+        json={
+            "new_id": "product-library",
+            "new_name": "商品库",
+            "parent_directory": str(storage),
+            "folder_name": "商品 视频库",
+            "client_request_id": "library-request-1",
+        },
+    )
+    assert response.status_code == 200
+    created = response.json()
+    assert created["config"]["source_root"] == str(storage / "商品 视频库")
+
+    inspected = client.get("/api/v1/libraries/by-config/product-library")
+    assert inspected.status_code == 200
+    assert inspected.json()["managed"] is True
+    assert inspected.json()["health"] == "healthy"
+
+    targets = client.get(
+        "/api/v1/libraries/by-config/product-library/slice-targets"
+    )
+    assert targets.status_code == 200
+    assert {item["category"] for item in targets.json()["targets"]} == {
+        "unclassified",
+        "pre_roll",
+        "hook",
+        "benefit_1",
+        "ending",
+        "end_card",
+    }
+
+    benefit = client.post(
+        "/api/v1/configs/product-library/benefits",
+        json={
+            "client_request_id": "benefit-request-1",
+            "current_config_hash": created["content_hash"],
+        },
+    )
+    assert benefit.status_code == 200
+    payload = benefit.json()
+    assert payload["category"] == "benefit_2"
+    assert (storage / "商品 视频库" / "切片素材" / "利益点" / "2").is_dir()
+
+
+def test_directory_picker_api_returns_selected_path(tmp_path, monkeypatch):
+    (tmp_path / "config").mkdir()
+    monkeypatch.setattr(
+        "smartstitch.api.pick_directory",
+        lambda: {"cancelled": False, "path": str(tmp_path)},
+    )
+    client = TestClient(create_app(tmp_path))
+
+    response = client.post("/api/v1/system/directory-picker")
+
+    assert response.status_code == 200
+    assert response.json() == {"cancelled": False, "path": str(tmp_path)}
+
+
 def test_delete_job_record_keeps_active_jobs_protected(tmp_path):
     (tmp_path / "config").mkdir()
     app = create_app(tmp_path)

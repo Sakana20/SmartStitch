@@ -2,6 +2,8 @@ const state = {
   configs: [],
   configId: null,
   config: null,
+  configHash: null,
+  library: null,
   yaml: "",
   scan: null,
   assetCategory: "pre_roll",
@@ -27,6 +29,9 @@ const state = {
     shiftPressed: false,
     dragAnimationFrameId: null,
     pointerOverTimeline: false,
+    reviewSaved: false,
+    segmentCategories: {},
+    sliceTargets: [],
   },
 };
 
@@ -47,6 +52,11 @@ function categoryLabel(category) {
 }
 const terminalStates = new Set(["completed", "partial_failed", "failed", "cancelled", "interrupted"]);
 const configUiStoragePrefix = "smartstitch.config-ui.";
+
+function clientRequestId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+}
 
 async function api(path, options = {}) {
   const response = await fetch(`/api/v1${path}`, {
@@ -111,6 +121,18 @@ function bindEvents() {
   $("#confirmDeleteAllJobsBtn").addEventListener("click", deleteAllJobRecords);
   $("#newConfigBtn").addEventListener("click", openNewConfig);
   $("#createConfigBtn").addEventListener("click", createConfig);
+  $("#chooseLibraryParentBtn").addEventListener("click", chooseLibraryParent);
+  $("#newConfigIdInput").addEventListener("input", updateLibraryCreatePreview);
+  $("#newConfigNameInput").addEventListener("input", () => {
+    const folder = $("#newLibraryFolderInput");
+    if (folder.dataset.automatic !== "false") folder.value = $("#newConfigNameInput").value;
+    updateLibraryCreatePreview();
+  });
+  $("#newLibraryFolderInput").addEventListener("input", event => {
+    event.target.dataset.automatic = "false";
+    updateLibraryCreatePreview();
+  });
+  $("#newLibraryParentInput").addEventListener("input", updateLibraryCreatePreview);
   $("#deleteConfigBtn").addEventListener("click", showDeleteConfigConfirm);
   $("#cancelDeleteConfigBtn").addEventListener("click", hideDeleteConfigConfirm);
   $("#confirmDeleteConfigBtn").addEventListener("click", deleteConfig);
@@ -137,6 +159,7 @@ function bindTimelineEvents() {
   $("#addBreakpointBtn").addEventListener("click", addBreakpointAtPlayhead);
   $("#deleteBreakpointBtn").addEventListener("click", deleteSelectedBreakpoint);
   $("#saveTimelineBtn").addEventListener("click", saveTimelineDecision);
+  $("#exportTimelineSlicesBtn").addEventListener("click", exportTimelineSlices);
   $("#selectedFrameInput").addEventListener("change", event => moveSelectedBreakpoint(Number(event.target.value)));
   const video = $("#timelineVideo");
   video.addEventListener("play", startTimelineVideoSync);
@@ -214,6 +237,8 @@ async function analyzeTimeline() {
     state.timeline.selectedFrame = null;
     state.timeline.playheadFrame = 0;
     state.timeline.snapTargetFrame = null;
+    state.timeline.reviewSaved = false;
+    state.timeline.segmentCategories = {};
     stopTimelineVideoSync();
     const video = $("#timelineVideo");
     video.src = analysis.media_url;
@@ -259,6 +284,7 @@ function renderTimeline() {
   $("#timelineBreakpointSummary").textContent = `${state.timeline.breakpoints.length} 个断点 · ${boundaries.length - 1} 个片段`;
   renderTimelineRuler();
   renderBreakpointList();
+  renderSliceAssignments();
   syncSelectedBreakpointControls();
   renderTimelinePlayhead();
   updateTimelineSnapVisual();
@@ -665,6 +691,7 @@ function addTimelineBreakpoint(frame, reviewStatus) {
   });
   sortTimelineBreakpoints();
   state.timeline.selectedFrame = frame;
+  timelineReviewChanged();
   renderTimeline();
 }
 
@@ -680,6 +707,7 @@ function moveSelectedBreakpoint(frame) {
   point.review_status = "human_adjusted";
   point.reasons = ["human_adjusted"];
   state.timeline.selectedFrame = frame;
+  timelineReviewChanged();
   sortTimelineBreakpoints();
   seekTimelineFrame(frame);
   renderTimeline();
@@ -690,7 +718,15 @@ function deleteSelectedBreakpoint() {
   if (frame === null) return;
   state.timeline.breakpoints = state.timeline.breakpoints.filter(point => point.frame_index !== frame);
   state.timeline.selectedFrame = null;
+  timelineReviewChanged();
   renderTimeline();
+}
+
+function timelineReviewChanged() {
+  state.timeline.reviewSaved = false;
+  state.timeline.segmentCategories = {};
+  $("#timelineSliceResult").textContent = "断点已变更，请重新保存审核后入库";
+  $("#timelineSliceResult").className = "timeline-slice-result";
 }
 
 function selectTimelineBreakpoint(frame) {
@@ -753,6 +789,79 @@ function renderBreakpointList() {
   }));
 }
 
+function renderSliceAssignments() {
+  const analysis = state.timeline.analysis;
+  const container = $("#timelineSliceAssignments");
+  const button = $("#exportTimelineSlicesBtn");
+  if (!analysis || !state.configId || !state.library?.managed || state.library.health !== "healthy") {
+    $("#timelineSliceLibrary").textContent = state.configId
+      ? "当前配置不是布局健康的受管视频库"
+      : "请先选择受管视频库";
+    container.innerHTML = '<div class="breakpoint-empty">批量切片需要一个 SmartStitch 标准视频库。</div>';
+    button.disabled = true;
+    return;
+  }
+  $("#timelineSliceLibrary").textContent = `入库到：${state.config.name} · ${state.library.root_path}`;
+  const boundaries = [0, ...state.timeline.breakpoints.map(point => point.frame_index), analysis.frame_count];
+  const targets = state.timeline.sliceTargets;
+  container.innerHTML = boundaries.slice(0, -1).map((start, offset) => {
+    const index = offset + 1;
+    const end = boundaries[offset + 1];
+    if (!targets.some(target => target.category === state.timeline.segmentCategories[index])) {
+      state.timeline.segmentCategories[index] = "unclassified";
+    }
+    const options = targets.map(target => `<option value="${escapeHtml(target.category)}" ${state.timeline.segmentCategories[index] === target.category ? "selected" : ""}>${escapeHtml(target.label)}</option>`).join("");
+    return `<div class="slice-assignment-row">
+      <strong>片段 ${String(index).padStart(2, "0")}</strong>
+      <span>${frameTimecode(start, analysis.fps)} → ${frameTimecode(end, analysis.fps)} · ${end - start} 帧</span>
+      <select data-slice-segment="${index}">${options}</select>
+    </div>`;
+  }).join("");
+  $$('[data-slice-segment]').forEach(select => select.addEventListener("change", event => {
+    state.timeline.segmentCategories[Number(event.target.dataset.sliceSegment)] = event.target.value;
+  }));
+  button.disabled = !state.timeline.reviewSaved || !targets.length;
+}
+
+async function exportTimelineSlices() {
+  const analysis = state.timeline.analysis;
+  if (!analysis || !state.configId) return;
+  if (!state.timeline.reviewSaved) return toast("请先保存当前审核断点", true);
+  const boundaries = [0, ...state.timeline.breakpoints.map(point => point.frame_index), analysis.frame_count];
+  const assignments = boundaries.slice(0, -1).map((_start, offset) => ({
+    segment_index: offset + 1,
+    category: state.timeline.segmentCategories[offset + 1] || "unclassified",
+  }));
+  const button = $("#exportTimelineSlicesBtn");
+  const resultElement = $("#timelineSliceResult");
+  button.disabled = true;
+  button.textContent = "正在批量切割…";
+  resultElement.textContent = `正在用 FFmpeg 切割 ${assignments.length} 个片段，请稍候…`;
+  resultElement.className = "timeline-slice-result";
+  try {
+    const result = await api("/timeline/slices", {
+      method: "POST",
+      body: JSON.stringify({
+        analysis_id: analysis.analysis_id,
+        config_id: state.configId,
+        assignments,
+        client_request_id: clientRequestId(),
+      }),
+    });
+    resultElement.textContent = `入库完成：${result.success_count} 个成功，${result.failure_count} 个失败 · 清单 ${result.manifest_path}`;
+    resultElement.className = `timeline-slice-result ${result.failure_count ? "error" : "success"}`;
+    toast(result.failure_count ? "切片部分完成，请查看清单" : "全部片段已切割并入库", Boolean(result.failure_count));
+    await scanAssets(false);
+  } catch (error) {
+    resultElement.textContent = error.message;
+    resultElement.className = "timeline-slice-result error";
+    toast(error.message, true);
+  } finally {
+    button.textContent = "切割并入库";
+    renderSliceAssignments();
+  }
+}
+
 function timelineReasonLabel(point) {
   if (point.review_status === "human_added") return "人工添加";
   if (point.review_status === "human_adjusted") return "人工调整";
@@ -775,6 +884,7 @@ async function saveTimelineDecision() {
       }),
     });
     state.timeline.breakpoints.forEach(point => { point.review_status = "human_confirmed"; });
+    state.timeline.reviewSaved = true;
     setTimelineStatus("已保存审核", "success");
     renderTimeline();
     toast("审核断点已按帧保存");
@@ -811,7 +921,7 @@ async function loadConfigs(preferredId = null) {
   [$("#cloneConfigBtn"), $("#deleteConfigBtn"), $("#editConfigBtn"), $("#scanBtn"), $("#saveWeightsBtn"), $("#previewBtn"), $("#startBtn")]
     .forEach(button => { button.disabled = !hasConfigs; });
   if (!hasConfigs) {
-    state.configId = null; state.config = null; state.scan = null;
+    state.configId = null; state.config = null; state.configHash = null; state.library = null; state.scan = null;
     select.innerHTML = '<option value="">暂无可用配置</option>';
     $("#heroConfigName").textContent = "尚未创建配置";
     $("#heroAssetCount").textContent = "新建配置后开始扫描";
@@ -832,12 +942,30 @@ async function selectConfig(id) {
   try {
     const result = await api(`/configs/${id}`);
     state.config = result.config;
+    state.configHash = result.content_hash;
     state.yaml = result.yaml_text;
+    try {
+      state.library = await api(`/libraries/by-config/${id}`);
+    } catch (_) {
+      state.library = null;
+    }
+    if (state.library?.managed && state.library.health === "healthy") {
+      try {
+        const targets = await api(`/libraries/by-config/${id}/slice-targets`);
+        state.timeline.sliceTargets = targets.targets;
+      } catch (_) {
+        state.timeline.sliceTargets = [];
+      }
+    } else {
+      state.timeline.sliceTargets = [];
+    }
+    state.timeline.segmentCategories = {};
     $("#heroConfigName").textContent = state.config.name;
     $("#countInput").value = state.config.batch.default_count;
     $("#concurrencyInput").value = state.config.batch.concurrency;
     state.preview = null;
     resetPreview();
+    if (state.timeline.analysis) renderTimeline();
     await scanAssets(false);
   } catch (error) { toast(error.message, true); }
 }
@@ -1085,9 +1213,43 @@ function closeDrawer() { $("#jobDrawer").classList.remove("open"); if (state.eve
 function openNewConfig() {
   $("#newConfigIdInput").value = "";
   $("#newConfigNameInput").value = "";
+  $("#newLibraryFolderInput").value = "";
+  $("#newLibraryFolderInput").dataset.automatic = "true";
+  $("#newLibraryParentInput").value = "";
+  updateLibraryCreatePreview();
   $("#newConfigModal").classList.add("open");
   $("#newConfigModal").setAttribute("aria-hidden", "false");
   requestAnimationFrame(() => $("#newConfigIdInput").focus());
+}
+
+function updateLibraryCreatePreview() {
+  const newId = $("#newConfigIdInput").value.trim();
+  const newName = $("#newConfigNameInput").value.trim();
+  const folder = $("#newLibraryFolderInput").value.trim();
+  const parent = $("#newLibraryParentInput").value.trim();
+  const complete = /^[a-z0-9][a-z0-9-]*$/.test(newId) && newName && folder && parent;
+  $("#createConfigBtn").disabled = !complete;
+  $("#newLibraryFinalPath").textContent = parent && folder
+    ? `${parent.replace(/\/+$/, "")}/${folder}`
+    : "请先选择保存位置";
+}
+
+async function chooseLibraryParent() {
+  const button = $("#chooseLibraryParentBtn");
+  button.disabled = true;
+  button.textContent = "等待选择…";
+  try {
+    const result = await api("/system/directory-picker", { method: "POST" });
+    if (!result.cancelled && result.path) {
+      $("#newLibraryParentInput").value = result.path;
+      updateLibraryCreatePreview();
+    }
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "选择位置";
+  }
 }
 
 function closeNewConfig() {
@@ -1098,6 +1260,8 @@ function closeNewConfig() {
 async function createConfig() {
   const newId = $("#newConfigIdInput").value.trim();
   const newName = $("#newConfigNameInput").value.trim();
+  const folderName = $("#newLibraryFolderInput").value.trim();
+  const parentDirectory = $("#newLibraryParentInput").value.trim();
   if (!/^[a-z0-9][a-z0-9-]*$/.test(newId)) {
     toast("配置 ID 只能使用小写英文、数字和短横线", true);
     $("#newConfigIdInput").focus();
@@ -1108,16 +1272,36 @@ async function createConfig() {
     $("#newConfigNameInput").focus();
     return;
   }
+  if (!folderName) {
+    toast("请填写视频库文件夹名", true);
+    $("#newLibraryFolderInput").focus();
+    return;
+  }
+  if (!parentDirectory) {
+    toast("请先选择视频库的保存位置", true);
+    return;
+  }
   const button = $("#createConfigBtn");
-  button.disabled = true; button.textContent = "新建中…";
+  button.disabled = true; button.textContent = "正在创建目录…";
   try {
-    await api("/configs", { method: "POST", body: JSON.stringify({ new_id: newId, new_name: newName }) });
+    const payload = {
+      new_id: newId,
+      new_name: newName,
+      parent_directory: parentDirectory,
+      folder_name: folderName,
+      client_request_id: clientRequestId(),
+    };
+    await api("/libraries/preflight", {
+      method: "POST",
+      body: JSON.stringify({ parent_directory: parentDirectory, folder_name: folderName }),
+    });
+    await api("/libraries", { method: "POST", body: JSON.stringify(payload) });
     closeNewConfig();
     await loadConfigs(newId);
-    toast("配置已新建，请继续完善素材和输出设置");
+    toast("标准视频库和全部文件夹已创建");
     openConfig();
   } catch (error) { toast(error.message, true); }
-  finally { button.disabled = false; button.textContent = "新建并编辑"; }
+  finally { button.textContent = "创建视频库"; updateLibraryCreatePreview(); }
 }
 
 function showDeleteConfigConfirm() {
@@ -1430,29 +1614,12 @@ function mutateBenefitConfig(mutator) {
 }
 
 function bindBenefitConfigControls() {
-  $("#addBenefitBtn")?.addEventListener("click", () => mutateBenefitConfig(config => {
-    const numbers = Object.keys(config.sources)
-      .map(category => category.match(benefitCategoryPattern))
-      .filter(Boolean)
-      .map(match => Number(match[1]));
-    const nextNumber = Math.max(0, ...numbers) + 1;
-    const category = `benefit_${nextNumber}`;
-    config.sources[category] = {
-      mode: "required",
-      directory: `利益点/${nextNumber}`,
-      extensions: [".mp4"],
-      default_weight: 1,
-      image_duration_seconds: 1.5,
-      items: [],
-    };
-    const endingIndex = config.timeline.indexOf("ending");
-    config.timeline.splice(endingIndex >= 0 ? endingIndex : config.timeline.length, 0, category);
-  }));
+  $("#addBenefitBtn")?.addEventListener("click", event => addBenefitFromEditor(event.currentTarget));
 
   $$('[data-benefit-action]').forEach(button => button.addEventListener("click", () => {
     const category = button.dataset.benefitCategory;
     const action = button.dataset.benefitAction;
-    if (action === "delete" && !window.confirm(`删除${categoryLabel(category)}的配置？\n本地素材文件不会被删除。`)) return;
+    if (action === "delete" && !window.confirm(`删除${categoryLabel(category)}的配置？\n对应文件夹和本地素材会原样保留。`)) return;
     mutateBenefitConfig(config => {
       const benefits = config.timeline.filter(isBenefitCategory);
       if (action === "delete") {
@@ -1469,6 +1636,65 @@ function bindBenefitConfigControls() {
       [config.timeline[currentIndex], config.timeline[otherIndex]] = [config.timeline[otherIndex], config.timeline[currentIndex]];
     });
   }));
+}
+
+async function addBenefitFromEditor(button) {
+  if (!state.library?.managed) {
+    mutateBenefitConfig(config => {
+      const numbers = Object.keys(config.sources)
+        .map(category => category.match(benefitCategoryPattern))
+        .filter(Boolean)
+        .map(match => Number(match[1]));
+      const nextNumber = Math.max(0, ...numbers) + 1;
+      const category = `benefit_${nextNumber}`;
+      config.sources[category] = {
+        mode: "required",
+        directory: `利益点/${nextNumber}`,
+        extensions: [".mp4"],
+        default_weight: 1,
+        image_duration_seconds: 1.5,
+        items: [],
+      };
+      const endingIndex = config.timeline.indexOf("ending");
+      config.timeline.splice(endingIndex >= 0 ? endingIndex : config.timeline.length, 0, category);
+    });
+    toast("已添加利益点草稿；外部素材配置请确认目录后保存");
+    return;
+  }
+
+  const scrollTop = $("#visualConfigEditor").scrollTop;
+  button.disabled = true;
+  button.textContent = "正在创建文件夹…";
+  try {
+    const draft = collectVisualConfig();
+    const saved = await api(`/configs/${state.configId}/structured`, {
+      method: "PUT",
+      body: JSON.stringify({ config: draft }),
+    });
+    const added = await api(`/configs/${state.configId}/benefits`, {
+      method: "POST",
+      body: JSON.stringify({
+        client_request_id: clientRequestId(),
+        current_config_hash: saved.content_hash,
+      }),
+    });
+    const refreshed = await api(`/configs/${state.configId}`);
+    state.config = refreshed.config;
+    state.configDraft = structuredClone(refreshed.config);
+    state.configHash = refreshed.content_hash;
+    state.yaml = refreshed.yaml_text;
+    state.library = await api(`/libraries/by-config/${state.configId}`);
+    state.timeline.sliceTargets = (await api(`/libraries/by-config/${state.configId}/slice-targets`)).targets;
+    $("#yamlEditor").value = state.yaml;
+    renderVisualConfig();
+    $("#visualConfigEditor").scrollTop = scrollTop;
+    const warning = added.warnings?.length ? `；${added.warnings.join("；")}` : "";
+    toast(`${categoryLabel(added.category)}已创建，文件夹：${added.directory}${warning}`, Boolean(added.warnings?.length));
+  } catch (error) {
+    toast(error.message, true);
+    button.disabled = false;
+    button.textContent = "+添加利益点";
+  }
 }
 
 function bindOutputControls() {

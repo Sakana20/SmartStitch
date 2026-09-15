@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260915-5" />
+    <link rel="stylesheet" href="/styles.css?v=20260915-6" />
   </head>
   <body>
     <div class="noise"></div>
@@ -43,7 +43,7 @@
             <div class="panel-heading">
               <div><span class="step">01</span><h2>生成设置</h2></div>
               <div class="inline-actions config-heading-actions">
-                <button id="newConfigBtn" class="text-btn">新建配置</button>
+                <button id="newConfigBtn" class="text-btn">新建视频库</button>
                 <button id="cloneConfigBtn" class="text-btn">复制配置</button>
                 <button id="deleteConfigBtn" class="text-btn danger-text">删除配置</button>
                 <button id="editConfigBtn" class="text-btn">高级配置 ↗</button>
@@ -56,7 +56,7 @@
             </label>
 
             <div id="deleteConfigConfirm" class="record-delete-confirm config-delete-confirm hidden">
-              <div><strong>删除“<span id="deleteConfigName"></span>”？</strong><p>配置文件会移入备份目录，已经生成的视频和任务记录不会删除。</p></div>
+              <div><strong>删除“<span id="deleteConfigName"></span>”？</strong><p>配置文件会移入备份目录，视频库、素材、成片和任务记录都不会删除。</p></div>
               <div class="record-delete-actions">
                 <button id="cancelDeleteConfigBtn" class="button secondary small" type="button">取消</button>
                 <button id="confirmDeleteConfigBtn" class="button danger small" type="button">确认删除</button>
@@ -182,6 +182,15 @@
               <button id="saveTimelineBtn" class="button primary small" type="button">保存人工审核</button>
             </div>
             <div id="timelineBreakpointList" class="breakpoint-list"></div>
+            <div class="timeline-export-panel">
+              <div class="timeline-review-heading">
+                <div><strong>批量切片入库</strong><small id="timelineSliceLibrary">请先选择受管视频库</small></div>
+                <button id="exportTimelineSlicesBtn" class="button primary small" type="button" disabled>切割并入库</button>
+              </div>
+              <p class="timeline-export-help">为每个片段指定素材池。默认放入“未归类”，系统不会猜测片段用途。入库前必须先保存审核断点。</p>
+              <div id="timelineSliceAssignments" class="slice-assignment-list"></div>
+              <div id="timelineSliceResult" class="timeline-slice-result"></div>
+            </div>
           </div>
         </article>
       </section>
@@ -258,12 +267,12 @@
 
     <div id="newConfigModal" class="modal" aria-hidden="true">
       <div class="modal-backdrop" data-close-new-config></div>
-      <div class="modal-card compact-modal-card">
+      <div class="modal-card compact-modal-card library-create-card">
         <div class="modal-heading">
-          <div><p class="eyebrow">NEW CONFIGURATION</p><h2>新建配置</h2></div>
+          <div><p class="eyebrow">NEW VIDEO LIBRARY</p><h2>新建标准视频库</h2></div>
           <button class="drawer-close" data-close-new-config>×</button>
         </div>
-        <p>从标准模板创建一份独立配置，创建后继续填写素材目录和输出设置。</p>
+        <p>选择保存位置后，系统会一次建好原始视频、切片素材、利益点、成片和工作记录等全部文件夹。</p>
         <label class="field">
           <span>配置 ID <small>小写英文、数字和短横线</small></span>
           <input id="newConfigIdInput" type="text" placeholder="例如 product-video" autocomplete="off" />
@@ -272,12 +281,28 @@
           <span>配置名称</span>
           <input id="newConfigNameInput" type="text" placeholder="例如 商品视频配置" autocomplete="off" />
         </label>
-        <div class="actions right"><button class="button secondary" data-close-new-config>取消</button><button id="createConfigBtn" class="button primary">新建并编辑</button></div>
+        <label class="field">
+          <span>视频库文件夹名</span>
+          <input id="newLibraryFolderInput" type="text" placeholder="例如 商品视频库" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>保存位置 <small>必须由你确认</small></span>
+          <div class="directory-picker-row">
+            <input id="newLibraryParentInput" type="text" placeholder="选择本机或外接硬盘中的文件夹" autocomplete="off" />
+            <button id="chooseLibraryParentBtn" class="button secondary small" type="button">选择位置</button>
+          </div>
+        </label>
+        <div class="library-path-preview">
+          <span>最终位置</span>
+          <strong id="newLibraryFinalPath">请先选择保存位置</strong>
+          <small>将创建：原始视频 / 切片素材 / 前贴 / 引子 / 利益点 / 结尾 / 尾帧 / 未归类 / 利益点图片 / 成片输出 / 工作记录</small>
+        </div>
+        <div class="actions right"><button class="button secondary" data-close-new-config>取消</button><button id="createConfigBtn" class="button primary" disabled>创建视频库</button></div>
       </div>
     </div>
 
     <div id="toast" class="toast" role="status"></div>
     <script src="/timeline-math.js?v=20260915-4" defer></script>
-    <script src="/app.js?v=20260915-11" defer></script>
+    <script src="/app.js?v=20260915-12" defer></script>
   </body>
 </html>

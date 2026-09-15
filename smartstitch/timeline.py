@@ -246,6 +246,17 @@ class TimelineAnalyzer:
         self._write(analysis_id, data)
         return {"ok": True, "analysis_id": analysis_id, **data["review"]}
 
+    def load_record(self, analysis_id: str) -> dict[str, Any]:
+        if not re.fullmatch(r"[a-f0-9]{24}", analysis_id):
+            raise TimelineError("分析记录 ID 格式不正确")
+        path = self.data_directory / f"{analysis_id}.json"
+        if not path.is_file():
+            raise TimelineError("分析记录不存在，请重新分析")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise TimelineError("分析记录格式不正确")
+        return data
+
     def _write(self, analysis_id: str, data: dict[str, Any]) -> None:
         target = self.data_directory / f"{analysis_id}.json"
         temporary = target.with_suffix(".json.tmp")
