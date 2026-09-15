@@ -15,8 +15,17 @@ const state = {
   timeline: {
     analysis: null,
     breakpoints: [],
+    machineBreakpoints: [],
     selectedFrame: null,
+    playheadFrame: 0,
     dragging: false,
+    drag: null,
+    snapTargetFrame: null,
+    suppressClickUntil: 0,
+    videoFrameCallbackId: null,
+    pixelsPerSecond: 30,
+    shiftPressed: false,
+    dragAnimationFrameId: null,
   },
 };
 
@@ -123,25 +132,52 @@ function bindTimelineEvents() {
   $("#deleteBreakpointBtn").addEventListener("click", deleteSelectedBreakpoint);
   $("#saveTimelineBtn").addEventListener("click", saveTimelineDecision);
   $("#selectedFrameInput").addEventListener("change", event => moveSelectedBreakpoint(Number(event.target.value)));
-  $("#timelineVideo").addEventListener("timeupdate", renderTimelinePlayhead);
-  $("#timelineVideo").addEventListener("seeked", renderTimelinePlayhead);
-  $("#timelineTrack").addEventListener("click", event => {
-    if (event.target.closest(".timeline-marker") || state.timeline.dragging) return;
-    seekTimelineFrame(frameFromPointer(event));
+  const video = $("#timelineVideo");
+  video.addEventListener("play", startTimelineVideoSync);
+  video.addEventListener("pause", syncTimelineFromVideo);
+  video.addEventListener("timeupdate", syncTimelineFromVideo);
+  video.addEventListener("seeking", syncTimelineFromVideo);
+  video.addEventListener("seeked", syncTimelineFromVideo);
+  [$("#timelineRulerBar"), $("#timelineTrack"), $("#timelinePlayhead")].forEach(surface => {
+    surface.addEventListener("pointerdown", event => {
+      if (event.target.closest(".timeline-marker")) return;
+      const frame = event.currentTarget.id === "timelinePlayhead"
+        ? state.timeline.playheadFrame
+        : frameFromPointer(event, 0, event.shiftKey);
+      seekTimelineFrame(frame, "timeline_scrub");
+      beginTimelineDrag(event, { kind: "playhead", anchorFrame: frame });
+    });
   });
   $("#timelineTrack").addEventListener("dblclick", event => {
     if (event.target.closest(".timeline-marker")) return;
-    const frame = frameFromPointer(event);
-    seekTimelineFrame(frame);
+    const frame = frameFromPointer(event, 1, event.shiftKey);
+    seekTimelineFrame(frame, "timeline_scrub");
     addTimelineBreakpoint(frame, "human_added");
   });
+  $("#timelineViewport").addEventListener("scroll", renderTimelineRuler);
+  $("#timelineZoomInput").addEventListener("input", event => {
+    setTimelineZoom(Number(event.target.value));
+  });
+  $("#fitTimelineBtn").addEventListener("click", fitTimelineToViewport);
+  window.addEventListener("resize", () => {
+    if (state.timeline.analysis) renderTimeline();
+  });
   document.addEventListener("keydown", event => {
+    if (event.key === "Shift") {
+      state.timeline.shiftPressed = true;
+      scheduleTimelineDragFrame();
+    }
     if (!$("#timelineView").classList.contains("active")) return;
     if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault();
       stepTimelineFrame(event.key === "ArrowLeft" ? -1 : 1);
     }
+  });
+  document.addEventListener("keyup", event => {
+    if (event.key !== "Shift") return;
+    state.timeline.shiftPressed = false;
+    scheduleTimelineDragFrame();
   });
 }
 
@@ -162,13 +198,21 @@ async function analyzeTimeline() {
       }),
     });
     state.timeline.analysis = analysis;
-    state.timeline.breakpoints = analysis.breakpoints.map(point => ({ ...point }));
+    state.timeline.breakpoints = analysis.breakpoints.map(point => ({
+      ...point,
+      machine_origin_frame: point.frame_index,
+    }));
+    state.timeline.machineBreakpoints = analysis.breakpoints.map(point => ({ ...point }));
     state.timeline.selectedFrame = null;
+    state.timeline.playheadFrame = 0;
+    state.timeline.snapTargetFrame = null;
+    stopTimelineVideoSync();
     const video = $("#timelineVideo");
     video.src = analysis.media_url;
     video.load();
     $("#timelineEmpty").classList.add("hidden");
     $("#timelineWorkspace").classList.remove("hidden");
+    fitTimelineToViewport(false);
     renderTimeline();
     setTimelineStatus("待人工审核", "running");
     toast(`机器给出了 ${state.timeline.breakpoints.length} 个候选断点`);
@@ -190,75 +234,296 @@ function setTimelineStatus(text, type) {
 function renderTimeline() {
   const analysis = state.timeline.analysis;
   if (!analysis) return;
+  layoutTimelineCanvas();
   const boundaries = [0, ...state.timeline.breakpoints.map(point => point.frame_index), analysis.frame_count];
   $("#timelineSegments").innerHTML = boundaries.slice(0, -1).map((start, index) => {
     const end = boundaries[index + 1];
-    return `<span style="left:${start / analysis.frame_count * 100}%;width:${(end - start) / analysis.frame_count * 100}%" title="片段 ${index + 1} · ${end - start} 帧"></span>`;
+    const left = timelineXForFrame(start);
+    const width = timelineXForFrame(end) - left;
+    return `<span style="left:${left}px;width:${width}px" title="片段 ${index + 1} · ${end - start} 帧"></span>`;
   }).join("");
   $("#timelineMarkers").innerHTML = state.timeline.breakpoints.map(point => `
-    <button class="timeline-marker ${point.frame_index === state.timeline.selectedFrame ? "selected" : ""} ${point.review_status === "machine_suggested" ? "machine" : "human"}"
-      style="left:${point.frame_index / analysis.frame_count * 100}%" data-frame="${point.frame_index}"
+    <button class="timeline-marker ${point.frame_index === state.timeline.selectedFrame ? "selected" : ""} ${point.frame_index === state.timeline.snapTargetFrame ? "snap-target" : ""} ${point.review_status === "machine_suggested" ? "machine" : "human"}"
+      style="left:${timelineXForFrame(point.frame_index)}px" data-frame="${point.frame_index}"
       title="第 ${point.frame_index} 帧 · ${timelineReasonLabel(point)}"><i></i></button>`).join("");
   $$(".timeline-marker").forEach(marker => bindTimelineMarker(marker));
   $("#timelineMeta").innerHTML = `<span>${escapeHtml(analysis.source_name)}</span><span>${analysis.width}×${analysis.height}</span><span>${analysis.fps.toFixed(3)} fps</span><span>${analysis.frame_count} 帧</span><span>${formatPreciseTime(analysis.duration)}</span>`;
-  $("#timelineMidLabel").textContent = formatClock(analysis.duration / 2);
-  $("#timelineEndLabel").textContent = formatClock(analysis.duration);
   $("#timelineBreakpointSummary").textContent = `${state.timeline.breakpoints.length} 个断点 · ${boundaries.length - 1} 个片段`;
+  renderTimelineRuler();
   renderBreakpointList();
   syncSelectedBreakpointControls();
   renderTimelinePlayhead();
+  updateTimelineSnapVisual();
+}
+
+function layoutTimelineCanvas() {
+  const analysis = state.timeline.analysis;
+  const viewport = $("#timelineViewport");
+  const timelineDuration = Math.max(analysis.duration, analysis.frame_count / analysis.fps);
+  const width = Math.max(viewport.clientWidth, timelineDuration * state.timeline.pixelsPerSecond);
+  $("#timelineCanvas").style.width = `${Math.ceil(width)}px`;
+  $("#timelineZoomInput").value = String(Math.round(state.timeline.pixelsPerSecond));
+  $("#timelineZoomValue").textContent = `${Math.round(state.timeline.pixelsPerSecond)} px/s`;
+}
+
+function timelineXForFrame(frame) {
+  return frame / state.timeline.analysis.fps * state.timeline.pixelsPerSecond;
+}
+
+function renderTimelineRuler() {
+  const analysis = state.timeline.analysis;
+  if (!analysis) return;
+  const viewport = $("#timelineViewport");
+  const pixelsPerSecond = state.timeline.pixelsPerSecond;
+  const { majorSeconds, minorSeconds } = TimelineMath.chooseRulerStep(pixelsPerSecond);
+  const startSeconds = Math.max(0, (viewport.scrollLeft - 100) / pixelsPerSecond);
+  const endSeconds = Math.min(
+    analysis.duration,
+    (viewport.scrollLeft + viewport.clientWidth + 100) / pixelsPerSecond,
+  );
+  const firstIndex = Math.max(0, Math.floor(startSeconds / minorSeconds));
+  const lastIndex = Math.ceil(endSeconds / minorSeconds);
+  const majorEvery = Math.max(1, Math.round(majorSeconds / minorSeconds));
+  const ticks = [];
+  for (let index = firstIndex; index <= lastIndex; index += 1) {
+    const seconds = index * minorSeconds;
+    if (seconds > analysis.duration + 1e-6) break;
+    const major = index % majorEvery === 0;
+    const frame = Math.min(analysis.frame_count - 1, Math.round(seconds * analysis.fps));
+    ticks.push(`<i class="${major ? "major" : "minor"}" style="left:${seconds * pixelsPerSecond}px">${major ? `<span>${frameTimecode(frame, analysis.fps)}</span>` : ""}</i>`);
+  }
+  $("#timelineTicks").innerHTML = ticks.join("");
+}
+
+function fitTimelineToViewport(render = true) {
+  const analysis = state.timeline.analysis;
+  if (!analysis) return;
+  const viewport = $("#timelineViewport");
+  state.timeline.pixelsPerSecond = Math.max(1, Math.min(240, viewport.clientWidth / analysis.duration));
+  viewport.scrollLeft = 0;
+  if (render) renderTimeline();
+}
+
+function setTimelineZoom(pixelsPerSecond) {
+  const analysis = state.timeline.analysis;
+  if (!analysis) return;
+  const viewport = $("#timelineViewport");
+  const oldPixelsPerSecond = state.timeline.pixelsPerSecond;
+  const playheadSeconds = state.timeline.playheadFrame / analysis.fps;
+  const playheadViewportX = playheadSeconds * oldPixelsPerSecond - viewport.scrollLeft;
+  state.timeline.pixelsPerSecond = Math.max(1, Math.min(240, pixelsPerSecond));
+  layoutTimelineCanvas();
+  viewport.scrollLeft = Math.max(
+    0,
+    playheadSeconds * state.timeline.pixelsPerSecond - playheadViewportX,
+  );
+  renderTimeline();
 }
 
 function bindTimelineMarker(marker) {
   marker.addEventListener("click", event => {
     event.stopPropagation();
+    if (Date.now() < state.timeline.suppressClickUntil) return;
     const frame = Number(marker.dataset.frame);
     selectTimelineBreakpoint(frame);
-    seekTimelineFrame(frame);
+    seekTimelineFrame(frame, "breakpoint_select");
   });
   marker.addEventListener("pointerdown", event => {
     event.preventDefault();
-    state.timeline.dragging = true;
+    event.stopPropagation();
     const originalFrame = Number(marker.dataset.frame);
     const point = state.timeline.breakpoints.find(item => item.frame_index === originalFrame);
-    let targetFrame = originalFrame;
+    if (!point) return;
     state.timeline.selectedFrame = originalFrame;
     marker.classList.add("selected");
     syncSelectedBreakpointControls();
-    const onMove = moveEvent => {
-      targetFrame = frameFromPointer(moveEvent);
-      marker.style.left = `${targetFrame / state.timeline.analysis.frame_count * 100}%`;
-      $("#selectedFrameInput").value = String(targetFrame);
-      renderTimelinePlayhead(targetFrame);
-    };
-    const onUp = () => {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
-      state.timeline.dragging = false;
-      const occupied = state.timeline.breakpoints.some(item => item !== point && item.frame_index === targetFrame);
-      if (point && !occupied && targetFrame !== originalFrame) {
-        point.frame_index = targetFrame;
-        point.time_seconds = targetFrame / state.timeline.analysis.fps;
-        point.review_status = "human_adjusted";
-        point.reasons = ["human_adjusted"];
-        state.timeline.selectedFrame = targetFrame;
-        sortTimelineBreakpoints();
-      } else {
-        state.timeline.selectedFrame = originalFrame;
-      }
-      seekTimelineFrame(state.timeline.selectedFrame);
-      renderTimeline();
-    };
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onUp, { once: true });
+    seekTimelineFrame(originalFrame, "breakpoint_drag");
+    beginTimelineDrag(event, { kind: "breakpoint", anchorFrame: originalFrame, point });
   });
 }
 
-function frameFromPointer(event) {
+function beginTimelineDrag(event, { kind, anchorFrame, point = null }) {
+  if (!state.timeline.analysis || state.timeline.drag) return;
+  event.preventDefault();
+  const video = $("#timelineVideo");
+  const captureTarget = event.currentTarget;
+  try { captureTarget.setPointerCapture(event.pointerId); } catch (_) {}
+  state.timeline.dragging = true;
+  state.timeline.snapTargetFrame = null;
+  state.timeline.shiftPressed = event.shiftKey;
+  const pointerTimelineX = timelineXFromClientX(event.clientX);
+  state.timeline.drag = {
+    kind,
+    point,
+    pointerId: event.pointerId,
+    captureTarget,
+    anchorFrame,
+    originalFrame: point?.frame_index ?? anchorFrame,
+    targetFrame: anchorFrame,
+    startClientX: event.clientX,
+    latestClientX: event.clientX,
+    grabOffsetPx: kind === "breakpoint" || captureTarget.id === "timelinePlayhead"
+      ? pointerTimelineX - timelineXForFrame(anchorFrame)
+      : 0,
+    moved: false,
+    wasPlaying: !video.paused,
+  };
+  $("#timelineTrack").classList.add("is-dragging");
+  video.pause();
+  window.addEventListener("pointermove", handleTimelineDragMove);
+  window.addEventListener("pointerup", finishTimelineDrag);
+  window.addEventListener("pointercancel", finishTimelineDrag);
+  window.addEventListener("blur", finishTimelineDrag);
+}
+
+function handleTimelineDragMove(event) {
+  const drag = state.timeline.drag;
+  if (!drag || (event.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
+  event.preventDefault();
+  if (Math.abs(event.clientX - drag.startClientX) >= 2) drag.moved = true;
+  drag.latestClientX = event.clientX;
+  state.timeline.shiftPressed = event.shiftKey;
+  scheduleTimelineDragFrame();
+}
+
+function scheduleTimelineDragFrame() {
+  if (!state.timeline.drag || state.timeline.dragAnimationFrameId !== null) return;
+  state.timeline.dragAnimationFrameId = requestAnimationFrame(() => {
+    state.timeline.dragAnimationFrameId = null;
+    applyTimelineDragFrame();
+  });
+}
+
+function applyTimelineDragFrame() {
+  const drag = state.timeline.drag;
+  if (!drag) return;
+  const minimum = drag.kind === "breakpoint" ? 1 : 0;
+  const maximum = state.timeline.analysis.frame_count - 1;
+  const pointerTimelineX = Math.max(
+    0,
+    timelineXFromClientX(drag.latestClientX) - drag.grabOffsetPx,
+  );
+  const rawFrame = TimelineMath.frameFromTimelineX(
+    pointerTimelineX,
+    state.timeline.pixelsPerSecond,
+    state.timeline.analysis.fps,
+    minimum,
+    maximum,
+  );
+  drag.targetFrame = snappedTimelineFrame(rawFrame, pointerTimelineX, drag);
+  state.timeline.playheadFrame = drag.targetFrame;
+  if (drag.kind === "breakpoint") {
+    const marker = $(`.timeline-marker[data-frame="${drag.originalFrame}"]`);
+    if (marker) marker.style.left = `${timelineXForFrame(drag.targetFrame)}px`;
+    $("#selectedFrameInput").value = String(drag.targetFrame);
+  }
+  seekTimelineFrame(drag.targetFrame, drag.kind === "breakpoint" ? "breakpoint_drag" : "timeline_scrub");
+  updateTimelineSnapVisual();
+}
+
+function finishTimelineDrag(event) {
+  const drag = state.timeline.drag;
+  if (!drag || (event?.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
+  if (Number.isFinite(event?.clientX)) drag.latestClientX = event.clientX;
+  if (state.timeline.dragAnimationFrameId !== null) {
+    cancelAnimationFrame(state.timeline.dragAnimationFrameId);
+    state.timeline.dragAnimationFrameId = null;
+  }
+  applyTimelineDragFrame();
+  window.removeEventListener("pointermove", handleTimelineDragMove);
+  window.removeEventListener("pointerup", finishTimelineDrag);
+  window.removeEventListener("pointercancel", finishTimelineDrag);
+  window.removeEventListener("blur", finishTimelineDrag);
+  try { drag.captureTarget.releasePointerCapture(drag.pointerId); } catch (_) {}
+
+  state.timeline.drag = null;
+  state.timeline.dragging = false;
+  state.timeline.shiftPressed = false;
+  state.timeline.snapTargetFrame = null;
+  $("#timelineTrack").classList.remove("is-dragging");
+  if (drag.moved) state.timeline.suppressClickUntil = Date.now() + 250;
+
+  if (drag.kind === "breakpoint") {
+    const occupied = state.timeline.breakpoints.find(
+      item => item !== drag.point && item.frame_index === drag.targetFrame,
+    );
+    if (occupied) {
+      state.timeline.selectedFrame = occupied.frame_index;
+    } else if (drag.targetFrame !== drag.originalFrame) {
+      drag.point.frame_index = drag.targetFrame;
+      drag.point.time_seconds = drag.targetFrame / state.timeline.analysis.fps;
+      drag.point.review_status = "human_adjusted";
+      drag.point.reasons = ["human_adjusted"];
+      state.timeline.selectedFrame = drag.targetFrame;
+      sortTimelineBreakpoints();
+    } else {
+      state.timeline.selectedFrame = drag.originalFrame;
+    }
+  }
+
+  seekTimelineFrame(drag.targetFrame, "lower_drag_end");
+  renderTimeline();
+  if (drag.wasPlaying) $("#timelineVideo").play().catch(() => {});
+}
+
+function snappedTimelineFrame(rawFrame, pointerTimelineX, drag) {
+  const candidates = timelineSnapCandidates(drag);
+  const result = TimelineMath.choosePointerSnap({
+    rawFrame,
+    pointerTimelineX,
+    pixelsPerSecond: state.timeline.pixelsPerSecond,
+    fps: state.timeline.analysis.fps,
+    candidates,
+    lockedFrame: state.timeline.snapTargetFrame,
+    enabled: state.timeline.shiftPressed,
+  });
+  state.timeline.snapTargetFrame = result.snapTargetFrame;
+  return result.frame;
+}
+
+function timelineSnapCandidates(drag = null) {
+  const byFrame = new Map();
+  const add = (frame, priority, label) => {
+    const current = byFrame.get(frame);
+    if (!current || priority > current.priority) byFrame.set(frame, { frame, priority, label });
+  };
+  state.timeline.breakpoints.forEach(point => {
+    if (point === drag?.point) return;
+    const human = point.review_status !== "machine_suggested";
+    add(point.frame_index, human ? 3 : 2, human ? "人工断点" : "机器断点");
+  });
+  state.timeline.machineBreakpoints.forEach(point => {
+    if (
+      drag?.point?.machine_origin_frame === point.frame_index
+      && drag.originalFrame === point.frame_index
+    ) return;
+    add(point.frame_index, 2, "机器断点");
+  });
+  return [...byFrame.values()];
+}
+
+function timelineXFromClientX(clientX) {
+  return clientX - $("#timelineCanvas").getBoundingClientRect().left;
+}
+
+function frameFromPointer(event, minimum = 0, snapEnabled = false) {
   const analysis = state.timeline.analysis;
-  const rect = $("#timelineTrack").getBoundingClientRect();
-  const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-  return Math.max(1, Math.min(analysis.frame_count - 1, Math.round(ratio * analysis.frame_count)));
+  const timelineX = Math.max(0, timelineXFromClientX(event.clientX));
+  const rawFrame = TimelineMath.frameFromTimelineX(
+    timelineX,
+    state.timeline.pixelsPerSecond,
+    analysis.fps,
+    minimum,
+    analysis.frame_count - 1,
+  );
+  return TimelineMath.choosePointerSnap({
+    rawFrame,
+    pointerTimelineX: timelineX,
+    pixelsPerSecond: state.timeline.pixelsPerSecond,
+    fps: analysis.fps,
+    candidates: timelineSnapCandidates(),
+    enabled: snapEnabled,
+  }).frame;
 }
 
 function currentTimelineFrame() {
@@ -266,12 +531,55 @@ function currentTimelineFrame() {
   return analysis ? Math.max(0, Math.min(analysis.frame_count - 1, Math.round($("#timelineVideo").currentTime * analysis.fps))) : 0;
 }
 
-function seekTimelineFrame(frame) {
+function seekTimelineFrame(frame, source = "programmatic") {
   const analysis = state.timeline.analysis;
   if (!analysis) return;
   const normalized = Math.max(0, Math.min(analysis.frame_count - 1, Math.round(frame)));
-  $("#timelineVideo").currentTime = normalized / analysis.fps;
+  state.timeline.playheadFrame = normalized;
+  state.timeline.syncSource = source;
+  const video = $("#timelineVideo");
+  const targetTime = normalized / analysis.fps;
+  if (Math.abs(video.currentTime - targetTime) >= 0.25 / analysis.fps) video.currentTime = targetTime;
   renderTimelinePlayhead(normalized);
+}
+
+function syncTimelineFromVideo(event = null) {
+  if (!state.timeline.analysis || state.timeline.dragging) return;
+  const mediaTime = event?.mediaTime;
+  const frame = Number.isFinite(mediaTime)
+    ? Math.round(mediaTime * state.timeline.analysis.fps)
+    : currentTimelineFrame();
+  state.timeline.playheadFrame = Math.max(
+    0,
+    Math.min(state.timeline.analysis.frame_count - 1, frame),
+  );
+  state.timeline.syncSource = "video_playback";
+  renderTimelinePlayhead();
+}
+
+function startTimelineVideoSync() {
+  stopTimelineVideoSync();
+  const video = $("#timelineVideo");
+  if (typeof video.requestVideoFrameCallback !== "function") return;
+  const onFrame = (_now, metadata) => {
+    state.timeline.videoFrameCallbackId = null;
+    syncTimelineFromVideo(metadata);
+    if (!video.paused && !video.ended) {
+      state.timeline.videoFrameCallbackId = video.requestVideoFrameCallback(onFrame);
+    }
+  };
+  state.timeline.videoFrameCallbackId = video.requestVideoFrameCallback(onFrame);
+}
+
+function stopTimelineVideoSync() {
+  const video = $("#timelineVideo");
+  if (
+    state.timeline.videoFrameCallbackId !== null
+    && typeof video.cancelVideoFrameCallback === "function"
+  ) {
+    video.cancelVideoFrameCallback(state.timeline.videoFrameCallbackId);
+  }
+  state.timeline.videoFrameCallbackId = null;
 }
 
 function stepTimelineFrame(delta) {
@@ -350,10 +658,27 @@ function syncSelectedBreakpointControls() {
 function renderTimelinePlayhead(forcedFrame = null) {
   const analysis = state.timeline.analysis;
   if (!analysis) return;
-  const frame = forcedFrame ?? currentTimelineFrame();
-  $("#timelinePlayhead").style.left = `${frame / analysis.frame_count * 100}%`;
+  const frame = forcedFrame ?? state.timeline.playheadFrame;
+  $("#timelinePlayhead").style.left = `${timelineXForFrame(frame)}px`;
   $("#timelineTimecode").textContent = frameTimecode(frame, analysis.fps);
   $("#timelineFrameMeta").textContent = `第 ${frame} 帧 · ${formatPreciseTime(frame / analysis.fps)}`;
+}
+
+function updateTimelineSnapVisual() {
+  const guide = $("#timelineSnapGuide");
+  const analysis = state.timeline.analysis;
+  const frame = state.timeline.snapTargetFrame;
+  if (!analysis || frame === null) {
+    guide.classList.add("hidden");
+    return;
+  }
+  const candidate = timelineSnapCandidates(state.timeline.drag).find(item => item.frame === frame);
+  guide.style.left = `${timelineXForFrame(frame)}px`;
+  guide.querySelector("span").textContent = `${candidate?.label || "断点"}吸附 · 第 ${frame} 帧 · ${frameTimecode(frame, analysis.fps)}`;
+  guide.classList.remove("hidden");
+  $$(".timeline-marker").forEach(marker => {
+    marker.classList.toggle("snap-target", Number(marker.dataset.frame) === frame);
+  });
 }
 
 function renderBreakpointList() {

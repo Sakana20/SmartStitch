@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260915-1" />
+    <link rel="stylesheet" href="/styles.css?v=20260915-4" />
   </head>
   <body>
     <div class="noise"></div>
@@ -154,13 +154,28 @@
               </aside>
             </div>
 
-            <div class="timeline-meta" id="timelineMeta"></div>
-            <div id="timelineTrack" class="timeline-track" title="单击定位；双击添加断点">
-              <div id="timelineSegments" class="timeline-segments"></div>
-              <div id="timelinePlayhead" class="timeline-playhead"></div>
-              <div id="timelineMarkers"></div>
+            <div class="timeline-meta-row">
+              <div class="timeline-meta" id="timelineMeta"></div>
+              <div class="timeline-zoom-control">
+                <button id="fitTimelineBtn" class="text-btn" type="button">适应窗口</button>
+                <span>−</span><input id="timelineZoomInput" type="range" min="1" max="240" step="1" value="30" aria-label="时间线缩放" /><span>＋</span>
+                <output id="timelineZoomValue">30 px/s</output>
+              </div>
             </div>
-            <div class="timeline-ruler"><span>00:00</span><span id="timelineMidLabel">—</span><span id="timelineEndLabel">—</span></div>
+            <div id="timelineViewport" class="timeline-viewport">
+              <div id="timelineCanvas" class="timeline-canvas">
+                <div id="timelineRulerBar" class="timeline-ruler-bar" title="单击或拖动定位播放头">
+                  <div id="timelineTicks" class="timeline-ticks"></div>
+                </div>
+                <div id="timelineTrack" class="timeline-track" title="单击或拖动定位；双击添加断点">
+                  <div id="timelineSegments" class="timeline-segments"></div>
+                  <div id="timelineMarkers"></div>
+                </div>
+                <div id="timelinePlayhead" class="timeline-playhead" title="拖动播放头"><i></i></div>
+                <div id="timelineSnapGuide" class="timeline-snap-guide hidden"><span></span></div>
+              </div>
+            </div>
+            <p class="timeline-gesture-hint">时间线拖动会跟随鼠标 · 按住 Shift 临时吸附断点 · 放大后可逐帧定位</p>
 
             <div class="timeline-review-heading">
               <div><strong>断点列表</strong><small id="timelineBreakpointSummary"></small></div>
@@ -262,6 +277,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/app.js?v=20260915-1" defer></script>
+    <script src="/timeline-math.js?v=20260915-2" defer></script>
+    <script src="/app.js?v=20260915-3" defer></script>
   </body>
 </html>
