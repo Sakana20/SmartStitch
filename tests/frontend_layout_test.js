@@ -9,13 +9,28 @@ const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260916-6"/,
-  "新增片段列表样式后必须刷新 CSS 缓存版本",
+  /href="\/styles\.css\?v=20260916-13"/,
+  "源视频切换样式更新后必须刷新 CSS 缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
 assert.equal(staticVersions.length, 3, "三个前端静态资源都必须声明缓存版本");
 assert.equal(new Set(staticVersions).size, 1, "CSS 与 JS 必须使用同一个发布版本，避免新旧资源混用");
+assert.match(
+  html,
+  /<span>源视频文件夹[\s\S]*id="chooseTimelineDirectoryBtn"[\s\S]*id="previousVideoBtn"[\s\S]*id="timelineCurrentSource"[\s\S]*id="nextVideoBtn"/,
+  "时间线审核台必须支持选择源视频文件夹和切换上一个、下一个视频",
+);
+assert.match(
+  app,
+  /api\("\/timeline\/sources"[\s\S]*source_directory: sourceDirectory/,
+  "前端必须从源视频文件夹载入可切换的视频清单",
+);
+assert.match(
+  app,
+  /previousVideoBtn[\s\S]*navigateTimelineSource\(-1\)[\s\S]*nextVideoBtn[\s\S]*navigateTimelineSource\(1\)/,
+  "上一个和下一个视频按钮必须触发相邻视频切换",
+);
 assert.match(
   html,
   /id="timelineVideoStage" class="video-stage"/,

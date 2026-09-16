@@ -36,6 +36,37 @@ class TimelineError(ValueError):
     pass
 
 
+def _source_video_sort_key(path: Path) -> tuple[tuple[int, object], ...]:
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part.casefold())
+        for part in re.split(r"([0-9]+)", path.name)
+    )
+
+
+def list_source_videos(source_directory: str) -> dict[str, Any]:
+    directory = Path(source_directory).expanduser().resolve()
+    if not directory.exists():
+        raise TimelineError("源视频文件夹不存在")
+    if not directory.is_dir():
+        raise TimelineError("源视频路径必须是文件夹")
+
+    videos = sorted(
+        (
+            path
+            for path in directory.iterdir()
+            if path.is_file()
+            and not path.name.startswith(".")
+            and path.suffix.lower() in VIDEO_EXTENSIONS
+        ),
+        key=_source_video_sort_key,
+    )
+    return {
+        "source_directory": str(directory),
+        "count": len(videos),
+        "videos": [{"name": path.name, "path": str(path)} for path in videos],
+    }
+
+
 def _rate(value: str | None) -> float:
     if not value or value == "0/0":
         return 0.0

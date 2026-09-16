@@ -496,6 +496,14 @@ class TimelineAnalyzeRequest(BaseModel):
     )
 
 
+class TimelineSourceDirectoryRequest(BaseModel):
+    source_directory: str = Field(min_length=1)
+
+    _normalize_source_directory = field_validator("source_directory", mode="before")(
+        normalize_path_input
+    )
+
+
 class TimelineDecisionRequest(BaseModel):
     analysis_id: str = Field(pattern=r"^[a-f0-9]{24}$")
     frame_indexes: list[int]

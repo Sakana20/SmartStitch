@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260916-12" />
+    <link rel="stylesheet" href="/styles.css?v=20260916-13" />
   </head>
   <body>
     <div class="noise"></div>
@@ -117,8 +117,11 @@
           </div>
           <div class="timeline-source-row">
             <label class="field timeline-path-field">
-              <span>原始视频路径 <small>支持 MP4、MOV、MKV、M4V、WebM</small></span>
-              <input id="timelinePathInput" type="text" data-path-input placeholder="粘贴本地视频绝对路径（外层引号会自动移除）" />
+              <span>源视频文件夹 <small>自动读取 MP4、MOV、MKV、M4V、WebM</small></span>
+              <div class="directory-picker-row timeline-directory-picker">
+                <input id="timelinePathInput" type="text" data-path-input placeholder="粘贴文件夹绝对路径，或点击右侧选择" />
+                <button id="chooseTimelineDirectoryBtn" class="button secondary small" type="button">选择文件夹</button>
+              </div>
             </label>
             <label class="field timeline-threshold-field">
               <span>转场敏感度 <small>越低候选越多</small></span>
@@ -128,7 +131,15 @@
               <span>最短语音停顿 <small>秒</small></span>
               <input id="timelineSilenceInput" type="number" min="0.1" max="3" step="0.05" value="0.35" />
             </label>
-            <button id="analyzeTimelineBtn" class="button primary timeline-analyze-button">机器粗分析</button>
+            <button id="analyzeTimelineBtn" class="button primary timeline-analyze-button">分析首个视频</button>
+          </div>
+          <div class="timeline-source-navigation" aria-label="源视频切换">
+            <button id="previousVideoBtn" class="button secondary small" type="button" disabled>← 上一个视频</button>
+            <div class="timeline-current-source">
+              <strong id="timelineCurrentSource">尚未载入源视频文件夹</strong>
+              <small id="timelineSourcePosition">选择文件夹后可依次审核其中的视频</small>
+            </div>
+            <button id="nextVideoBtn" class="button secondary small" type="button" disabled>下一个视频 →</button>
           </div>
 
           <div id="timelineEmpty" class="timeline-empty">
@@ -319,7 +330,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260916-11" defer></script>
-    <script src="/app.js?v=20260916-11" defer></script>
+    <script src="/timeline-math.js?v=20260916-13" defer></script>
+    <script src="/app.js?v=20260916-13" defer></script>
   </body>
 </html>

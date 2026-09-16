@@ -177,6 +177,45 @@ def test_directory_picker_api_returns_selected_path(tmp_path, monkeypatch):
     assert response.json() == {"cancelled": False, "path": str(tmp_path)}
 
 
+def test_timeline_sources_lists_supported_videos_in_natural_order(tmp_path):
+    (tmp_path / "config").mkdir()
+    source_directory = tmp_path / "源视频"
+    source_directory.mkdir()
+    for name in ["视频10.mp4", "视频2.MOV", "视频1.mkv", "说明.txt", ".隐藏.mp4"]:
+        (source_directory / name).write_bytes(b"video")
+    (source_directory / "子目录").mkdir()
+    (source_directory / "子目录" / "嵌套.mp4").write_bytes(b"video")
+
+    response = TestClient(create_app(tmp_path)).post(
+        "/api/v1/timeline/sources",
+        json={"source_directory": f"'{source_directory}'"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_directory"] == str(source_directory)
+    assert payload["count"] == 3
+    assert [video["name"] for video in payload["videos"]] == [
+        "视频1.mkv",
+        "视频2.MOV",
+        "视频10.mp4",
+    ]
+    assert all(video["path"].startswith(str(source_directory)) for video in payload["videos"])
+
+
+def test_timeline_sources_rejects_a_file_path(tmp_path):
+    (tmp_path / "config").mkdir()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+
+    response = TestClient(create_app(tmp_path)).post(
+        "/api/v1/timeline/sources", json={"source_directory": str(source)}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "源视频路径必须是文件夹"
+
+
 def test_timeline_slice_conflict_returns_409(tmp_path, monkeypatch):
     (tmp_path / "config").mkdir()
     app = create_app(tmp_path)

@@ -15,6 +15,10 @@ const state = {
   configDraft: null,
   previewAudioCleanup: null,
   timeline: {
+    sourceDirectory: "",
+    sourceVideos: [],
+    sourceIndex: -1,
+    sourceLoading: false,
     analysis: null,
     breakpoints: [],
     machineBreakpoints: [],
@@ -196,6 +200,18 @@ function switchView(view) {
 
 function bindTimelineEvents() {
   $("#analyzeTimelineBtn").addEventListener("click", analyzeTimeline);
+  $("#chooseTimelineDirectoryBtn").addEventListener("click", chooseTimelineSourceDirectory);
+  $("#previousVideoBtn").addEventListener("click", () => navigateTimelineSource(-1));
+  $("#nextVideoBtn").addEventListener("click", () => navigateTimelineSource(1));
+  $("#timelinePathInput").addEventListener("input", event => {
+    const directory = normalizePathInput(event.target.value);
+    if (directory === state.timeline.sourceDirectory) return;
+    state.timeline.sourceDirectory = "";
+    state.timeline.sourceVideos = [];
+    state.timeline.sourceIndex = -1;
+    clearTimelineAnalysisView();
+    renderTimelineSourceNavigation();
+  });
   $("#previousFrameBtn").addEventListener("click", () => stepTimelineFrame(-1));
   $("#nextFrameBtn").addEventListener("click", () => stepTimelineFrame(1));
   $("#addBreakpointBtn").addEventListener("click", addBreakpointAtPlayhead);
@@ -279,69 +295,185 @@ function bindTimelineEvents() {
 }
 
 async function analyzeTimeline() {
-  const sourcePath = normalizePathField($("#timelinePathInput"));
-  if (!sourcePath) return toast("请先填写原始视频路径", true);
+  const sourceDirectory = normalizePathField($("#timelinePathInput"));
+  if (!sourceDirectory) return toast("请先填写或选择源视频文件夹", true);
   const silenceDuration = Number($("#timelineSilenceInput").value);
   if (!Number.isFinite(silenceDuration) || silenceDuration < 0.1 || silenceDuration > 3) {
     return toast("最短语音停顿必须在 0.1–3 秒之间", true);
   }
-  const button = $("#analyzeTimelineBtn");
-  button.disabled = true;
-  button.textContent = "正在分析画面与语音…";
-  setTimelineStatus("分析中", "running");
-  resetTimelineWaveform();
+  state.timeline.sourceLoading = true;
+  renderTimelineSourceNavigation("正在读取文件夹…");
   try {
-    const analysis = await api("/timeline/analyze", {
-      method: "POST",
-      body: JSON.stringify({
-        source_path: sourcePath,
-        scene_threshold: Number($("#timelineThresholdInput").value),
-        silence_duration_seconds: silenceDuration,
-      }),
-    });
-    state.timeline.analysis = analysis;
-    state.timeline.audioLocked = true;
-    state.timeline.breakpoints = analysis.breakpoints.map(point => ({
-      ...point,
-      machine_origin_frame: point.frame_index,
-    }));
-    state.timeline.machineBreakpoints = analysis.breakpoints.map(point => ({ ...point }));
-    state.timeline.selectedFrame = null;
-    state.timeline.playheadFrame = 0;
-    state.timeline.snapTargetFrame = null;
-    state.timeline.reviewSaved = false;
-    state.timeline.reviewRevision = null;
-    state.timeline.selectedSegmentId = null;
-    state.timeline.sliceUnits = [];
-    state.timeline.mergeSelection = [];
-    resetTimelineWaveform();
-    stopTimelineVideoSync();
-    const video = $("#timelineVideo");
-    updateTimelineMediaLayout(analysis.width, analysis.height);
-    video.src = analysis.media_url;
-    video.load();
-    $("#timelineEmpty").classList.add("hidden");
-    $("#timelineWorkspace").classList.remove("hidden");
-    fitTimelineToViewport(false);
-    renderTimeline();
-    if (!analysis.audio || typeof analysis.audio.has_audio !== "boolean") {
-      setTimelineStatus("后端需重启", "danger");
-      toast("当前后端仍是旧版本，请重启 SmartStitch 后重新分析", true);
-    } else if (analysis.audio.speech_pause_status === "failed") {
-      setTimelineStatus("待人工审核", "running");
-      toast("语音停顿分析失败，本次仅使用画面转场候选", true);
-    } else {
-      setTimelineStatus("待人工审核", "running");
-      const videoCount = analysis.breakpoints.filter(point => point.reasons?.includes("scene_change")).length;
-      const audioCount = analysis.breakpoints.filter(point => point.reasons?.includes("speech_pause")).length;
-      toast(`机器给出 V1 ${videoCount} 个画面候选、A1 ${audioCount} 个语音候选`);
-    }
+    const currentPath = state.timeline.sourceVideos[state.timeline.sourceIndex]?.path;
+    await loadTimelineSourceDirectory(sourceDirectory, currentPath);
+    await analyzeTimelineSource(state.timeline.sourceIndex);
   } catch (error) {
     setTimelineStatus("分析失败", "danger");
     toast(error.message, true);
   } finally {
+    state.timeline.sourceLoading = false;
+    renderTimelineSourceNavigation();
+  }
+}
+
+async function chooseTimelineSourceDirectory() {
+  const button = $("#chooseTimelineDirectoryBtn");
+  button.disabled = true;
+  try {
+    const result = await api("/system/directory-picker", { method: "POST" });
+    if (result.cancelled) return;
+    $("#timelinePathInput").value = result.path;
+    state.timeline.sourceLoading = true;
+    renderTimelineSourceNavigation("正在读取文件夹…");
+    await loadTimelineSourceDirectory(result.path);
+    toast(`已找到 ${state.timeline.sourceVideos.length} 个源视频`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    state.timeline.sourceLoading = false;
     button.disabled = false;
-    button.textContent = "机器粗分析";
+    renderTimelineSourceNavigation();
+  }
+}
+
+async function loadTimelineSourceDirectory(sourceDirectory, preferredPath = null) {
+  const result = await api("/timeline/sources", {
+    method: "POST",
+    body: JSON.stringify({ source_directory: sourceDirectory }),
+  });
+  if (!result.videos.length) {
+    state.timeline.sourceDirectory = result.source_directory;
+    state.timeline.sourceVideos = [];
+    state.timeline.sourceIndex = -1;
+    renderTimelineSourceNavigation();
+    throw new Error("这个文件夹中没有支持的视频文件");
+  }
+  state.timeline.sourceDirectory = result.source_directory;
+  state.timeline.sourceVideos = result.videos;
+  const preferredIndex = preferredPath
+    ? result.videos.findIndex(video => video.path === preferredPath)
+    : -1;
+  const analyzedIndex = state.timeline.analysis?.source_path
+    ? result.videos.findIndex(video => video.path === state.timeline.analysis.source_path)
+    : -1;
+  if (analyzedIndex < 0) clearTimelineAnalysisView();
+  state.timeline.sourceIndex = preferredIndex >= 0
+    ? preferredIndex
+    : analyzedIndex >= 0 ? analyzedIndex : 0;
+  $("#timelinePathInput").value = result.source_directory;
+  renderTimelineSourceNavigation();
+}
+
+function clearTimelineAnalysisView() {
+  if (!state.timeline.analysis) return;
+  stopTimelineVideoSync();
+  resetTimelineWaveform();
+  state.timeline.analysis = null;
+  state.timeline.breakpoints = [];
+  state.timeline.machineBreakpoints = [];
+  state.timeline.selectedFrame = null;
+  state.timeline.playheadFrame = 0;
+  state.timeline.reviewSaved = false;
+  state.timeline.reviewRevision = null;
+  state.timeline.selectedSegmentId = null;
+  state.timeline.sliceUnits = [];
+  state.timeline.mergeSelection = [];
+  const video = $("#timelineVideo");
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  $("#timelineWorkspace").classList.add("hidden");
+  $("#timelineEmpty").classList.remove("hidden");
+  setTimelineStatus("等待视频", "neutral");
+}
+
+async function navigateTimelineSource(delta) {
+  if (state.timeline.sourceLoading) return;
+  const targetIndex = state.timeline.sourceIndex + delta;
+  if (targetIndex < 0 || targetIndex >= state.timeline.sourceVideos.length) return;
+  const previousIndex = state.timeline.sourceIndex;
+  state.timeline.sourceIndex = targetIndex;
+  state.timeline.sourceLoading = true;
+  renderTimelineSourceNavigation("正在分析画面与语音…");
+  try {
+    await analyzeTimelineSource(targetIndex);
+  } catch (error) {
+    state.timeline.sourceIndex = previousIndex;
+    setTimelineStatus("分析失败", "danger");
+    toast(error.message, true);
+  } finally {
+    state.timeline.sourceLoading = false;
+    renderTimelineSourceNavigation();
+  }
+}
+
+function renderTimelineSourceNavigation(loadingText = "") {
+  const { sourceVideos, sourceIndex, sourceLoading } = state.timeline;
+  const current = sourceVideos[sourceIndex] || null;
+  $("#timelineCurrentSource").textContent = current?.name
+    || (sourceLoading ? "正在载入源视频…" : "尚未载入源视频文件夹");
+  $("#timelineSourcePosition").textContent = current
+    ? (loadingText || `第 ${sourceIndex + 1} / ${sourceVideos.length} 个视频`)
+    : (loadingText || "选择文件夹后可依次审核其中的视频");
+  $("#previousVideoBtn").disabled = sourceLoading || sourceIndex <= 0;
+  $("#nextVideoBtn").disabled = sourceLoading || sourceIndex < 0 || sourceIndex >= sourceVideos.length - 1;
+  const analyzeButton = $("#analyzeTimelineBtn");
+  analyzeButton.disabled = sourceLoading;
+  analyzeButton.textContent = sourceLoading
+    ? "正在处理…"
+    : current ? "分析当前视频" : "分析首个视频";
+}
+
+async function analyzeTimelineSource(sourceIndex) {
+  const source = state.timeline.sourceVideos[sourceIndex];
+  if (!source) throw new Error("请先载入包含视频的源文件夹");
+  const silenceDuration = Number($("#timelineSilenceInput").value);
+  setTimelineStatus("分析中", "running");
+  resetTimelineWaveform();
+  const analysis = await api("/timeline/analyze", {
+    method: "POST",
+    body: JSON.stringify({
+      source_path: source.path,
+      scene_threshold: Number($("#timelineThresholdInput").value),
+      silence_duration_seconds: silenceDuration,
+    }),
+  });
+  state.timeline.analysis = analysis;
+  state.timeline.audioLocked = true;
+  state.timeline.breakpoints = analysis.breakpoints.map(point => ({
+    ...point,
+    machine_origin_frame: point.frame_index,
+  }));
+  state.timeline.machineBreakpoints = analysis.breakpoints.map(point => ({ ...point }));
+  state.timeline.selectedFrame = null;
+  state.timeline.playheadFrame = 0;
+  state.timeline.snapTargetFrame = null;
+  state.timeline.reviewSaved = false;
+  state.timeline.reviewRevision = null;
+  state.timeline.selectedSegmentId = null;
+  state.timeline.sliceUnits = [];
+  state.timeline.mergeSelection = [];
+  resetTimelineWaveform();
+  stopTimelineVideoSync();
+  const video = $("#timelineVideo");
+  updateTimelineMediaLayout(analysis.width, analysis.height);
+  video.src = analysis.media_url;
+  video.load();
+  $("#timelineEmpty").classList.add("hidden");
+  $("#timelineWorkspace").classList.remove("hidden");
+  fitTimelineToViewport(false);
+  renderTimeline();
+  if (!analysis.audio || typeof analysis.audio.has_audio !== "boolean") {
+    setTimelineStatus("后端需重启", "danger");
+    toast("当前后端仍是旧版本，请重启 SmartStitch 后重新分析", true);
+  } else if (analysis.audio.speech_pause_status === "failed") {
+    setTimelineStatus("待人工审核", "running");
+    toast("语音停顿分析失败，本次仅使用画面转场候选", true);
+  } else {
+    setTimelineStatus("待人工审核", "running");
+    const videoCount = analysis.breakpoints.filter(point => point.reasons?.includes("scene_change")).length;
+    const audioCount = analysis.breakpoints.filter(point => point.reasons?.includes("speech_pause")).length;
+    toast(`${source.name}：V1 ${videoCount} 个画面候选、A1 ${audioCount} 个语音候选`);
   }
 }
 
@@ -1556,6 +1688,10 @@ async function selectConfig(id) {
         state.timeline.sliceTargets = targets.targets;
       } catch (_) {
         state.timeline.sliceTargets = [];
+      }
+      if (!$("#timelinePathInput").value && !state.timeline.sourceVideos.length) {
+        const rootPath = state.library.root_path.replace(/\/+$/, "");
+        $("#timelinePathInput").value = `${rootPath}/原始视频`;
       }
     } else {
       state.timeline.sliceTargets = [];

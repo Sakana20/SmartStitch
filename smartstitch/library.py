@@ -520,7 +520,7 @@ def pick_directory() -> dict[str, Any]:
             [
                 "osascript",
                 "-e",
-                'POSIX path of (choose folder with prompt "选择 SmartStitch 视频库的保存位置")',
+                'POSIX path of (choose folder with prompt "选择文件夹")',
             ],
             capture_output=True,
             text=True,

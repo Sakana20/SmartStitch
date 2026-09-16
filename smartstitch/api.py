@@ -28,13 +28,14 @@ from .models import (
     StructuredConfigUpdateRequest,
     TimelineAnalyzeRequest,
     TimelineDecisionRequest,
+    TimelineSourceDirectoryRequest,
     TimelineSliceRequest,
     WeightUpdateRequest,
 )
 from .planner import PlanError, build_plan
 from .scanner import probe_config_audio, scan_config
 from .slicer import SliceConflictError, SliceError, TimelineSlicer
-from .timeline import TimelineAnalyzer, TimelineError
+from .timeline import TimelineAnalyzer, TimelineError, list_source_videos
 
 
 def create_app(base_directory: Path | None = None) -> FastAPI:
@@ -265,6 +266,15 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
                 request.silence_duration_seconds,
             )
         except (TimelineError, OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/timeline/sources")
+    def timeline_sources(
+        request: TimelineSourceDirectoryRequest,
+    ) -> dict[str, object]:
+        try:
+            return list_source_videos(request.source_directory)
+        except (TimelineError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/v1/timeline/media/{media_token}")
