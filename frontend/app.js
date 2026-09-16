@@ -29,6 +29,7 @@ const state = {
     shiftPressed: false,
     dragAnimationFrameId: null,
     pointerOverTimeline: false,
+    pointerOverVideo: false,
     reviewSaved: false,
     reviewRevision: null,
     selectedSegmentId: null,
@@ -196,11 +197,21 @@ function bindTimelineEvents() {
   $("#clearMergeSelectionBtn").addEventListener("click", clearMergeSelection);
   $("#selectedFrameInput").addEventListener("change", event => moveSelectedBreakpoint(Number(event.target.value)));
   const video = $("#timelineVideo");
+  const videoStage = $("#timelineVideoStage");
   video.addEventListener("play", startTimelineVideoSync);
   video.addEventListener("pause", syncTimelineFromVideo);
   video.addEventListener("timeupdate", syncTimelineFromVideo);
   video.addEventListener("seeking", syncTimelineFromVideo);
   video.addEventListener("seeked", syncTimelineFromVideo);
+  video.addEventListener("loadedmetadata", () => {
+    updateTimelineMediaLayout(video.videoWidth, video.videoHeight);
+  });
+  videoStage.addEventListener("pointerenter", () => {
+    state.timeline.pointerOverVideo = true;
+  });
+  videoStage.addEventListener("pointerleave", () => {
+    state.timeline.pointerOverVideo = false;
+  });
   $("#timelineRulerBar").addEventListener("pointerdown", event => {
     const frame = frameFromPointer(event, 0, event.shiftKey);
     seekTimelineFrame(frame, "timeline_scrub");
@@ -228,12 +239,21 @@ function bindTimelineEvents() {
       scheduleTimelineDragFrame();
     }
     if (!$("#timelineView").classList.contains("active")) return;
-    if (event.code === "Space" && state.timeline.pointerOverTimeline && state.timeline.analysis) {
+    const activeElement = document.activeElement;
+    const isEditing = ["INPUT", "TEXTAREA", "SELECT"].includes(activeElement?.tagName)
+      || Boolean(activeElement?.isContentEditable);
+    if (TimelineMath.shouldTogglePlaybackFromSpace({
+      code: event.code,
+      pointerOverTimeline: state.timeline.pointerOverTimeline,
+      pointerOverVideo: state.timeline.pointerOverVideo,
+      hasAnalysis: Boolean(state.timeline.analysis),
+      isEditing,
+    })) {
       event.preventDefault();
       if (!event.repeat) toggleTimelinePlayback();
       return;
     }
-    if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+    if (isEditing) return;
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault();
       stepTimelineFrame(event.key === "ArrowLeft" ? -1 : 1);
@@ -278,6 +298,7 @@ async function analyzeTimeline() {
     state.timeline.mergeSelection = [];
     stopTimelineVideoSync();
     const video = $("#timelineVideo");
+    updateTimelineMediaLayout(analysis.width, analysis.height);
     video.src = analysis.media_url;
     video.load();
     $("#timelineEmpty").classList.add("hidden");
@@ -299,6 +320,13 @@ function setTimelineStatus(text, type) {
   const element = $("#timelineStatus");
   element.textContent = text;
   element.className = `status ${type}`;
+}
+
+function updateTimelineMediaLayout(width, height) {
+  const mediaGrid = $("#timelineMediaGrid");
+  const orientation = TimelineMath.mediaLayoutOrientation(width, height);
+  mediaGrid.classList.toggle("portrait", orientation === "portrait");
+  mediaGrid.dataset.orientation = orientation;
 }
 
 function newSliceUnit(segmentIds, category = "") {

@@ -5,16 +5,32 @@ const path = require("node:path");
 const root = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "frontend/index.html"), "utf8");
 const css = fs.readFileSync(path.join(root, "frontend/styles.css"), "utf8");
+const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260916-3"/,
+  /href="\/styles\.css\?v=20260916-6"/,
   "新增片段列表样式后必须刷新 CSS 缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
 assert.equal(staticVersions.length, 3, "三个前端静态资源都必须声明缓存版本");
 assert.equal(new Set(staticVersions).size, 1, "CSS 与 JS 必须使用同一个发布版本，避免新旧资源混用");
+assert.match(
+  html,
+  /id="timelineVideoStage" class="video-stage"/,
+  "播放窗口必须提供稳定的悬停区域",
+);
+assert.match(
+  html,
+  /id="timelineMediaGrid" class="timeline-media-grid"/,
+  "视频和审核面板需要可根据方向切换布局",
+);
+assert.match(
+  app,
+  /videoStage\.addEventListener\("pointerenter"[\s\S]*pointerOverVideo = true;[\s\S]*videoStage\.addEventListener\("pointerleave"[\s\S]*pointerOverVideo = false;/,
+  "播放窗口必须跟踪鼠标进入和离开",
+);
 
 assert.match(
   html,
@@ -50,6 +66,16 @@ assert.match(
   css,
   /\.timeline-segments \.timeline-segment\.composite-member::after\s*\{[^}]*content:\s*attr\(data-group-label\)/s,
   "时间线组合成员必须显示共同组号",
+);
+assert.match(
+  css,
+  /\.timeline-media-grid\.portrait\s*\{[^}]*width:\s*100%;[^}]*grid-template-columns:\s*minmax\(420px, \.95fr\) minmax\(480px, 1\.05fr\);[^}]*max-width:\s*none;[^}]*margin:\s*24px 0 0;/s,
+  "竖屏播放区与审核面板必须铺满整行并对齐上下区域",
+);
+assert.match(
+  app,
+  /updateTimelineMediaLayout\(analysis\.width, analysis\.height\);/,
+  "分析完成后必须立即应用视频方向布局",
 );
 
 console.log("frontend timeline layout contract ok");

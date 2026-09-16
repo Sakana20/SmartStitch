@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260916-3" />
+    <link rel="stylesheet" href="/styles.css?v=20260916-6" />
   </head>
   <body>
     <div class="noise"></div>
@@ -133,8 +133,8 @@
           </div>
 
           <div id="timelineWorkspace" class="hidden">
-            <div class="timeline-media-grid">
-              <div class="video-stage"><video id="timelineVideo" controls preload="metadata"></video></div>
+            <div id="timelineMediaGrid" class="timeline-media-grid">
+              <div id="timelineVideoStage" class="video-stage"><video id="timelineVideo" controls preload="metadata"></video></div>
               <aside class="timeline-inspector">
                 <span class="eyebrow">FRAME INSPECTOR</span>
                 <strong id="timelineTimecode">00:00:00:00</strong>
@@ -175,7 +175,7 @@
                 <div id="timelineSnapGuide" class="timeline-snap-guide hidden"><span></span></div>
               </div>
             </div>
-            <p class="timeline-gesture-hint">点击色块选择片段 · 悬停按空格播放/暂停 · Option + 滚轮缩放 · Shift + 拖动吸附</p>
+            <p class="timeline-gesture-hint">点击色块选择片段 · 悬停时间线或播放窗口按空格播放/暂停 · Option + 滚轮缩放 · Shift + 拖动吸附</p>
 
             <div class="timeline-review-heading">
               <div><strong>片段列表</strong><small id="timelineBreakpointSummary"></small></div>
@@ -305,7 +305,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260916-3" defer></script>
-    <script src="/app.js?v=20260916-3" defer></script>
+    <script src="/timeline-math.js?v=20260916-6" defer></script>
+    <script src="/app.js?v=20260916-6" defer></script>
   </body>
 </html>

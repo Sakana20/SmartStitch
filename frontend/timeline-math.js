@@ -99,13 +99,35 @@
     return { units: mergedUnits, mergedUnit };
   }
 
+  function shouldTogglePlaybackFromSpace({
+    code,
+    pointerOverTimeline = false,
+    pointerOverVideo = false,
+    hasAnalysis = false,
+    isEditing = false,
+  }) {
+    return code === "Space"
+      && hasAnalysis
+      && !isEditing
+      && (pointerOverTimeline || pointerOverVideo);
+  }
+
+  function mediaLayoutOrientation(width, height) {
+    const normalizedWidth = Number(width);
+    const normalizedHeight = Number(height);
+    if (!(normalizedWidth > 0) || !(normalizedHeight > 0)) return "landscape";
+    return normalizedHeight > normalizedWidth ? "portrait" : "landscape";
+  }
+
   return {
     choosePointerSnap,
     chooseRulerStep,
     frameFromPlaybackTime,
     frameFromPresentedTime,
     frameFromTimelineX,
+    mediaLayoutOrientation,
     mergeSliceUnits,
     previewTimeForFrame,
+    shouldTogglePlaybackFromSpace,
   };
 }));

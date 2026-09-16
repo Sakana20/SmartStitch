@@ -5,8 +5,10 @@ const {
   frameFromPlaybackTime,
   frameFromPresentedTime,
   frameFromTimelineX,
+  mediaLayoutOrientation,
   mergeSliceUnits,
   previewTimeForFrame,
+  shouldTogglePlaybackFromSpace,
 } = require("../frontend/timeline-math.js");
 
 assert.equal(frameFromTimelineX(400, 40, 30, 0, 999), 300);
@@ -99,5 +101,38 @@ assert.equal(mergeSliceUnits({
   segmentStartFrames: { early: 0, late: 50 },
   mergedUnitId: "mixed",
 }).mergedUnit.category, "");
+
+assert.equal(shouldTogglePlaybackFromSpace({
+  code: "Space",
+  pointerOverVideo: true,
+  hasAnalysis: true,
+}), true);
+assert.equal(shouldTogglePlaybackFromSpace({
+  code: "Space",
+  pointerOverTimeline: true,
+  hasAnalysis: true,
+}), true);
+assert.equal(shouldTogglePlaybackFromSpace({
+  code: "Space",
+  pointerOverVideo: true,
+  hasAnalysis: true,
+  isEditing: true,
+}), false);
+assert.equal(shouldTogglePlaybackFromSpace({
+  code: "Enter",
+  pointerOverVideo: true,
+  hasAnalysis: true,
+}), false);
+assert.equal(shouldTogglePlaybackFromSpace({
+  code: "Space",
+  pointerOverVideo: true,
+  hasAnalysis: false,
+}), false);
+
+assert.equal(mediaLayoutOrientation(720, 1280), "portrait");
+assert.equal(mediaLayoutOrientation(1080, 1920), "portrait");
+assert.equal(mediaLayoutOrientation(1920, 1080), "landscape");
+assert.equal(mediaLayoutOrientation(1080, 1080), "landscape");
+assert.equal(mediaLayoutOrientation(0, 0), "landscape");
 
 console.log("timeline interaction math ok");
