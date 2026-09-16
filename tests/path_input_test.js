@@ -1,0 +1,22 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+const root = path.resolve(__dirname, "..");
+const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
+const context = { document: { addEventListener() {} } };
+vm.createContext(context);
+vm.runInContext(`${app}\nglobalThis.__normalizePathInput = normalizePathInput;`, context);
+
+const normalize = context.__normalizePathInput;
+const pathname = "/Volumes/Elements SE/陈鼎琦/原始视频/26 室友要喝我的奶茶 #剧情演绎.mp4";
+
+assert.equal(normalize(`'${pathname}'`), pathname);
+assert.equal(normalize(`\"${pathname}\"`), pathname);
+assert.equal(normalize(`“${pathname}”`), pathname);
+assert.equal(normalize(pathname), pathname);
+assert.equal(normalize("  '/tmp/有 空格.mp4'\n"), "/tmp/有 空格.mp4");
+assert.equal(normalize("/tmp/文件'名.mp4"), "/tmp/文件'名.mp4");
+
+console.log("path input normalization ok");

@@ -76,7 +76,7 @@
 
             <label class="field">
               <span>输出目录 <small>留空使用配置默认值</small></span>
-              <input id="outputInput" type="text" placeholder="例如 /Volumes/Elements SE/成片输出" />
+              <input id="outputInput" type="text" data-path-input placeholder="例如 /Volumes/Elements SE/成片输出" />
             </label>
 
             <label class="field">
@@ -118,7 +118,7 @@
           <div class="timeline-source-row">
             <label class="field timeline-path-field">
               <span>原始视频路径 <small>支持 MP4、MOV、MKV、M4V、WebM</small></span>
-              <input id="timelinePathInput" type="text" placeholder="粘贴本地视频绝对路径" />
+              <input id="timelinePathInput" type="text" data-path-input placeholder="粘贴本地视频绝对路径（外层引号会自动移除）" />
             </label>
             <label class="field timeline-threshold-field">
               <span>转场敏感度 <small>越低候选越多</small></span>
@@ -284,7 +284,7 @@
         <label class="field">
           <span>保存位置 <small>必须由你确认</small></span>
           <div class="directory-picker-row">
-            <input id="newLibraryParentInput" type="text" placeholder="选择本机或外接硬盘中的文件夹" autocomplete="off" />
+            <input id="newLibraryParentInput" type="text" data-path-input placeholder="选择本机或外接硬盘中的文件夹" autocomplete="off" />
             <button id="chooseLibraryParentBtn" class="button secondary small" type="button">选择位置</button>
           </div>
         </label>
@@ -299,6 +299,6 @@
 
     <div id="toast" class="toast" role="status"></div>
     <script src="/timeline-math.js?v=20260915-4" defer></script>
-    <script src="/app.js?v=20260915-17" defer></script>
+    <script src="/app.js?v=20260916-1" defer></script>
   </body>
 </html>

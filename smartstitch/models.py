@@ -11,10 +11,21 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 BENEFIT_CATEGORY_PATTERN = re.compile(r"^benefit_[1-9][0-9]*$")
 MAX_BENEFIT_CATEGORIES = 20
+PATH_QUOTE_PAIRS = {"'": "'", '"': '"', "‘": "’", "“": "”"}
 
 
 def is_benefit_category(category: str) -> bool:
     return BENEFIT_CATEGORY_PATTERN.fullmatch(category) is not None
+
+
+def normalize_path_input(value: Any) -> Any:
+    """Normalize a pathname copied from macOS without changing inner characters."""
+    if not isinstance(value, str):
+        return value
+    normalized = value.strip()
+    if len(normalized) >= 2 and PATH_QUOTE_PAIRS.get(normalized[0]) == normalized[-1]:
+        return normalized[1:-1]
+    return normalized
 
 
 class SourceMode(StrEnum):
@@ -29,6 +40,8 @@ class AssetItemConfig(BaseModel):
     weight: float = Field(default=1, ge=0)
     tags: list[str] = Field(default_factory=list)
 
+    _normalize_path = field_validator("path", mode="before")(normalize_path_input)
+
 
 class SourceGroupConfig(BaseModel):
     mode: SourceMode = SourceMode.REQUIRED
@@ -37,6 +50,10 @@ class SourceGroupConfig(BaseModel):
     default_weight: float = Field(default=1, ge=0)
     image_duration_seconds: float = Field(default=1.5, gt=0)
     items: list[AssetItemConfig] = Field(default_factory=list)
+
+    _normalize_directory = field_validator("directory", mode="before")(
+        normalize_path_input
+    )
 
     @field_validator("extensions")
     @classmethod
@@ -84,6 +101,10 @@ class BenefitOverlayConfig(BaseModel):
     image_duration_seconds: float = Field(default=1.5, gt=0)
     placement: OverlayPlacement = Field(default_factory=OverlayPlacement)
     timing: OverlayTiming = Field(default_factory=OverlayTiming)
+
+    _normalize_paths = field_validator("file", "directory", mode="before")(
+        normalize_path_input
+    )
 
     @model_validator(mode="after")
     def migrate_legacy_directory(self) -> BenefitOverlayConfig:
@@ -135,6 +156,10 @@ class OutputConfig(BaseModel):
     collision_policy: Literal["increment", "error", "overwrite"] = "increment"
     faststart: bool = True
 
+    _normalize_directory = field_validator("directory", mode="before")(
+        normalize_path_input
+    )
+
 
 class BatchConfig(BaseModel):
     default_count: int = Field(default=10, ge=1)
@@ -168,6 +193,10 @@ class AppConfig(BaseModel):
     output: OutputConfig
     batch: BatchConfig = Field(default_factory=BatchConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
+
+    _normalize_source_root = field_validator("source_root", mode="before")(
+        normalize_path_input
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -341,6 +370,10 @@ class PreviewRequest(BaseModel):
     seed: int | None = None
     output_directory: str | None = None
 
+    _normalize_output_directory = field_validator("output_directory", mode="before")(
+        normalize_path_input
+    )
+
 
 class JobCreateRequest(PreviewRequest):
     concurrency: int | None = Field(default=None, ge=1, le=16)
@@ -368,6 +401,10 @@ class CreateConfigRequest(BaseModel):
 class LibraryPreflightRequest(BaseModel):
     parent_directory: str = Field(min_length=1)
     folder_name: str = Field(min_length=1)
+
+    _normalize_parent_directory = field_validator("parent_directory", mode="before")(
+        normalize_path_input
+    )
 
 
 class CreateLibraryRequest(LibraryPreflightRequest):
@@ -402,6 +439,8 @@ class WeightUpdate(BaseModel):
     weight: float = Field(ge=0)
     tags: list[str] = Field(default_factory=list)
 
+    _normalize_path = field_validator("path", mode="before")(normalize_path_input)
+
 
 class WeightUpdateRequest(BaseModel):
     items: list[WeightUpdate]
@@ -416,11 +455,19 @@ class LoudnessPreviewRequest(BaseModel):
     true_peak_dbtp: float = Field(default=-1.5, ge=-9, le=-0.1)
     duration_seconds: float = Field(default=12, ge=3, le=30)
 
+    _normalize_asset_path = field_validator("asset_path", mode="before")(
+        normalize_path_input
+    )
+
 
 class TimelineAnalyzeRequest(BaseModel):
     source_path: str = Field(min_length=1)
     scene_threshold: float = Field(default=0.3, ge=0.05, le=0.9)
     silence_duration_seconds: float = Field(default=0.35, ge=0.1, le=3)
+
+    _normalize_source_path = field_validator("source_path", mode="before")(
+        normalize_path_input
+    )
 
 
 class TimelineDecisionRequest(BaseModel):

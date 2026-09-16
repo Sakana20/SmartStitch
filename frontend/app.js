@@ -55,6 +55,21 @@ function categoryLabel(category) {
 }
 const terminalStates = new Set(["completed", "partial_failed", "failed", "cancelled", "interrupted"]);
 const configUiStoragePrefix = "smartstitch.config-ui.";
+const pathQuotePairs = { "'": "'", '"': '"', "‘": "’", "“": "”" };
+
+function normalizePathInput(value) {
+  const normalized = String(value ?? "").trim();
+  if (normalized.length >= 2 && pathQuotePairs[normalized[0]] === normalized.at(-1)) {
+    return normalized.slice(1, -1);
+  }
+  return normalized;
+}
+
+function normalizePathField(input) {
+  const normalized = normalizePathInput(input.value);
+  if (input.value !== normalized) input.value = normalized;
+  return normalized;
+}
 
 function clientRequestId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -112,6 +127,21 @@ async function init() {
 }
 
 function bindEvents() {
+  document.addEventListener("paste", event => {
+    const input = event.target.closest?.("[data-path-input]");
+    if (!input) return;
+    const pasted = event.clipboardData?.getData("text");
+    if (typeof pasted !== "string") return;
+    const normalized = normalizePathInput(pasted);
+    if (normalized === pasted) return;
+    event.preventDefault();
+    input.setRangeText(normalized, input.selectionStart ?? 0, input.selectionEnd ?? input.value.length, "end");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  document.addEventListener("change", event => {
+    const input = event.target.closest?.("[data-path-input]");
+    if (input) normalizePathField(input);
+  });
   $$(".section-tab").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
   $("#configSelect").addEventListener("change", () => selectConfig($("#configSelect").value));
   $("#scanBtn").addEventListener("click", scanAssets);
@@ -215,7 +245,7 @@ function bindTimelineEvents() {
 }
 
 async function analyzeTimeline() {
-  const sourcePath = $("#timelinePathInput").value.trim();
+  const sourcePath = normalizePathField($("#timelinePathInput"));
   if (!sourcePath) return toast("请先填写原始视频路径", true);
   const button = $("#analyzeTimelineBtn");
   button.disabled = true;
@@ -1204,7 +1234,7 @@ function requestValues() {
     config_id: state.configId,
     count,
     seed: seedValue ? Number(seedValue) : null,
-    output_directory: $("#outputInput").value.trim() || null,
+    output_directory: normalizePathField($("#outputInput")) || null,
   };
 }
 
@@ -1373,7 +1403,7 @@ function updateLibraryCreatePreview() {
   const newId = $("#newConfigIdInput").value.trim();
   const newName = $("#newConfigNameInput").value.trim();
   const folder = $("#newLibraryFolderInput").value.trim();
-  const parent = $("#newLibraryParentInput").value.trim();
+  const parent = normalizePathInput($("#newLibraryParentInput").value);
   const complete = /^[a-z0-9][a-z0-9-]*$/.test(newId) && newName && folder && parent;
   $("#createConfigBtn").disabled = !complete;
   $("#newLibraryFinalPath").textContent = parent && folder
@@ -1408,7 +1438,7 @@ async function createConfig() {
   const newId = $("#newConfigIdInput").value.trim();
   const newName = $("#newConfigNameInput").value.trim();
   const folderName = $("#newLibraryFolderInput").value.trim();
-  const parentDirectory = $("#newLibraryParentInput").value.trim();
+  const parentDirectory = normalizePathField($("#newLibraryParentInput"));
   if (!/^[a-z0-9][a-z0-9-]*$/.test(newId)) {
     toast("配置 ID 只能使用小写英文、数字和短横线", true);
     $("#newConfigIdInput").focus();
@@ -1549,11 +1579,11 @@ function restoreConfigEditorScroll() {
 }
 
 function configInput(label, path, value, options = {}) {
-  const { type = "text", hint = "", wide = false, placeholder = "", className = "" } = options;
+  const { type = "text", hint = "", wide = false, placeholder = "", className = "", pathInput = false } = options;
   const dataType = type === "number" ? "number" : type === "nullable-number" ? "nullable-number" : type === "list" ? "list" : "string";
   const inputType = ["number", "nullable-number"].includes(type) ? "number" : "text";
   const renderedValue = Array.isArray(value) ? value.join(", ") : (value ?? "");
-  return `<div class="config-field ${wide ? "wide" : ""} ${className}"><label>${label}${hint ? `<small>${hint}</small>` : ""}</label><input type="${inputType}" data-config-path="${path}" data-config-type="${dataType}" value="${escapeHtml(renderedValue)}" placeholder="${escapeHtml(placeholder)}" ${inputType === "number" ? 'step="any"' : ""}></div>`;
+  return `<div class="config-field ${wide ? "wide" : ""} ${className}"><label>${label}${hint ? `<small>${hint}</small>` : ""}</label><input type="${inputType}" data-config-path="${path}" data-config-type="${dataType}" value="${escapeHtml(renderedValue)}" placeholder="${escapeHtml(placeholder)}" ${pathInput ? 'data-path-input' : ''} ${inputType === "number" ? 'step="any"' : ""}></div>`;
 }
 
 function configTextarea(label, path, value) {
@@ -1602,7 +1632,7 @@ function renderVisualConfig() {
         ${configSelect("使用方式", `sources.${category}.mode`, group.mode, modeChoices)}
         ${configInput("默认权重", `sources.${category}.default_weight`, group.default_weight, { type: "number" })}
         ${configInput("扩展名", `sources.${category}.extensions`, group.extensions, { type: "list", hint: "逗号分隔" })}
-        ${configInput("素材目录", `sources.${category}.directory`, group.directory, { wide: true })}
+        ${configInput("素材目录", `sources.${category}.directory`, group.directory, { wide: true, pathInput: true })}
         ${category === "end_card" ? configInput("静态尾帧时长", `sources.${category}.image_duration_seconds`, group.image_duration_seconds, { type: "number", hint: "秒" }) : ""}
       </div>
     </div>`;
@@ -1634,7 +1664,7 @@ function renderVisualConfig() {
         ${configInput("配置名称", "name", config.name)}
         ${configSwitch("启用此配置", "enabled", config.enabled, "配置状态")}
         ${configInput("时间线顺序", "timeline", config.timeline, { type: "list", hint: "逗号分隔" })}
-        ${configInput("主素材根目录", "source_root", config.source_root, { wide: true })}
+        ${configInput("主素材根目录", "source_root", config.source_root, { wide: true, pathInput: true })}
         ${configTextarea("配置说明", "description", config.description)}
       </div>
     </details>
@@ -1651,7 +1681,7 @@ function renderVisualConfig() {
       <summary>风险提示语图片 <small>最高图层叠加设置</small></summary>
       <div class="config-section-body config-form-grid three">
         ${configSelect("使用方式", "benefit_overlays.mode", overlay.mode, modeChoices)}
-        ${configInput("唯一图片文件", "benefit_overlays.file", overlay.file, { wide: true, hint: "标准库可留空自动识别 · 固定且不参与随机", placeholder: "/路径/风险提示语图片.png" })}
+        ${configInput("唯一图片文件", "benefit_overlays.file", overlay.file, { wide: true, pathInput: true, hint: "标准库可留空自动识别 · 固定且不参与随机", placeholder: "/路径/风险提示语图片.png" })}
         ${configSelect("缩放方式", "benefit_overlays.placement.scale_mode", overlay.placement.scale_mode, [["original", "保持原尺寸"], ["fit", "等比适配画布"], ["stretch", "拉伸铺满"]])}
         ${configInput("整体透明度", "benefit_overlays.placement.opacity", overlay.placement.opacity, { type: "number", hint: "0～1" })}
         ${configSwitch("超出画布时自动缩小", "benefit_overlays.placement.shrink_if_oversized", overlay.placement.shrink_if_oversized)}
@@ -1688,7 +1718,7 @@ function renderVisualConfig() {
     <details class="config-section" data-config-section="output">
       <summary>成片输出 <small>尺寸、编码质量与文件名</small></summary>
       <div class="config-section-body config-form-grid three">
-        ${configInput("默认输出目录", "output.directory", output.directory, { wide: true })}
+        ${configInput("默认输出目录", "output.directory", output.directory, { wide: true, pathInput: true })}
         ${configInput("宽度", "output.width", output.width, { type: "number", hint: "px" })}
         ${configInput("高度", "output.height", output.height, { type: "number", hint: "px" })}
         ${configInput("帧率", "output.fps", output.fps, { type: "number", hint: "fps" })}
@@ -1941,7 +1971,7 @@ function collectVisualConfig() {
     else if (type === "number") value = Number(input.value);
     else if (type === "nullable-number") value = input.value.trim() === "" ? null : Number(input.value);
     else if (type === "list") value = input.value.split(",").map(item => item.trim()).filter(Boolean);
-    else value = input.value;
+    else value = input.matches("[data-path-input]") ? normalizePathField(input) : input.value;
     setConfigPath(draft, input.dataset.configPath, value);
   });
   draft.output.audio_channels = Number(draft.output.audio_channels);

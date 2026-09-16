@@ -8,7 +8,13 @@ import yaml
 from pydantic import ValidationError
 
 from smartstitch.config import ConfigStore
-from smartstitch.models import AppConfig, ConfigUpdateRequest
+from smartstitch.models import (
+    AppConfig,
+    ConfigUpdateRequest,
+    LibraryPreflightRequest,
+    PreviewRequest,
+    TimelineAnalyzeRequest,
+)
 
 
 def config_data(tmp_path) -> dict[str, Any]:
@@ -25,6 +31,39 @@ def config_data(tmp_path) -> dict[str, Any]:
         "benefit_overlays": {"mode": "disabled", "file": ""},
         "output": {"directory": str(tmp_path / "output")},
     }
+
+
+def test_path_fields_remove_macos_copy_quotes_without_changing_filename(tmp_path):
+    copied_path = (
+        "'/Volumes/Elements SE/陈鼎琦/饿了么整理/素材/星广一口价二剪/原始视频/"
+        "26 室友要喝我的奶茶 #剧情演绎 #淘宝闪购 #外卖.mp4'"
+    )
+    expected = copied_path[1:-1]
+
+    assert TimelineAnalyzeRequest(source_path=copied_path).source_path == expected
+    preview = PreviewRequest(
+        config_id="config-test", count=1, output_directory=f'"{tmp_path}"'
+    )
+    library = LibraryPreflightRequest(
+        parent_directory=f"‘{tmp_path}’", folder_name="视频库"
+    )
+    assert preview.output_directory == str(tmp_path)
+    assert library.parent_directory == str(tmp_path)
+
+    data = config_data(tmp_path)
+    data["source_root"] = copied_path
+    data["sources"]["hook"]["directory"] = f'"{tmp_path / "hook"}"'
+    data["benefit_overlays"] = {
+        "mode": "optional",
+        "file": f"“{tmp_path / '提示语.png'}”",
+    }
+    data["output"]["directory"] = f"'{tmp_path / 'output'}'"
+    config = AppConfig.model_validate(data)
+
+    assert config.source_root == expected
+    assert config.sources["hook"].directory == str(tmp_path / "hook")
+    assert config.benefit_overlays.file == str(tmp_path / "提示语.png")
+    assert config.output.directory == str(tmp_path / "output")
 
 
 def test_schema_one_migrates_in_memory_without_mutating_source(tmp_path):
