@@ -62,16 +62,60 @@ class TimelineSlicer:
         if review.get("review_revision") != request.review_revision:
             raise SliceConflictError("断点审核已变更，请重新确认待切片清单")
         segments = review["segments"]
-        assignments = {item.segment_index: item.category for item in request.assignments}
-        if len(assignments) != len(request.assignments):
-            raise SliceError("同一片段不能重复指定入库类别")
-        expected_indexes = {int(segment["index"]) for segment in segments}
-        unknown_indexes = set(assignments) - expected_indexes
+        segments_by_index = {int(segment["index"]): segment for segment in segments}
+        if len(segments_by_index) != len(segments):
+            raise SliceError("审核记录包含重复片段序号")
+
+        requested_indexes = {
+            index
+            for assignment in request.assignments
+            for index in assignment.segment_indexes
+        }
+        unknown_indexes = requested_indexes - set(segments_by_index)
         if unknown_indexes:
             raise SliceError("待切片清单包含不存在的片段")
-        selected_segments = [
-            segment for segment in segments if int(segment["index"]) in assignments
-        ]
+
+        seen_indexes: set[int] = set()
+        normalized_assignments: list[dict[str, Any]] = []
+        for unit_index, assignment in enumerate(request.assignments, start=1):
+            duplicated = seen_indexes.intersection(assignment.segment_indexes)
+            if duplicated:
+                raise SliceError("同一片段不能同时属于多个输出单元")
+            seen_indexes.update(assignment.segment_indexes)
+            ordered_segments = sorted(
+                (segments_by_index[index] for index in assignment.segment_indexes),
+                key=lambda segment: int(segment["start_frame"]),
+            )
+            parts = []
+            for segment in ordered_segments:
+                index = int(segment["index"])
+                start_frame = int(segment["start_frame"])
+                end_frame = int(segment["end_frame"])
+                if end_frame <= start_frame:
+                    raise SliceError(f"片段 {index} 的帧区间无效")
+                if parts and start_frame < int(parts[-1]["end_frame"]):
+                    raise SliceError("组合片段的成员区间不能重叠")
+                parts.append(
+                    {
+                        "segment_index": index,
+                        "segment_id": str(
+                            segment.get("segment_id")
+                            or f"f{start_frame:09d}-f{end_frame:09d}"
+                        ),
+                        "start_frame": start_frame,
+                        "end_frame": end_frame,
+                        "start_seconds": start_frame / float(record.get("fps") or 1),
+                        "end_seconds": end_frame / float(record.get("fps") or 1),
+                    }
+                )
+            normalized_assignments.append(
+                {
+                    "unit_index": unit_index,
+                    "client_unit_id": assignment.client_unit_id,
+                    "category": assignment.category,
+                    "parts": parts,
+                }
+            )
 
         config = self.library_service.config_store.load(request.config_id)
         if (
@@ -112,7 +156,7 @@ class TimelineSlicer:
             raise SliceConflictError("原视频已变更，请重新分析")
 
         target_directories: dict[str, Path] = {}
-        for category in set(assignments.values()):
+        for category in {item["category"] for item in normalized_assignments}:
             if category == "skip":
                 continue
             target_directories[category] = self.library_service.resolve_slice_target(
@@ -137,64 +181,82 @@ class TimelineSlicer:
                 "fps": fps,
             },
             "items": [],
+            "output_unit_count": len(normalized_assignments),
+            "source_segment_count": sum(
+                len(item["parts"]) for item in normalized_assignments
+            ),
             "success_count": 0,
             "failure_count": 0,
             "skipped_count": 0,
             "manifest_path": str(manifest_path),
         }
         source_stem = _safe_stem(source.stem)
-        for segment in selected_segments:
-            index = int(segment["index"])
-            category = assignments[index]
-            start_frame = int(segment["start_frame"])
-            end_frame = int(segment["end_frame"])
-            segment_id = str(
-                segment.get("segment_id")
-                or f"f{start_frame:09d}-f{end_frame:09d}"
+        for assignment in normalized_assignments:
+            unit_index = int(assignment["unit_index"])
+            category = str(assignment["category"])
+            parts = assignment["parts"]
+            segment_indexes = [int(part["segment_index"]) for part in parts]
+            segment_ids = [str(part["segment_id"]) for part in parts]
+            total_duration_seconds = sum(
+                (int(part["end_frame"]) - int(part["start_frame"])) / fps
+                for part in parts
             )
+            excluded_gap_frames = sum(
+                max(0, int(current["start_frame"]) - int(previous["end_frame"]))
+                for previous, current in zip(parts, parts[1:])
+            )
+            for part in parts:
+                part["duration_seconds"] = (
+                    int(part["end_frame"]) - int(part["start_frame"])
+                ) / fps
+            single = len(parts) == 1
+            item: dict[str, Any] = {
+                "unit_index": unit_index,
+                "client_unit_id": assignment["client_unit_id"],
+                "composite": not single,
+                "category": category,
+                "segment_indexes": segment_indexes,
+                "segment_ids": segment_ids,
+                "parts": parts,
+                "total_duration_seconds": total_duration_seconds,
+                "excluded_gap_frames": excluded_gap_frames,
+                # Preserve the original manifest fields for single-segment consumers.
+                "segment_index": segment_indexes[0] if single else None,
+                "segment_id": segment_ids[0] if single else None,
+                "start_frame": parts[0]["start_frame"] if single else None,
+                "end_frame": parts[0]["end_frame"] if single else None,
+                "start_seconds": parts[0]["start_seconds"] if single else None,
+                "end_seconds": parts[0]["end_seconds"] if single else None,
+                "target_directory": None,
+                "output_path": None,
+                "status": "pending",
+                "error": None,
+            }
             if category == "skip":
-                batch["items"].append(
-                    {
-                        "segment_index": index,
-                        "segment_id": segment_id,
-                        "category": category,
-                        "start_frame": start_frame,
-                        "end_frame": end_frame,
-                        "start_seconds": start_frame / fps,
-                        "end_seconds": end_frame / fps,
-                        "target_directory": None,
-                        "output_path": None,
-                        "status": "skipped",
-                        "error": None,
-                    }
-                )
+                item["status"] = "skipped"
+                batch["items"].append(item)
                 batch["skipped_count"] += 1
                 continue
             target_directory = target_directories[category]
             category_stem = _safe_stem(category.replace("_", "-"))
-            output = self._unique_output(
-                target_directory
-                / (
-                    f"{source_stem}__{index:03d}_{category_stem}"
-                    f"_f{start_frame}-{end_frame}.mp4"
+            if single:
+                part = parts[0]
+                filename = (
+                    f"{source_stem}__{segment_indexes[0]:03d}_{category_stem}"
+                    f"_f{part['start_frame']}-{part['end_frame']}.mp4"
                 )
-            )
-            item: dict[str, Any] = {
-                "segment_index": index,
-                "segment_id": segment_id,
-                "category": category,
-                "start_frame": start_frame,
-                "end_frame": end_frame,
-                "start_seconds": start_frame / fps,
-                "end_seconds": end_frame / fps,
-                "target_directory": str(target_directory),
-                "output_path": str(output),
-                "status": "pending",
-                "error": None,
-            }
+            else:
+                filename = (
+                    f"{source_stem}__g{unit_index:03d}_{category_stem}"
+                    f"_p{segment_indexes[0]:03d}-{segment_indexes[-1]:03d}.mp4"
+                )
+            output = self._unique_output(target_directory / filename)
+            item["target_directory"] = str(target_directory)
+            item["output_path"] = str(output)
             batch["items"].append(item)
 
         _atomic_json(manifest_path, batch)
+        source_has_audio: bool | None = None
         for item in batch["items"]:
             if item["status"] == "skipped":
                 continue
@@ -204,16 +266,30 @@ class TimelineSlicer:
             item["status"] = "running"
             _atomic_json(manifest_path, batch)
             try:
-                self._render_slice(
-                    source,
-                    temporary,
-                    start_seconds=float(item["start_seconds"]),
-                    duration_seconds=(
-                        int(item["end_frame"]) - int(item["start_frame"])
+                if item["composite"]:
+                    if source_has_audio is None:
+                        source_has_audio = self._source_has_audio(source)
+                    self._render_composite_slice(
+                        source,
+                        temporary,
+                        parts=item["parts"],
+                        fps=fps,
+                        has_audio=source_has_audio,
                     )
-                    / fps,
-                )
-                self._verify_slice(temporary)
+                    self._verify_slice(
+                        temporary,
+                        expected_duration=float(item["total_duration_seconds"]),
+                        expect_audio=source_has_audio,
+                        fps=fps,
+                    )
+                else:
+                    self._render_slice(
+                        source,
+                        temporary,
+                        start_seconds=float(item["start_seconds"]),
+                        duration_seconds=float(item["total_duration_seconds"]),
+                    )
+                    self._verify_slice(temporary)
                 temporary.replace(Path(item["output_path"]))
                 item["status"] = "succeeded"
                 batch["success_count"] += 1
@@ -273,16 +349,126 @@ class TimelineSlicer:
         if result.returncode != 0:
             raise SliceError(result.stderr.strip() or "FFmpeg 切片失败")
 
-    def _verify_slice(self, path: Path) -> None:
+    def _source_has_audio(self, source: Path) -> bool:
         result = self.runner(
             [
                 "ffprobe",
                 "-v",
                 "error",
                 "-select_streams",
-                "v:0",
+                "a:0",
                 "-show_entries",
                 "stream=codec_type",
+                "-of",
+                "json",
+                str(source),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise SliceError(result.stderr.strip() or "ffprobe 无法检查源视频音轨")
+        try:
+            streams = json.loads(result.stdout).get("streams", [])
+        except json.JSONDecodeError as exc:
+            raise SliceError("ffprobe 返回了无效音轨信息") from exc
+        return any(stream.get("codec_type") == "audio" for stream in streams)
+
+    def _render_composite_slice(
+        self,
+        source: Path,
+        output: Path,
+        *,
+        parts: list[dict[str, Any]],
+        fps: float,
+        has_audio: bool,
+    ) -> None:
+        count = len(parts)
+        if count < 2:
+            raise SliceError("组合片段至少需要两个成员")
+
+        filters = [
+            f"[0:v]split={count}"
+            + "".join(f"[vsrc{index}]" for index in range(count))
+        ]
+        for index, part in enumerate(parts):
+            filters.append(
+                f"[vsrc{index}]"
+                f"trim=start_frame={int(part['start_frame'])}:end_frame={int(part['end_frame'])},"
+                f"setpts=PTS-STARTPTS[v{index}]"
+            )
+
+        if has_audio:
+            filters.append(
+                f"[0:a]asplit={count}"
+                + "".join(f"[asrc{index}]" for index in range(count))
+            )
+            for index, part in enumerate(parts):
+                start = int(part["start_frame"]) / fps
+                end = int(part["end_frame"]) / fps
+                filters.append(
+                    f"[asrc{index}]atrim=start={start:.9f}:end={end:.9f},"
+                    f"asetpts=PTS-STARTPTS[a{index}]"
+                )
+            concat_inputs = "".join(
+                f"[v{index}][a{index}]" for index in range(count)
+            )
+            filters.append(
+                f"{concat_inputs}concat=n={count}:v=1:a=1[vout][aout]"
+            )
+        else:
+            concat_inputs = "".join(f"[v{index}]" for index in range(count))
+            filters.append(f"{concat_inputs}concat=n={count}:v=1:a=0[vout]")
+
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(source),
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            "[vout]",
+        ]
+        if has_audio:
+            command.extend(["-map", "[aout]"])
+        command.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+            ]
+        )
+        if has_audio:
+            command.extend(["-c:a", "aac"])
+        command.extend(["-movflags", "+faststart", str(output)])
+        result = self.runner(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise SliceError(result.stderr.strip() or "FFmpeg 组合片段失败")
+
+    def _verify_slice(
+        self,
+        path: Path,
+        *,
+        expected_duration: float | None = None,
+        expect_audio: bool | None = None,
+        fps: float | None = None,
+    ) -> None:
+        result = self.runner(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration:stream=codec_type",
                 "-of",
                 "json",
                 str(path),
@@ -294,11 +480,31 @@ class TimelineSlicer:
         if result.returncode != 0:
             raise SliceError(result.stderr.strip() or "ffprobe 无法校验切片")
         try:
-            streams = json.loads(result.stdout).get("streams", [])
+            data = json.loads(result.stdout)
+            streams = data.get("streams", [])
         except json.JSONDecodeError as exc:
             raise SliceError("ffprobe 返回了无效结果") from exc
-        if not streams or not path.is_file() or path.stat().st_size <= 0:
+        if (
+            not any(stream.get("codec_type") == "video" for stream in streams)
+            or not path.is_file()
+            or path.stat().st_size <= 0
+        ):
             raise SliceError("切片结果中没有可用视频流")
+        if expect_audio and not any(
+            stream.get("codec_type") == "audio" for stream in streams
+        ):
+            raise SliceError("组合切片结果缺少音频流")
+        if expected_duration is not None:
+            try:
+                actual_duration = float(data.get("format", {}).get("duration"))
+            except (TypeError, ValueError) as exc:
+                raise SliceError("无法校验组合切片时长") from exc
+            tolerance = max(2 / fps, 0.08) if fps else 0.08
+            if abs(actual_duration - expected_duration) > tolerance:
+                raise SliceError(
+                    "组合切片时长异常: "
+                    f"期望 {expected_duration:.3f}s，实际 {actual_duration:.3f}s"
+                )
 
     @staticmethod
     def _unique_output(path: Path) -> Path:

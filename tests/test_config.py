@@ -13,6 +13,7 @@ from smartstitch.models import (
     ConfigUpdateRequest,
     LibraryPreflightRequest,
     PreviewRequest,
+    SliceAssignment,
     TimelineAnalyzeRequest,
 )
 
@@ -64,6 +65,35 @@ def test_path_fields_remove_macos_copy_quotes_without_changing_filename(tmp_path
     assert config.sources["hook"].directory == str(tmp_path / "hook")
     assert config.benefit_overlays.file == str(tmp_path / "提示语.png")
     assert config.output.directory == str(tmp_path / "output")
+
+
+def test_slice_assignment_migrates_single_index_and_validates_groups():
+    legacy = SliceAssignment.model_validate(
+        {"segment_index": 3, "category": "benefit_1"}
+    )
+    assert legacy.segment_indexes == [3]
+
+    grouped = SliceAssignment.model_validate(
+        {
+            "client_unit_id": "unit-1",
+            "segment_indexes": [5, 2],
+            "category": "hook",
+        }
+    )
+    assert grouped.segment_indexes == [5, 2]
+
+    with pytest.raises(ValidationError, match="不能同时提交"):
+        SliceAssignment.model_validate(
+            {
+                "segment_index": 1,
+                "segment_indexes": [1],
+                "category": "hook",
+            }
+        )
+    with pytest.raises(ValidationError, match="不能重复"):
+        SliceAssignment.model_validate(
+            {"segment_indexes": [1, 1], "category": "hook"}
+        )
 
 
 def test_schema_one_migrates_in_memory_without_mutating_source(tmp_path):

@@ -32,8 +32,8 @@ const state = {
     reviewSaved: false,
     reviewRevision: null,
     selectedSegmentId: null,
-    queuedSegmentIds: [],
-    segmentCategories: {},
+    sliceUnits: [],
+    mergeSelection: [],
     sliceTargets: [],
   },
 };
@@ -192,6 +192,8 @@ function bindTimelineEvents() {
   $("#addBreakpointBtn").addEventListener("click", addBreakpointAtPlayhead);
   $("#deleteBreakpointBtn").addEventListener("click", deleteSelectedBreakpoint);
   $("#sliceTimelineBtn").addEventListener("click", exportTimelineSlices);
+  $("#mergeSegmentsBtn").addEventListener("click", mergeSelectedSliceUnits);
+  $("#clearMergeSelectionBtn").addEventListener("click", clearMergeSelection);
   $("#selectedFrameInput").addEventListener("change", event => moveSelectedBreakpoint(Number(event.target.value)));
   const video = $("#timelineVideo");
   video.addEventListener("play", startTimelineVideoSync);
@@ -272,8 +274,8 @@ async function analyzeTimeline() {
     state.timeline.reviewSaved = false;
     state.timeline.reviewRevision = null;
     state.timeline.selectedSegmentId = null;
-    state.timeline.queuedSegmentIds = [];
-    state.timeline.segmentCategories = {};
+    state.timeline.sliceUnits = [];
+    state.timeline.mergeSelection = [];
     stopTimelineVideoSync();
     const video = $("#timelineVideo");
     video.src = analysis.media_url;
@@ -299,18 +301,46 @@ function setTimelineStatus(text, type) {
   element.className = `status ${type}`;
 }
 
+function newSliceUnit(segmentIds, category = "") {
+  return { id: `unit-${clientRequestId()}`, segmentIds: [...segmentIds], category };
+}
+
+function sliceUnitForSegment(segmentId) {
+  return state.timeline.sliceUnits.find(unit => unit.segmentIds.includes(segmentId)) || null;
+}
+
+function sliceUnitSegments(unit, allSegments = timelineSegments()) {
+  const byId = new Map(allSegments.map(segment => [segment.id, segment]));
+  return unit.segmentIds.map(segmentId => byId.get(segmentId)).filter(Boolean)
+    .sort((left, right) => left.startFrame - right.startFrame);
+}
+
 function renderTimeline() {
   const analysis = state.timeline.analysis;
   if (!analysis) return;
   layoutTimelineCanvas();
   const segments = timelineSegments();
+  const unitBySegment = new Map();
+  const groupLabelBySegment = new Map();
+  let groupNumber = 0;
+  state.timeline.sliceUnits.forEach(unit => {
+    if (unit.segmentIds.length > 1) groupNumber += 1;
+    unit.segmentIds.forEach(segmentId => {
+      unitBySegment.set(segmentId, unit);
+      if (unit.segmentIds.length > 1) groupLabelBySegment.set(segmentId, `G${groupNumber}`);
+    });
+  });
   $("#timelineSegments").innerHTML = segments.map(segment => {
     const left = timelineXForFrame(segment.startFrame);
     const width = timelineXForFrame(segment.endFrame) - left;
-    const category = state.timeline.segmentCategories[segment.id] || "pending";
+    const unit = unitBySegment.get(segment.id);
+    const category = unit?.category || "pending";
     const selected = state.timeline.selectedSegmentId === segment.id ? "selected" : "";
-    const queued = state.timeline.queuedSegmentIds.includes(segment.id) ? "queued" : "";
-    return `<button class="timeline-segment ${segmentCategoryClass(category)} ${selected} ${queued}" type="button" data-timeline-segment="${segment.id}" style="left:${left}px;width:${width}px" title="加入片段 ${segment.index} · ${escapeHtml(categoryLabelForTimeline(category))} · ${segment.durationFrames} 帧" aria-label="加入片段 ${segment.index}"></button>`;
+    const queued = unit ? "queued" : "";
+    const groupLabel = groupLabelBySegment.get(segment.id) || "";
+    const composite = groupLabel ? "composite-member" : "";
+    const titlePrefix = groupLabel ? `${groupLabel} 组合成员` : "加入片段";
+    return `<button class="timeline-segment ${segmentCategoryClass(category)} ${selected} ${queued} ${composite}" type="button" data-timeline-segment="${segment.id}" data-group-label="${groupLabel}" style="left:${left}px;width:${width}px" title="${titlePrefix} ${segment.index} · ${escapeHtml(categoryLabelForTimeline(category))} · ${segment.durationFrames} 帧" aria-label="加入片段 ${segment.index}"></button>`;
   }).join("");
   $("#timelineMarkers").innerHTML = state.timeline.breakpoints.map(point => `
     <button class="timeline-marker ${point.frame_index === state.timeline.selectedFrame ? "selected" : ""} ${point.frame_index === state.timeline.snapTargetFrame ? "snap-target" : ""} ${point.review_status === "machine_suggested" ? "machine" : "human"}"
@@ -321,9 +351,10 @@ function renderTimeline() {
   });
   $$(".timeline-marker").forEach(marker => bindTimelineMarker(marker));
   $("#timelineMeta").innerHTML = `<span>${escapeHtml(analysis.source_name)}</span><span>${analysis.width}×${analysis.height}</span><span>${analysis.fps.toFixed(3)} fps</span><span>${analysis.frame_count} 帧</span><span>${formatPreciseTime(analysis.duration)}</span>`;
-  const queuedCount = state.timeline.queuedSegmentIds.length;
-  const classifiedCount = state.timeline.queuedSegmentIds.filter(segmentId => state.timeline.segmentCategories[segmentId]).length;
-  $("#timelineBreakpointSummary").textContent = `${segments.length} 个可选片段 · ${state.timeline.breakpoints.length} 个断点 · ${queuedCount} 个已标记 · ${classifiedCount} 个已分类`;
+  const outputCount = state.timeline.sliceUnits.length;
+  const sourceCount = state.timeline.sliceUnits.reduce((sum, unit) => sum + unit.segmentIds.length, 0);
+  const classifiedCount = state.timeline.sliceUnits.filter(unit => unit.category).length;
+  $("#timelineBreakpointSummary").textContent = `${segments.length} 个可选片段 · ${state.timeline.breakpoints.length} 个断点 · ${outputCount} 个输出片段 · ${sourceCount} 个源区间 · ${classifiedCount} 个已分类`;
   renderTimelineRuler();
   renderSegmentList();
   renderSliceControls();
@@ -772,14 +803,22 @@ function timelineReviewChanged() {
   state.timeline.reviewSaved = false;
   state.timeline.reviewRevision = null;
   const validSegmentIds = new Set(timelineSegments().map(segment => segment.id));
-  state.timeline.segmentCategories = Object.fromEntries(
-    Object.entries(state.timeline.segmentCategories).filter(([segmentId]) => validSegmentIds.has(segmentId)),
-  );
-  state.timeline.queuedSegmentIds = state.timeline.queuedSegmentIds.filter(segmentId => validSegmentIds.has(segmentId));
+  const nextUnits = [];
+  state.timeline.sliceUnits.forEach(unit => {
+    const surviving = unit.segmentIds.filter(segmentId => validSegmentIds.has(segmentId));
+    if (surviving.length === unit.segmentIds.length) {
+      nextUnits.push(unit);
+    } else {
+      surviving.forEach(segmentId => nextUnits.push(newSliceUnit([segmentId], unit.category)));
+    }
+  });
+  state.timeline.sliceUnits = nextUnits;
+  const validUnitIds = new Set(nextUnits.map(unit => unit.id));
+  state.timeline.mergeSelection = state.timeline.mergeSelection.filter(unitId => validUnitIds.has(unitId));
   if (!validSegmentIds.has(state.timeline.selectedSegmentId)) {
     state.timeline.selectedSegmentId = null;
   }
-  $("#timelineSliceResult").textContent = "断点已变更，切片时将保存最新审核版本";
+  $("#timelineSliceResult").textContent = "断点已变更；受影响的组合已拆分，切片时将保存最新审核版本";
   $("#timelineSliceResult").className = "timeline-slice-result";
 }
 
@@ -889,9 +928,7 @@ function segmentCategoryClass(category) {
 function selectTimelineSegment(segmentId, scrollIntoView = false) {
   const segment = timelineSegments().find(item => item.id === segmentId);
   if (!segment) return;
-  if (!state.timeline.queuedSegmentIds.includes(segment.id)) {
-    state.timeline.queuedSegmentIds.push(segment.id);
-  }
+  if (!sliceUnitForSegment(segment.id)) state.timeline.sliceUnits.push(newSliceUnit([segment.id]));
   state.timeline.selectedSegmentId = segment.id;
   state.timeline.selectedFrame = null;
   $("#timelineVideo").pause();
@@ -899,69 +936,170 @@ function selectTimelineSegment(segmentId, scrollIntoView = false) {
   renderTimeline();
   if (scrollIntoView) {
     requestAnimationFrame(() => {
-      const row = $$(".segment-row").find(item => item.dataset.segmentId === segmentId);
+      const unit = sliceUnitForSegment(segmentId);
+      const row = unit ? $(`[data-unit-id="${unit.id}"]`) : null;
       row?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     });
   }
 }
 
+function renderMergeToolbar() {
+  const selectedCount = state.timeline.mergeSelection.length;
+  const mergeButton = $("#mergeSegmentsBtn");
+  const clearButton = $("#clearMergeSelectionBtn");
+  mergeButton.disabled = selectedCount < 2;
+  mergeButton.textContent = `合并所选（${selectedCount}）`;
+  clearButton.disabled = selectedCount === 0;
+}
+
+function mergeSelectedSliceUnits() {
+  const selectedIds = new Set(state.timeline.mergeSelection);
+  const selectedUnits = state.timeline.sliceUnits.filter(unit => selectedIds.has(unit.id));
+  if (selectedUnits.length < 2) return toast("请至少勾选两个片段", true);
+
+  const allSegments = timelineSegments();
+  const segmentStartFrames = Object.fromEntries(
+    allSegments.map(segment => [segment.id, segment.startFrame]),
+  );
+  const segmentIds = [...new Set(selectedUnits.flatMap(unit => unit.segmentIds))];
+  if (segmentIds.length > 20) return toast("一个组合最多包含 20 个源片段", true);
+
+  const result = TimelineMath.mergeSliceUnits({
+    units: state.timeline.sliceUnits,
+    selectedUnitIds: state.timeline.mergeSelection,
+    segmentStartFrames,
+    mergedUnitId: `unit-${clientRequestId()}`,
+  });
+  state.timeline.sliceUnits = result.units;
+  state.timeline.mergeSelection = [];
+  state.timeline.selectedSegmentId = result.mergedUnit.segmentIds[0] || null;
+  toast(`已合并 ${result.mergedUnit.segmentIds.length} 个源片段，中间未选择内容不会入库`);
+  renderTimeline();
+}
+
+function clearMergeSelection() {
+  state.timeline.mergeSelection = [];
+  renderSegmentList();
+}
+
+function splitSliceUnit(unitId) {
+  const unit = state.timeline.sliceUnits.find(item => item.id === unitId);
+  if (!unit || unit.segmentIds.length < 2) return;
+  state.timeline.sliceUnits = state.timeline.sliceUnits.flatMap(item => (
+    item.id === unitId
+      ? item.segmentIds.map(segmentId => newSliceUnit([segmentId], item.category))
+      : [item]
+  ));
+  state.timeline.mergeSelection = state.timeline.mergeSelection.filter(id => id !== unitId);
+  toast("组合片段已拆分，分类已保留");
+  renderTimeline();
+}
+
+function removeSliceUnit(unitId) {
+  const unit = state.timeline.sliceUnits.find(item => item.id === unitId);
+  if (!unit) return;
+  state.timeline.sliceUnits = state.timeline.sliceUnits.filter(item => item.id !== unitId);
+  state.timeline.mergeSelection = state.timeline.mergeSelection.filter(id => id !== unitId);
+  if (unit.segmentIds.includes(state.timeline.selectedSegmentId)) state.timeline.selectedSegmentId = null;
+  renderTimeline();
+}
+
 function renderSegmentList() {
   const analysis = state.timeline.analysis;
   const allSegments = timelineSegments();
-  const queuedSegments = state.timeline.queuedSegmentIds.map(segmentId => (
-    allSegments.find(segment => segment.id === segmentId)
-  )).filter(Boolean);
-  if (!queuedSegments.length) {
+  renderMergeToolbar();
+  if (!state.timeline.sliceUnits.length) {
     $("#timelineSegmentList").innerHTML = '<div class="breakpoint-empty">点击上方时间轴中的片段，将需要切割的条目加入这里。</div>';
     return;
   }
   const categoryOptions = timelineCategoryOptions();
-  $("#timelineSegmentList").innerHTML = queuedSegments.map(segment => {
-    const selectedCategory = state.timeline.segmentCategories[segment.id] || "";
+  let compositeNumber = 0;
+  $("#timelineSegmentList").innerHTML = state.timeline.sliceUnits.map((unit, unitOffset) => {
+    const memberSegments = sliceUnitSegments(unit, allSegments);
+    if (!memberSegments.length) return "";
+    const composite = memberSegments.length > 1;
+    if (composite) compositeNumber += 1;
+    const selectedCategory = unit.category || "";
     const options = categoryOptions.map(option => (
       `<option value="${escapeHtml(option.category)}" ${selectedCategory === option.category ? "selected" : ""}>${escapeHtml(option.label)}</option>`
     )).join("");
-    return `<div class="segment-row ${state.timeline.selectedSegmentId === segment.id ? "selected" : ""}" data-segment-id="${segment.id}" tabindex="0">
-      <span>${String(segment.index).padStart(2, "0")}</span>
-      <div class="segment-row-time"><strong>${frameTimecode(segment.startFrame, analysis.fps)}</strong><b>→</b><strong>${frameTimecode(segment.endFrame, analysis.fps)}</strong></div>
-      <small>${segment.durationFrames} 帧 · ${formatPreciseTime(segment.durationFrames / analysis.fps)}</small>
-      <select class="segment-type-select ${selectedCategory ? "" : "pending"}" data-segment-category="${segment.id}" ${state.configId ? "" : "disabled"} aria-label="片段 ${segment.index} 类型">
+    const totalFrames = memberSegments.reduce((sum, segment) => sum + segment.durationFrames, 0);
+    const excludedFrames = memberSegments.slice(1).reduce((sum, segment, index) => (
+      sum + Math.max(0, segment.startFrame - memberSegments[index].endFrame)
+    ), 0);
+    const selected = memberSegments.some(segment => state.timeline.selectedSegmentId === segment.id);
+    const checked = state.timeline.mergeSelection.includes(unit.id);
+    const memberMarkup = composite
+      ? `<div class="segment-unit-parts">${memberSegments.map(segment => (
+        `<button type="button" data-seek-member="${segment.id}"><b>${String(segment.index).padStart(2, "0")}</b><span>${frameTimecode(segment.startFrame, analysis.fps)} → ${frameTimecode(segment.endFrame, analysis.fps)}</span></button>`
+      )).join("")}</div>`
+      : `<div class="segment-row-time"><strong>${frameTimecode(memberSegments[0].startFrame, analysis.fps)}</strong><b>→</b><strong>${frameTimecode(memberSegments[0].endFrame, analysis.fps)}</strong></div>`;
+    const numberLabel = composite ? `G${compositeNumber}` : String(memberSegments[0].index).padStart(2, "0");
+    const gapLabel = composite ? ` · 排除 ${excludedFrames} 帧间隙` : "";
+    return `<div class="segment-row segment-unit ${composite ? "composite" : ""} ${selected ? "selected" : ""} ${checked ? "merge-selected" : ""}" data-unit-id="${unit.id}" tabindex="0">
+      <input class="segment-merge-checkbox" type="checkbox" data-merge-unit="${unit.id}" ${checked ? "checked" : ""} aria-label="选择输出片段 ${unitOffset + 1} 用于合并">
+      <span>${numberLabel}</span>
+      ${memberMarkup}
+      <small>${memberSegments.length} 段 · ${totalFrames} 帧 · ${formatPreciseTime(totalFrames / analysis.fps)}${gapLabel}</small>
+      <select class="segment-type-select ${selectedCategory ? "" : "pending"}" data-unit-category="${unit.id}" ${state.configId ? "" : "disabled"} aria-label="输出片段 ${unitOffset + 1} 类型">
         <option value="" disabled ${selectedCategory ? "" : "selected"}>选择类型</option>${options}
       </select>
-      <i>结束：${escapeHtml(segment.endReason)}</i>
-      <button class="segment-remove-button" type="button" data-remove-segment="${segment.id}" aria-label="移除片段 ${segment.index}">移除</button>
+      <i>${composite ? `组合 ${memberSegments.length} 段` : `结束：${escapeHtml(memberSegments[0].endReason)}`}</i>
+      <div class="segment-row-actions">
+        ${composite ? `<button class="segment-split-button" type="button" data-split-unit="${unit.id}">拆分</button>` : ""}
+        <button class="segment-remove-button" type="button" data-remove-unit="${unit.id}">移除</button>
+      </div>
     </div>`;
   }).join("");
   $$(".segment-row").forEach(row => {
     row.addEventListener("click", event => {
-      if (event.target.closest("select, button")) return;
-      selectTimelineSegment(row.dataset.segmentId);
+      if (event.target.closest("select, button, input")) return;
+      const unit = state.timeline.sliceUnits.find(item => item.id === row.dataset.unitId);
+      if (unit?.segmentIds[0]) selectTimelineSegment(unit.segmentIds[0]);
     });
     row.addEventListener("keydown", event => {
-      if ((event.key === "Enter" || event.key === " ") && !event.target.closest("select, button")) {
+      if ((event.key === "Enter" || event.key === " ") && !event.target.closest("select, button, input")) {
         event.preventDefault();
-        selectTimelineSegment(row.dataset.segmentId);
+        const unit = state.timeline.sliceUnits.find(item => item.id === row.dataset.unitId);
+        if (unit?.segmentIds[0]) selectTimelineSegment(unit.segmentIds[0]);
       }
     });
   });
-  $$("[data-segment-category]").forEach(select => {
-    select.addEventListener("click", event => event.stopPropagation());
-    select.addEventListener("change", event => {
-      state.timeline.segmentCategories[event.target.dataset.segmentCategory] = event.target.value;
-      state.timeline.selectedSegmentId = event.target.dataset.segmentCategory;
-      renderTimeline();
-    });
-  });
-  $$('[data-remove-segment]').forEach(button => {
+  $$('[data-seek-member]').forEach(button => {
     button.addEventListener("click", event => {
       event.stopPropagation();
-      const segmentId = event.currentTarget.dataset.removeSegment;
-      state.timeline.queuedSegmentIds = state.timeline.queuedSegmentIds.filter(id => id !== segmentId);
-      delete state.timeline.segmentCategories[segmentId];
-      if (state.timeline.selectedSegmentId === segmentId) state.timeline.selectedSegmentId = null;
+      selectTimelineSegment(event.currentTarget.dataset.seekMember);
+    });
+  });
+  $$('[data-merge-unit]').forEach(checkbox => {
+    checkbox.addEventListener("change", event => {
+      const unitId = event.currentTarget.dataset.mergeUnit;
+      if (event.currentTarget.checked) {
+        if (!state.timeline.mergeSelection.includes(unitId)) state.timeline.mergeSelection.push(unitId);
+      } else {
+        state.timeline.mergeSelection = state.timeline.mergeSelection.filter(id => id !== unitId);
+      }
+      renderSegmentList();
+    });
+  });
+  $$('[data-unit-category]').forEach(select => {
+    select.addEventListener("click", event => event.stopPropagation());
+    select.addEventListener("change", event => {
+      const unit = state.timeline.sliceUnits.find(item => item.id === event.target.dataset.unitCategory);
+      if (!unit) return;
+      unit.category = event.target.value;
+      state.timeline.selectedSegmentId = unit.segmentIds[0] || null;
       renderTimeline();
     });
   });
+  $$('[data-split-unit]').forEach(button => button.addEventListener("click", event => {
+    event.stopPropagation();
+    splitSliceUnit(event.currentTarget.dataset.splitUnit);
+  }));
+  $$('[data-remove-unit]').forEach(button => button.addEventListener("click", event => {
+    event.stopPropagation();
+    removeSliceUnit(event.currentTarget.dataset.removeUnit);
+  }));
 }
 
 function renderSliceControls() {
@@ -980,10 +1118,8 @@ function renderSliceControls() {
   } else {
     $("#timelineSliceLibrary").textContent = "切片前需选择或修复 SmartStitch 标准视频库";
   }
-  const queuedCount = state.timeline.queuedSegmentIds.length;
-  const allClassified = queuedCount > 0 && state.timeline.queuedSegmentIds.every(segmentId => (
-    Boolean(state.timeline.segmentCategories[segmentId])
-  ));
+  const outputCount = state.timeline.sliceUnits.length;
+  const allClassified = outputCount > 0 && state.timeline.sliceUnits.every(unit => Boolean(unit.category));
   button.disabled = !healthyLibrary || !allClassified;
 }
 
@@ -994,25 +1130,30 @@ async function exportTimelineSlices() {
     return toast("请先选择或修复 SmartStitch 标准视频库", true);
   }
   const segments = timelineSegments();
-  const queuedSegments = state.timeline.queuedSegmentIds.map(segmentId => (
-    segments.find(segment => segment.id === segmentId)
-  )).filter(Boolean);
-  if (!queuedSegments.length) return toast("请先在时间轴标记至少一个片段", true);
-  const unclassified = queuedSegments.find(segment => !state.timeline.segmentCategories[segment.id]);
-  if (unclassified) {
-    selectTimelineSegment(unclassified.id, true);
-    return toast(`请先为片段 ${unclassified.index} 选择类型`, true);
+  if (!state.timeline.sliceUnits.length) return toast("请先在时间轴标记至少一个片段", true);
+  const unclassifiedUnit = state.timeline.sliceUnits.find(unit => !unit.category);
+  if (unclassifiedUnit) {
+    const firstSegment = segments.find(segment => segment.id === unclassifiedUnit.segmentIds[0]);
+    if (firstSegment) selectTimelineSegment(firstSegment.id, true);
+    return toast("请先为所有输出片段选择类型", true);
   }
-  const assignments = queuedSegments.map(segment => ({
-    segment_index: segment.index,
-    category: state.timeline.segmentCategories[segment.id],
+  const segmentById = new Map(segments.map(segment => [segment.id, segment]));
+  const assignments = state.timeline.sliceUnits.map(unit => ({
+    client_unit_id: unit.id,
+    segment_indexes: unit.segmentIds.map(segmentId => segmentById.get(segmentId)?.index)
+      .filter(Number.isInteger),
+    category: unit.category,
   }));
+  if (assignments.some(item => item.segment_indexes.length === 0)) {
+    return toast("片段边界已变化，请重新选择", true);
+  }
   const cuttableCount = assignments.length;
+  const sourceSegmentCount = assignments.reduce((sum, item) => sum + item.segment_indexes.length, 0);
   const button = $("#sliceTimelineBtn");
   const resultElement = $("#timelineSliceResult");
   button.disabled = true;
   button.textContent = "正在保存断点…";
-  resultElement.textContent = `正在确认 ${cuttableCount} 个片段并保存断点…`;
+  resultElement.textContent = `正在确认 ${cuttableCount} 个输出片段（${sourceSegmentCount} 个源区间）并保存断点…`;
   resultElement.className = "timeline-slice-result";
   try {
     const review = await api("/timeline/decisions", {
@@ -1027,7 +1168,7 @@ async function exportTimelineSlices() {
     state.timeline.reviewRevision = review.review_revision;
     setTimelineStatus("正在切片", "running");
     button.textContent = "正在批量切割…";
-    resultElement.textContent = `正在用 FFmpeg 切割 ${cuttableCount} 个已标记片段，请稍候…`;
+    resultElement.textContent = `正在用 FFmpeg 生成 ${cuttableCount} 个输出片段，请稍候…`;
     const result = await api("/timeline/slices", {
       method: "POST",
       body: JSON.stringify({
@@ -1134,8 +1275,8 @@ async function selectConfig(id) {
     } else {
       state.timeline.sliceTargets = [];
     }
-    state.timeline.segmentCategories = {};
-    state.timeline.queuedSegmentIds = [];
+    state.timeline.sliceUnits = [];
+    state.timeline.mergeSelection = [];
     state.timeline.selectedSegmentId = null;
     $("#heroConfigName").textContent = state.config.name;
     $("#countInput").value = state.config.batch.default_count;

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260915-10" />
+    <link rel="stylesheet" href="/styles.css?v=20260916-3" />
   </head>
   <body>
     <div class="noise"></div>
@@ -181,9 +181,16 @@
               <div><strong>片段列表</strong><small id="timelineBreakpointSummary"></small></div>
               <button id="sliceTimelineBtn" class="button primary small" type="button" disabled>切割并入库</button>
             </div>
+            <div class="segment-merge-toolbar">
+              <div>
+                <button id="mergeSegmentsBtn" class="button secondary small" type="button" disabled>合并所选（0）</button>
+                <button id="clearMergeSelectionBtn" class="text-btn" type="button" disabled>取消选择</button>
+              </div>
+              <small>勾选两个或更多条目，可将不连续区间合并成一个入库视频。</small>
+            </div>
             <div id="timelineSegmentList" class="segment-list"></div>
             <div class="timeline-list-footer">
-              <p class="timeline-export-help">点击时间轴可连续标记多个片段；为列表中的每个片段选择类型后，点击右上角即可统一交给 FFmpeg 切割并入库。</p>
+              <p class="timeline-export-help">点击时间轴可连续标记多个片段；需要合并时先勾选列表条目并点击“合并所选”。为每个输出片段选择类型后，点击右上角统一交给 FFmpeg 切割并入库。</p>
               <small id="timelineSliceLibrary" class="timeline-slice-library">请先选择受管视频库</small>
               <div id="timelineSliceResult" class="timeline-slice-result"></div>
             </div>
@@ -298,7 +305,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260915-4" defer></script>
-    <script src="/app.js?v=20260916-1" defer></script>
+    <script src="/timeline-math.js?v=20260916-3" defer></script>
+    <script src="/app.js?v=20260916-3" defer></script>
   </body>
 </html>

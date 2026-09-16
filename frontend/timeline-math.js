@@ -73,12 +73,39 @@
     return { majorSeconds, minorSeconds: majorSeconds / divisor };
   }
 
+  function mergeSliceUnits({ units, selectedUnitIds, segmentStartFrames, mergedUnitId }) {
+    const selectedIds = new Set(selectedUnitIds);
+    const selectedUnits = units.filter(unit => selectedIds.has(unit.id));
+    if (selectedUnits.length < 2) throw new Error("至少需要两个输出单元");
+    const segmentIds = [...new Set(selectedUnits.flatMap(unit => unit.segmentIds))]
+      .sort((left, right) => (
+        (segmentStartFrames[left] ?? 0) - (segmentStartFrames[right] ?? 0)
+      ));
+    const categories = new Set(selectedUnits.map(unit => unit.category));
+    const category = categories.size === 1 && !categories.has("")
+      ? selectedUnits[0].category
+      : "";
+    const mergedUnit = { id: mergedUnitId, segmentIds, category };
+    const mergedUnits = [];
+    let inserted = false;
+    units.forEach(unit => {
+      if (!selectedIds.has(unit.id)) {
+        mergedUnits.push(unit);
+      } else if (!inserted) {
+        mergedUnits.push(mergedUnit);
+        inserted = true;
+      }
+    });
+    return { units: mergedUnits, mergedUnit };
+  }
+
   return {
     choosePointerSnap,
     chooseRulerStep,
     frameFromPlaybackTime,
     frameFromPresentedTime,
     frameFromTimelineX,
+    mergeSliceUnits,
     previewTimeForFrame,
   };
 }));

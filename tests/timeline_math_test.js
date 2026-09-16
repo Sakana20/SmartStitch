@@ -5,6 +5,7 @@ const {
   frameFromPlaybackTime,
   frameFromPresentedTime,
   frameFromTimelineX,
+  mergeSliceUnits,
   previewTimeForFrame,
 } = require("../frontend/timeline-math.js");
 
@@ -73,5 +74,30 @@ assert.deepEqual(
 
 assert.deepEqual(chooseRulerStep(10), { majorSeconds: 10, minorSeconds: 1 });
 assert.deepEqual(chooseRulerStep(120), { majorSeconds: 1, minorSeconds: 0.1 });
+
+const merged = mergeSliceUnits({
+  units: [
+    { id: "one", segmentIds: ["late"], category: "benefit_1" },
+    { id: "middle", segmentIds: ["middle"], category: "hook" },
+    { id: "three", segmentIds: ["early"], category: "benefit_1" },
+  ],
+  selectedUnitIds: ["one", "three"],
+  segmentStartFrames: { early: 0, middle: 25, late: 50 },
+  mergedUnitId: "merged",
+});
+assert.deepEqual(merged.units, [
+  { id: "merged", segmentIds: ["early", "late"], category: "benefit_1" },
+  { id: "middle", segmentIds: ["middle"], category: "hook" },
+]);
+assert.equal(merged.mergedUnit.category, "benefit_1");
+assert.equal(mergeSliceUnits({
+  units: [
+    { id: "one", segmentIds: ["early"], category: "hook" },
+    { id: "two", segmentIds: ["late"], category: "ending" },
+  ],
+  selectedUnitIds: ["one", "two"],
+  segmentStartFrames: { early: 0, late: 50 },
+  mergedUnitId: "mixed",
+}).mergedUnit.category, "");
 
 console.log("timeline interaction math ok");

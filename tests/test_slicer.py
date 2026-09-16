@@ -10,7 +10,7 @@ import pytest
 from smartstitch.config import ConfigStore
 from smartstitch.library import LibraryService
 from smartstitch.models import CreateLibraryRequest, TimelineSliceRequest
-from smartstitch.slicer import SliceConflictError, TimelineSlicer
+from smartstitch.slicer import SliceConflictError, SliceError, TimelineSlicer
 from smartstitch.scanner import probe_media
 from smartstitch.timeline import TimelineAnalyzer
 
@@ -140,6 +140,93 @@ def test_timeline_slicer_exports_only_confirmed_subset(tmp_path):
     assert result["success_count"] == 1
     assert [item["segment_index"] for item in result["items"]] == [2]
     assert len([command for command in commands if command[0] == "ffmpeg"]) == 1
+
+
+def test_timeline_slicer_builds_one_composite_output_for_discontinuous_segments(tmp_path):
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        if command[0] == "ffmpeg":
+            Path(command[-1]).write_bytes(b"composite")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "-select_streams" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"streams": [{"codec_type": "audio"}]}),
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {"codec_type": "video"},
+                        {"codec_type": "audio"},
+                    ],
+                    "format": {"duration": "2.000000"},
+                }
+            ),
+            stderr="",
+        )
+
+    slicer, analysis_id, review_revision, config_hash = setup_slicer(tmp_path, runner)
+    result = slicer.export(
+        TimelineSliceRequest(
+            analysis_id=analysis_id,
+            config_id="slice-library",
+            review_revision=review_revision,
+            current_config_hash=config_hash,
+            client_request_id="slice-composite-request",
+            assignments=[
+                {
+                    "client_unit_id": "unit-composite",
+                    "segment_indexes": [3, 1],
+                    "category": "benefit_1",
+                }
+            ],
+        )
+    )
+
+    assert result["success_count"] == 1
+    assert result["output_unit_count"] == 1
+    assert result["source_segment_count"] == 2
+    item = result["items"][0]
+    assert item["composite"] is True
+    assert item["segment_indexes"] == [1, 3]
+    assert item["excluded_gap_frames"] == 25
+    assert item["total_duration_seconds"] == pytest.approx(2)
+    assert "__g001_benefit-1_p001-003.mp4" in item["output_path"]
+    ffmpeg_command = next(command for command in commands if command[0] == "ffmpeg")
+    filter_graph = ffmpeg_command[ffmpeg_command.index("-filter_complex") + 1]
+    assert "trim=start_frame=0:end_frame=25" in filter_graph
+    assert "trim=start_frame=50:end_frame=75" in filter_graph
+    assert "concat=n=2:v=1:a=1" in filter_graph
+
+
+def test_timeline_slicer_rejects_segment_used_by_multiple_output_units(tmp_path):
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    slicer, analysis_id, review_revision, config_hash = setup_slicer(tmp_path, runner)
+    request = TimelineSliceRequest(
+        analysis_id=analysis_id,
+        config_id="slice-library",
+        review_revision=review_revision,
+        current_config_hash=config_hash,
+        client_request_id="duplicate-composite-request",
+        assignments=[
+            {"segment_indexes": [1, 3], "category": "hook"},
+            {"segment_indexes": [2, 3], "category": "ending"},
+        ],
+    )
+
+    with pytest.raises(SliceError, match="多个输出单元"):
+        slicer.export(request)
+    assert commands == []
 
 
 def test_timeline_slicer_continues_after_one_segment_fails(tmp_path):
@@ -358,3 +445,115 @@ def test_timeline_slicer_with_real_ffmpeg(tmp_path):
     assert result["success_count"] == 3
     durations = [probe_media(Path(item["output_path"])).duration for item in result["items"]]
     assert all(0.9 <= duration <= 1.1 for duration in durations)
+
+
+def test_timeline_slicer_composite_with_real_ffmpeg_removes_middle_gap(tmp_path):
+    slicer, analysis_id, review_revision, config_hash = setup_slicer(
+        tmp_path, subprocess.run
+    )
+    source = tmp_path / "原始 视频.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=180x320:r=25:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=330:sample_rate=48000:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=green:s=180x320:r=25:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=180x320:r=25:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=550:sample_rate=48000:duration=1",
+            "-filter_complex",
+            "[0:v][1:a][2:v][3:a][4:v][5:a]concat=n=3:v=1:a=1[v][a]",
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(source),
+        ],
+        check=True,
+    )
+    record_path = slicer.timeline_analyzer.data_directory / f"{analysis_id}.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    source_stat = source.stat()
+    record["source_fingerprint"] = {
+        "size_bytes": source_stat.st_size,
+        "modified_at_ns": source_stat.st_mtime_ns,
+    }
+    record_path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    result = slicer.export(
+        TimelineSliceRequest(
+            analysis_id=analysis_id,
+            config_id="slice-library",
+            review_revision=review_revision,
+            current_config_hash=config_hash,
+            client_request_id="real-composite-request",
+            assignments=[
+                {"segment_indexes": [1, 3], "category": "benefit_1"},
+            ],
+        )
+    )
+
+    assert result["success_count"] == 1
+    output = Path(result["items"][0]["output_path"])
+    media = probe_media(output)
+    assert 1.9 <= media.duration <= 2.1
+    assert media.has_audio is True
+
+    def sample_rgb(seconds):
+        sampled = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                str(seconds),
+                "-i",
+                str(output),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=1:1",
+                "-pix_fmt",
+                "rgb24",
+                "-f",
+                "rawvideo",
+                "-",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return tuple(sampled.stdout[:3])
+
+    first = sample_rgb(0.4)
+    second = sample_rgb(1.4)
+    assert first[0] > first[1] and first[0] > first[2]
+    assert second[2] > second[0] and second[2] > second[1]

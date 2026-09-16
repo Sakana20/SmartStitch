@@ -419,8 +419,34 @@ class AddBenefitRequest(BaseModel):
 
 
 class SliceAssignment(BaseModel):
-    segment_index: int = Field(ge=1)
+    client_unit_id: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._-]+$"
+    )
+    segment_indexes: list[int] = Field(min_length=1, max_length=20)
     category: str = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_single_segment_index(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = copy.deepcopy(value)
+        has_legacy = "segment_index" in data
+        has_grouped = "segment_indexes" in data
+        if has_legacy and has_grouped:
+            raise ValueError("segment_index 和 segment_indexes 不能同时提交")
+        if has_legacy:
+            data["segment_indexes"] = [data.pop("segment_index")]
+        return data
+
+    @field_validator("segment_indexes")
+    @classmethod
+    def reject_duplicate_segment_indexes(cls, values: list[int]) -> list[int]:
+        if any(index < 1 for index in values):
+            raise ValueError("片段序号必须大于等于 1")
+        if len(values) != len(set(values)):
+            raise ValueError("同一输出单元不能重复包含同一片段")
+        return values
 
 
 class TimelineSliceRequest(BaseModel):
