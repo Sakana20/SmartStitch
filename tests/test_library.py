@@ -13,7 +13,12 @@ from smartstitch.library import (
     LibraryError,
     LibraryService,
 )
-from smartstitch.models import AddBenefitRequest, CreateLibraryRequest, LibraryPreflightRequest
+from smartstitch.models import (
+    AddBenefitRequest,
+    CreateLibraryRequest,
+    LibraryPreflightRequest,
+    SourceMode,
+)
 
 
 def create_request(parent: Path, request_id: str = "request-12345678") -> CreateLibraryRequest:
@@ -75,6 +80,7 @@ def test_create_library_builds_complete_tree_and_config(tmp_path):
     assert config.sources["hook"].directory == "切片素材/引子"
     assert config.sources["benefit_1"].directory == "切片素材/利益点/1"
     assert config.output.directory == str(root / "成片输出")
+    assert config.benefit_overlays.mode == SourceMode.OPTIONAL
     assert config.benefit_overlays.file == ""
 
 

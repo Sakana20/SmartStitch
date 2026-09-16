@@ -130,7 +130,8 @@ def _standard_config(request: CreateLibraryRequest, root: Path) -> AppConfig:
                     "extensions": [".png", ".jpg", ".jpeg", ".webp", ".mp4"],
                 },
             },
-            "benefit_overlays": {"mode": "disabled", "file": ""},
+            # 标准库在此目录只有一张图片时由扫描器自动识别。
+            "benefit_overlays": {"mode": "optional", "file": ""},
             "output": {"directory": str(root / "成片输出")},
         }
     )

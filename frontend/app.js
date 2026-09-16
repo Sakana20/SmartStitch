@@ -1651,7 +1651,7 @@ function renderVisualConfig() {
       <summary>风险提示语图片 <small>最高图层叠加设置</small></summary>
       <div class="config-section-body config-form-grid three">
         ${configSelect("使用方式", "benefit_overlays.mode", overlay.mode, modeChoices)}
-        ${configInput("唯一图片文件", "benefit_overlays.file", overlay.file, { wide: true, hint: "固定 · 不参与随机", placeholder: "/路径/风险提示语图片.png" })}
+        ${configInput("唯一图片文件", "benefit_overlays.file", overlay.file, { wide: true, hint: "标准库可留空自动识别 · 固定且不参与随机", placeholder: "/路径/风险提示语图片.png" })}
         ${configSelect("缩放方式", "benefit_overlays.placement.scale_mode", overlay.placement.scale_mode, [["original", "保持原尺寸"], ["fit", "等比适配画布"], ["stretch", "拉伸铺满"]])}
         ${configInput("整体透明度", "benefit_overlays.placement.opacity", overlay.placement.opacity, { type: "number", hint: "0～1" })}
         ${configSwitch("超出画布时自动缩小", "benefit_overlays.placement.shrink_if_oversized", overlay.placement.shrink_if_oversized)}

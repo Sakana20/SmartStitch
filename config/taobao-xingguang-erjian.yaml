@@ -12,8 +12,8 @@ timeline:
 - end_card
 sources:
   pre_roll:
-    mode: optional
-    directory: 切片素材/前贴
+    mode: required
+    directory: /Volumes/Elements SE/陈鼎琦/饿了么整理/素材/前贴/260908同步/0.1
     extensions:
     - .mp4
     - .mov
@@ -58,7 +58,7 @@ sources:
     image_duration_seconds: 1.5
     items: []
 benefit_overlays:
-  mode: disabled
+  mode: required
   file: ''
   image_duration_seconds: 1.5
   placement:
@@ -68,7 +68,7 @@ benefit_overlays:
     shrink_if_oversized: true
     opacity: 1.0
   timing:
-    scope: benefits
+    scope: full
     start_seconds: 0.0
     end_seconds: null
 matching:

@@ -16,6 +16,7 @@ from .models import (
 )
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+MANAGED_LIBRARY_MARKER = Path(".smartstitch/library.json")
 
 
 def _asset_id(category: str, path: Path) -> str:
@@ -221,18 +222,64 @@ def scan_group(config: AppConfig, category: str, group: SourceGroupConfig) -> tu
     return assets, errors
 
 
+def _discover_managed_overlay(config: AppConfig) -> tuple[Path | None, str | None]:
+    """Find the single overlay stored in a managed standard library."""
+    root = Path(config.source_root).expanduser().resolve()
+    marker_path = root / MANAGED_LIBRARY_MARKER
+    if not marker_path.is_file():
+        return None, None
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        relative = marker["paths"]["overlays"]
+        if not isinstance(relative, str) or not relative.strip():
+            raise ValueError("缺少 paths.overlays")
+        directory = (root / relative).resolve()
+        directory.relative_to(root)
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None, "benefit_overlay: 标准视频库的风险提示语图片目录配置无效"
+
+    if not directory.is_dir():
+        return None, f"benefit_overlay: 风险提示语图片目录不存在: {directory}"
+
+    candidates = []
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
+        name = path.name
+        if name in config.scanner.ignore_names:
+            continue
+        if any(name.startswith(prefix) for prefix in config.scanner.ignore_prefixes):
+            continue
+        if config.scanner.ignore_hidden_files and name.startswith("."):
+            continue
+        if path.suffix.lower() in IMAGE_EXTENSIONS:
+            candidates.append(path.resolve())
+    candidates.sort(key=lambda item: str(item).casefold())
+    if len(candidates) > 1:
+        return None, (
+            "benefit_overlay: 风险提示语图片目录只能放置一张图片，"
+            f"当前识别到 {len(candidates)} 张: {directory}"
+        )
+    return (candidates[0], None) if candidates else (None, None)
+
+
 def scan_fixed_overlay(config: AppConfig) -> tuple[list[Asset], list[str]]:
     group = config.benefit_overlays
     if group.mode == SourceMode.DISABLED:
         return [], []
-    if not group.file.strip():
-        message = "benefit_overlay: 请指定唯一的风险提示语图片文件"
-        return [], [message] if group.mode == SourceMode.REQUIRED else []
+    if group.file.strip():
+        path = Path(group.file).expanduser()
+        if not path.is_absolute():
+            path = Path(config.source_root).expanduser() / path
+        path = path.resolve()
+    else:
+        path, discovery_error = _discover_managed_overlay(config)
+        if discovery_error:
+            return [], [discovery_error]
+        if path is None:
+            message = "benefit_overlay: 请指定唯一的风险提示语图片文件"
+            return [], [message] if group.mode == SourceMode.REQUIRED else []
 
-    path = Path(group.file).expanduser()
-    if not path.is_absolute():
-        path = Path(config.source_root).expanduser() / path
-    path = path.resolve()
     exists = path.exists() and path.is_file()
     error: str | None = None
     if path.exists() and path.is_dir():
