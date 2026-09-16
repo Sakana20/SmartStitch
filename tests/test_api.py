@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import struct
+
 import yaml
 from fastapi.testclient import TestClient
 
@@ -196,6 +199,43 @@ def test_timeline_slice_conflict_returns_409(tmp_path, monkeypatch):
 
     assert response.status_code == 409
     assert response.json()["detail"] == "断点审核已变更"
+
+
+def test_timeline_waveform_returns_downsampled_visible_range(tmp_path):
+    (tmp_path / "config").mkdir()
+    app = create_app(tmp_path)
+    analyzer = app.state.timeline_analyzer
+    analysis_id = "d" * 24
+    record = {
+        "analysis_id": analysis_id,
+        "fps": 10,
+        "frame_count": 100,
+        "audio": {
+            "waveform_status": "ready",
+            "buckets_per_second": 400,
+            "bucket_count": 4,
+        },
+    }
+    (analyzer.data_directory / f"{analysis_id}.json").write_text(
+        json.dumps(record), encoding="utf-8"
+    )
+    (analyzer.waveform_directory / f"{analysis_id}.wfm").write_bytes(
+        b"".join(
+            struct.pack("<hh", -value, value) for value in [100, 200, 300, 400]
+        )
+    )
+
+    response = TestClient(app).get(
+        f"/api/v1/timeline/waveforms/{analysis_id}",
+        params={"start_frame": 0, "end_frame": 10, "width_px": 2},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["bucket_count"] == 2
+    assert response.json()["peaks"][-1] == [
+        round(-400 / 32768, 5),
+        round(400 / 32768, 5),
+    ]
 
 
 def test_delete_job_record_keeps_active_jobs_protected(tmp_path):

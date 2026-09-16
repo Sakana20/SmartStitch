@@ -1,9 +1,9 @@
 schema_version: 2
-id: taobao-xingguang-erjian
-name: 淘宝闪购-星广一口价二剪
+id: hongguoduanju
+name: 红果短剧一口价二剪
 enabled: true
 description: SmartStitch 标准视频库
-source_root: /Volumes/Elements SE/陈鼎琦/饿了么整理/素材/星广一口价二剪
+source_root: /Volumes/homes/yiranmobi/红果短剧一口价二剪
 timeline:
 - pre_roll
 - hook
@@ -12,8 +12,8 @@ timeline:
 - end_card
 sources:
   pre_roll:
-    mode: required
-    directory: /Volumes/Elements SE/陈鼎琦/饿了么整理/素材/星广一口价二剪/切片素材/前贴
+    mode: optional
+    directory: 切片素材/前贴
     extensions:
     - .mp4
     - .mov
@@ -58,7 +58,7 @@ sources:
     image_duration_seconds: 1.5
     items: []
 benefit_overlays:
-  mode: required
+  mode: optional
   file: ''
   image_duration_seconds: 1.5
   placement:
@@ -68,7 +68,7 @@ benefit_overlays:
     shrink_if_oversized: true
     opacity: 1.0
   timing:
-    scope: full
+    scope: benefits
     start_seconds: 0.0
     end_seconds: null
 matching:
@@ -81,7 +81,7 @@ randomization:
   duplicate_policy: best_effort
   default_seed: null
 output:
-  directory: /Volumes/Elements SE/陈鼎琦/饿了么整理/素材/星广一口价二剪/成片输出
+  directory: /Volumes/homes/yiranmobi/红果短剧一口价二剪/成片输出
   width: 720
   height: 1280
   fps: 30.0

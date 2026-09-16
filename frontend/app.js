@@ -18,6 +18,7 @@ const state = {
     analysis: null,
     breakpoints: [],
     machineBreakpoints: [],
+    audioLocked: true,
     selectedFrame: null,
     playheadFrame: 0,
     dragging: false,
@@ -36,6 +37,13 @@ const state = {
     sliceUnits: [],
     mergeSelection: [],
     sliceTargets: [],
+    waveform: {
+      controller: null,
+      requestKey: null,
+      dataKey: null,
+      data: null,
+      animationFrameId: null,
+    },
   },
 };
 
@@ -195,6 +203,7 @@ function bindTimelineEvents() {
   $("#sliceTimelineBtn").addEventListener("click", exportTimelineSlices);
   $("#mergeSegmentsBtn").addEventListener("click", mergeSelectedSliceUnits);
   $("#clearMergeSelectionBtn").addEventListener("click", clearMergeSelection);
+  $("#timelineAudioLockBtn").addEventListener("click", toggleTimelineAudioLock);
   $("#selectedFrameInput").addEventListener("change", event => moveSelectedBreakpoint(Number(event.target.value)));
   const video = $("#timelineVideo");
   const videoStage = $("#timelineVideoStage");
@@ -218,7 +227,10 @@ function bindTimelineEvents() {
     beginTimelineDrag(event, { kind: "playhead", anchorFrame: frame });
   });
   const timelineViewport = $("#timelineViewport");
-  timelineViewport.addEventListener("scroll", renderTimelineRuler);
+  timelineViewport.addEventListener("scroll", () => {
+    renderTimelineRuler();
+    scheduleTimelineWaveformRender();
+  });
   timelineViewport.addEventListener("pointerenter", () => {
     state.timeline.pointerOverTimeline = true;
   });
@@ -269,20 +281,26 @@ function bindTimelineEvents() {
 async function analyzeTimeline() {
   const sourcePath = normalizePathField($("#timelinePathInput"));
   if (!sourcePath) return toast("请先填写原始视频路径", true);
+  const silenceDuration = Number($("#timelineSilenceInput").value);
+  if (!Number.isFinite(silenceDuration) || silenceDuration < 0.1 || silenceDuration > 3) {
+    return toast("最短语音停顿必须在 0.1–3 秒之间", true);
+  }
   const button = $("#analyzeTimelineBtn");
   button.disabled = true;
-  button.textContent = "正在分析画面与静音…";
+  button.textContent = "正在分析画面与语音…";
   setTimelineStatus("分析中", "running");
+  resetTimelineWaveform();
   try {
     const analysis = await api("/timeline/analyze", {
       method: "POST",
       body: JSON.stringify({
         source_path: sourcePath,
         scene_threshold: Number($("#timelineThresholdInput").value),
-        silence_duration_seconds: 0.35,
+        silence_duration_seconds: silenceDuration,
       }),
     });
     state.timeline.analysis = analysis;
+    state.timeline.audioLocked = true;
     state.timeline.breakpoints = analysis.breakpoints.map(point => ({
       ...point,
       machine_origin_frame: point.frame_index,
@@ -296,6 +314,7 @@ async function analyzeTimeline() {
     state.timeline.selectedSegmentId = null;
     state.timeline.sliceUnits = [];
     state.timeline.mergeSelection = [];
+    resetTimelineWaveform();
     stopTimelineVideoSync();
     const video = $("#timelineVideo");
     updateTimelineMediaLayout(analysis.width, analysis.height);
@@ -305,8 +324,18 @@ async function analyzeTimeline() {
     $("#timelineWorkspace").classList.remove("hidden");
     fitTimelineToViewport(false);
     renderTimeline();
-    setTimelineStatus("待人工审核", "running");
-    toast(`机器给出了 ${state.timeline.breakpoints.length} 个候选断点`);
+    if (!analysis.audio || typeof analysis.audio.has_audio !== "boolean") {
+      setTimelineStatus("后端需重启", "danger");
+      toast("当前后端仍是旧版本，请重启 SmartStitch 后重新分析", true);
+    } else if (analysis.audio.speech_pause_status === "failed") {
+      setTimelineStatus("待人工审核", "running");
+      toast("语音停顿分析失败，本次仅使用画面转场候选", true);
+    } else {
+      setTimelineStatus("待人工审核", "running");
+      const videoCount = analysis.breakpoints.filter(point => point.reasons?.includes("scene_change")).length;
+      const audioCount = analysis.breakpoints.filter(point => point.reasons?.includes("speech_pause")).length;
+      toast(`机器给出 V1 ${videoCount} 个画面候选、A1 ${audioCount} 个语音候选`);
+    }
   } catch (error) {
     setTimelineStatus("分析失败", "danger");
     toast(error.message, true);
@@ -320,6 +349,34 @@ function setTimelineStatus(text, type) {
   const element = $("#timelineStatus");
   element.textContent = text;
   element.className = `status ${type}`;
+}
+
+function timelineActiveBreakpoints() {
+  return TimelineMath.activeTimelineBreakpoints(
+    state.timeline.breakpoints,
+    state.timeline.audioLocked,
+  );
+}
+
+function toggleTimelineAudioLock() {
+  const analysis = state.timeline.analysis;
+  if (!analysis?.audio?.has_audio) return;
+  state.timeline.audioLocked = !state.timeline.audioLocked;
+  if (
+    state.timeline.audioLocked
+    && state.timeline.selectedFrame !== null
+  ) {
+    const selected = state.timeline.breakpoints.find(
+      point => point.frame_index === state.timeline.selectedFrame,
+    );
+    if (TimelineMath.isAudioOnlyBreakpoint(selected)) state.timeline.selectedFrame = null;
+  }
+  state.timeline.selectedSegmentId = null;
+  timelineReviewChanged();
+  renderTimeline();
+  toast(state.timeline.audioLocked
+    ? "A1 已锁定：片段只按 V1 与人工断点划分，导出仍保留音频"
+    : "A1 已解锁：语音停顿候选重新参与片段划分");
 }
 
 function updateTimelineMediaLayout(width, height) {
@@ -370,20 +427,56 @@ function renderTimeline() {
     const titlePrefix = groupLabel ? `${groupLabel} 组合成员` : "加入片段";
     return `<button class="timeline-segment ${segmentCategoryClass(category)} ${selected} ${queued} ${composite}" type="button" data-timeline-segment="${segment.id}" data-group-label="${groupLabel}" style="left:${left}px;width:${width}px" title="${titlePrefix} ${segment.index} · ${escapeHtml(categoryLabelForTimeline(category))} · ${segment.durationFrames} 帧" aria-label="加入片段 ${segment.index}"></button>`;
   }).join("");
-  $("#timelineMarkers").innerHTML = state.timeline.breakpoints.map(point => `
+  const audioLocked = state.timeline.audioLocked;
+  const activeBreakpoints = timelineActiveBreakpoints();
+  const markerHtml = (point, lane = "") => `
     <button class="timeline-marker ${point.frame_index === state.timeline.selectedFrame ? "selected" : ""} ${point.frame_index === state.timeline.snapTargetFrame ? "snap-target" : ""} ${point.review_status === "machine_suggested" ? "machine" : "human"}"
-      style="left:${timelineXForFrame(point.frame_index)}px" data-frame="${point.frame_index}"
-      title="第 ${point.frame_index} 帧 · ${timelineReasonLabel(point)}"><i></i></button>`).join("");
+      style="left:${timelineXForFrame(point.frame_index)}px" data-frame="${point.frame_index}" data-lane="${lane}"
+      ${lane === "A" && audioLocked ? "disabled aria-disabled=\"true\"" : ""}
+      aria-label="${lane === "V" ? "画面转场" : lane === "A" ? "语音停顿" : "人工"}断点，第 ${point.frame_index} 帧"
+      title="${lane === "V" ? "V1 画面转场" : lane === "A" ? "A1 语音停顿" : "人工确认断点"} · 第 ${point.frame_index} 帧 · ${timelineReasonLabel(point)}"><i></i></button>`;
+  const machinePoints = state.timeline.breakpoints.filter(point => point.review_status === "machine_suggested");
+  $("#timelineVideoMarkers").innerHTML = machinePoints
+    .filter(point => point.reasons?.includes("scene_change"))
+    .map(point => markerHtml(point, "V")).join("");
+  $("#timelineAudioMarkers").innerHTML = machinePoints
+    .filter(point => point.reasons?.some(reason => reason === "speech_pause" || reason === "silence_end"))
+    .map(point => markerHtml(point, "A")).join("");
+  $("#timelineMarkers").innerHTML = state.timeline.breakpoints
+    .filter(point => point.review_status !== "machine_suggested" && activeBreakpoints.includes(point))
+    .map(point => markerHtml(point)).join("");
   $$('[data-timeline-segment]').forEach(segment => {
     segment.addEventListener("click", () => selectTimelineSegment(segment.dataset.timelineSegment));
   });
-  $$(".timeline-marker").forEach(marker => bindTimelineMarker(marker));
-  $("#timelineMeta").innerHTML = `<span>${escapeHtml(analysis.source_name)}</span><span>${analysis.width}×${analysis.height}</span><span>${analysis.fps.toFixed(3)} fps</span><span>${analysis.frame_count} 帧</span><span>${formatPreciseTime(analysis.duration)}</span>`;
+  $$(".timeline-marker:not(:disabled)").forEach(marker => bindTimelineMarker(marker));
+  const audioTrack = $("#timelineAudioTrack");
+  const audioLockButton = $("#timelineAudioLockBtn");
+  const hasAudio = Boolean(analysis.audio?.has_audio);
+  audioTrack.classList.toggle("locked", audioLocked);
+  audioLockButton.disabled = !hasAudio;
+  audioLockButton.setAttribute("aria-pressed", String(audioLocked));
+  audioLockButton.setAttribute("aria-label", audioLocked ? "解锁 A1 音频轨道" : "锁定 A1 音频轨道");
+  audioLockButton.title = hasAudio
+    ? (audioLocked ? "A1 已锁定：点击解锁语音候选" : "A1 已解锁：点击锁定语音候选")
+    : "此视频没有可锁定的音轨";
+  const hasAudioMetadata = analysis.audio && typeof analysis.audio.has_audio === "boolean";
+  const audioLabel = !hasAudioMetadata
+    ? "音频待重新分析"
+    : analysis.audio.has_audio
+      ? `${analysis.audio.channels || 1} 声道音频`
+      : "无音轨";
+  $("#timelineMeta").innerHTML = `<span>${escapeHtml(analysis.source_name)}</span><span>${analysis.width}×${analysis.height}</span><span>${analysis.fps.toFixed(3)} fps</span><span>${analysis.frame_count} 帧</span><span>${formatPreciseTime(analysis.duration)}</span><span>${audioLabel}</span>`;
   const outputCount = state.timeline.sliceUnits.length;
   const sourceCount = state.timeline.sliceUnits.reduce((sum, unit) => sum + unit.segmentIds.length, 0);
   const classifiedCount = state.timeline.sliceUnits.filter(unit => unit.category).length;
-  $("#timelineBreakpointSummary").textContent = `${segments.length} 个可选片段 · ${state.timeline.breakpoints.length} 个断点 · ${outputCount} 个输出片段 · ${sourceCount} 个源区间 · ${classifiedCount} 个已分类`;
+  const videoCandidateCount = machinePoints.filter(point => point.reasons?.includes("scene_change")).length;
+  const audioCandidateCount = machinePoints.filter(point => point.reasons?.some(reason => reason === "speech_pause" || reason === "silence_end")).length;
+  const lockSummary = !hasAudio
+    ? " · A1 不可用"
+    : audioLocked ? " · A1 已锁定" : " · A1 已解锁";
+  $("#timelineBreakpointSummary").textContent = `${segments.length} 个可选片段 · ${activeBreakpoints.length} 个当前断点（V1 ${videoCandidateCount} / A1 ${audioCandidateCount}${lockSummary}） · ${outputCount} 个输出片段 · ${sourceCount} 个源区间 · ${classifiedCount} 个已分类`;
   renderTimelineRuler();
+  scheduleTimelineWaveformRender();
   renderSegmentList();
   renderSliceControls();
   syncSelectedBreakpointControls();
@@ -428,6 +521,163 @@ function renderTimelineRuler() {
     ticks.push(`<i class="${major ? "major" : "minor"}" style="left:${seconds * pixelsPerSecond}px">${major ? `<span>${frameTimecode(frame, analysis.fps)}</span>` : ""}</i>`);
   }
   $("#timelineTicks").innerHTML = ticks.join("");
+}
+
+function resetTimelineWaveform() {
+  const waveform = state.timeline.waveform;
+  waveform.controller?.abort();
+  if (waveform.animationFrameId !== null) cancelAnimationFrame(waveform.animationFrameId);
+  waveform.controller = null;
+  waveform.requestKey = null;
+  waveform.dataKey = null;
+  waveform.data = null;
+  waveform.animationFrameId = null;
+  const canvas = $("#timelineWaveform");
+  if (canvas) {
+    canvas.width = 1;
+    canvas.height = 1;
+  }
+  const status = $("#timelineAudioState");
+  if (status) status.textContent = "";
+}
+
+function scheduleTimelineWaveformRender() {
+  const waveform = state.timeline.waveform;
+  if (!state.timeline.analysis || waveform.animationFrameId !== null) return;
+  waveform.animationFrameId = requestAnimationFrame(() => {
+    waveform.animationFrameId = null;
+    renderTimelineWaveform();
+  });
+}
+
+function prepareTimelineWaveformCanvas() {
+  const viewport = $("#timelineViewport");
+  const canvas = $("#timelineWaveform");
+  const { left: timelineLeft, width: cssWidth } = TimelineMath.waveformViewportGeometry({
+    scrollLeft: viewport.scrollLeft,
+    viewportWidth: viewport.clientWidth,
+    pixelsPerSecond: state.timeline.pixelsPerSecond,
+    duration: state.timeline.analysis.duration,
+  });
+  const cssHeight = 64;
+  const pixelRatio = Math.max(1, window.devicePixelRatio || 1);
+  canvas.style.left = `${timelineLeft}px`;
+  canvas.style.width = `${cssWidth}px`;
+  canvas.style.height = `${cssHeight}px`;
+  canvas.width = Math.max(1, Math.round(cssWidth * pixelRatio));
+  canvas.height = Math.max(1, Math.round(cssHeight * pixelRatio));
+  const context = canvas.getContext("2d");
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, cssWidth, cssHeight);
+  return { canvas, context, cssWidth, cssHeight, timelineLeft };
+}
+
+function drawTimelineWaveform(view, data) {
+  const { context, cssWidth, cssHeight, timelineLeft } = view;
+  const peaks = data?.peaks || [];
+  const middle = cssHeight / 2;
+  context.save();
+  context.strokeStyle = getComputedStyle(document.documentElement)
+    .getPropertyValue("--green").trim() || "#1d5c43";
+  context.lineWidth = 1;
+  context.globalAlpha = 0.2;
+  context.beginPath();
+  context.moveTo(0, middle + 0.5);
+  context.lineTo(cssWidth, middle + 0.5);
+  context.stroke();
+  if (peaks.length) {
+    const startFrame = Number(data.start_frame) || 0;
+    const endFrame = Number(data.end_frame) || startFrame + 1;
+    const frameSpan = Math.max(1, endFrame - startFrame);
+    const amplitude = cssHeight / 2 - 5;
+    context.globalAlpha = 0.58;
+    context.beginPath();
+    peaks.forEach((peak, index) => {
+      const frame = startFrame + (index + 0.5) / peaks.length * frameSpan;
+      const x = timelineXForFrame(frame) - timelineLeft;
+      if (x < -1 || x > cssWidth + 1) return;
+      context.moveTo(x, middle - peak[1] * amplitude);
+      context.lineTo(x, middle - peak[0] * amplitude);
+    });
+    context.stroke();
+  }
+  context.restore();
+}
+
+async function renderTimelineWaveform() {
+  const analysis = state.timeline.analysis;
+  if (!analysis) return;
+  const view = prepareTimelineWaveformCanvas();
+  const status = $("#timelineAudioState");
+  if (!analysis.audio || typeof analysis.audio.has_audio !== "boolean") {
+    status.textContent = "后端版本过旧，请重启后重新分析";
+    return;
+  }
+  const audio = analysis.audio;
+  if (!audio.has_audio || audio.waveform_status === "unavailable") {
+    status.textContent = "此视频没有音轨";
+    return;
+  }
+  if (audio.waveform_status !== "ready") {
+    status.textContent = audio.waveform_status === "failed"
+      ? "波形暂不可用"
+      : "正在生成音频波形…";
+    return;
+  }
+
+  const waveform = state.timeline.waveform;
+  // Reproject cached absolute-frame data immediately so zooming feels continuous.
+  if (waveform.data) drawTimelineWaveform(view, waveform.data);
+
+  const viewport = $("#timelineViewport");
+  const { startFrame, endFrame } = TimelineMath.waveformFrameRange({
+    scrollLeft: viewport.scrollLeft,
+    viewportWidth: viewport.clientWidth,
+    pixelsPerSecond: state.timeline.pixelsPerSecond,
+    fps: analysis.fps,
+    frameCount: analysis.frame_count,
+  });
+  const widthPx = Math.max(1, Math.min(4096, Math.ceil(view.cssWidth)));
+  const key = `${analysis.analysis_id}:${startFrame}:${endFrame}:${widthPx}`;
+  if (waveform.dataKey === key && waveform.data) {
+    status.textContent = "";
+    drawTimelineWaveform(view, waveform.data);
+    return;
+  }
+  if (waveform.requestKey === key) {
+    status.textContent = "正在读取音频波形…";
+    return;
+  }
+
+  waveform.controller?.abort();
+  const controller = new AbortController();
+  waveform.controller = controller;
+  waveform.requestKey = key;
+  status.textContent = "正在读取音频波形…";
+  try {
+    const data = await api(
+      `/timeline/waveforms/${analysis.analysis_id}?start_frame=${startFrame}&end_frame=${endFrame}&width_px=${widthPx}`,
+      { signal: controller.signal },
+    );
+    if (
+      controller.signal.aborted
+      || state.timeline.analysis?.analysis_id !== analysis.analysis_id
+      || waveform.requestKey !== key
+    ) return;
+    waveform.data = data;
+    waveform.dataKey = key;
+    waveform.requestKey = null;
+    waveform.controller = null;
+    status.textContent = "";
+    drawTimelineWaveform(prepareTimelineWaveformCanvas(), data);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    if (waveform.requestKey === key) {
+      waveform.requestKey = null;
+      waveform.controller = null;
+      status.textContent = "波形暂不可用";
+    }
+  }
 }
 
 function fitTimelineToViewport(render = true) {
@@ -574,8 +824,9 @@ function applyTimelineDragFrame() {
   );
   drag.targetFrame = snappedTimelineFrame(rawFrame, pointerTimelineX, drag);
   if (drag.kind === "breakpoint") {
-    const marker = $(`.timeline-marker[data-frame="${drag.originalFrame}"]`);
-    if (marker) marker.style.left = `${timelineXForFrame(drag.targetFrame)}px`;
+    $$(`.timeline-marker[data-frame="${drag.originalFrame}"]`).forEach(marker => {
+      marker.style.left = `${timelineXForFrame(drag.targetFrame)}px`;
+    });
     $("#selectedFrameInput").value = String(drag.targetFrame);
   } else {
     state.timeline.playheadFrame = drag.targetFrame;
@@ -658,12 +909,15 @@ function timelineSnapCandidates(drag = null) {
   ) {
     add(state.timeline.playheadFrame, 4, "播放头");
   }
-  state.timeline.breakpoints.forEach(point => {
+  timelineActiveBreakpoints().forEach(point => {
     if (point === drag?.point) return;
     const human = point.review_status !== "machine_suggested";
     add(point.frame_index, human ? 3 : 2, human ? "人工断点" : "机器断点");
   });
-  state.timeline.machineBreakpoints.forEach(point => {
+  TimelineMath.activeTimelineBreakpoints(
+    state.timeline.machineBreakpoints,
+    state.timeline.audioLocked,
+  ).forEach(point => {
     if (
       drag?.point?.machine_origin_frame === point.frame_index
       && drag.originalFrame === point.frame_index
@@ -902,10 +1156,11 @@ function timelineSegmentId(startFrame, endFrame) {
 function timelineSegments() {
   const analysis = state.timeline.analysis;
   if (!analysis) return [];
-  const boundaries = [0, ...state.timeline.breakpoints.map(point => point.frame_index), analysis.frame_count];
+  const breakpoints = timelineActiveBreakpoints();
+  const boundaries = [0, ...breakpoints.map(point => point.frame_index), analysis.frame_count];
   return boundaries.slice(0, -1).map((startFrame, offset) => {
     const endFrame = boundaries[offset + 1];
-    const endpoint = state.timeline.breakpoints[offset];
+    const endpoint = breakpoints[offset];
     return {
       index: offset + 1,
       id: timelineSegmentId(startFrame, endFrame),
@@ -1184,14 +1439,15 @@ async function exportTimelineSlices() {
   resultElement.textContent = `正在确认 ${cuttableCount} 个输出片段（${sourceSegmentCount} 个源区间）并保存断点…`;
   resultElement.className = "timeline-slice-result";
   try {
+    const activeBreakpoints = timelineActiveBreakpoints();
     const review = await api("/timeline/decisions", {
       method: "PUT",
       body: JSON.stringify({
         analysis_id: analysis.analysis_id,
-        frame_indexes: state.timeline.breakpoints.map(point => point.frame_index),
+        frame_indexes: activeBreakpoints.map(point => point.frame_index),
       }),
     });
-    state.timeline.breakpoints.forEach(point => { point.review_status = "human_confirmed"; });
+    activeBreakpoints.forEach(point => { point.review_status = "human_confirmed"; });
     state.timeline.reviewSaved = true;
     state.timeline.reviewRevision = review.review_revision;
     setTimelineStatus("正在切片", "running");
@@ -1230,6 +1486,7 @@ function timelineReasonLabel(point) {
   const labels = {
     scene_change: "画面转场",
     silence_end: "静音结束",
+    speech_pause: "语音停顿",
     human_added: "人工添加",
     human_adjusted: "人工调整",
   };

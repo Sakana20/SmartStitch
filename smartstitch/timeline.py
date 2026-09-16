@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import secrets
+import struct
 import subprocess
+import sys
+from array import array
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -12,7 +16,20 @@ from typing import Any
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
 PTS_TIME_RE = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
-SILENCE_END_RE = re.compile(r"silence_end:\s*([0-9]+(?:\.[0-9]+)?)")
+SILENCE_EVENT_RE = re.compile(
+    r"silence_(start|end):\s*([0-9]+(?:\.[0-9]+)?)"
+)
+SILENCE_NOISE_DB = -35.0
+ADAPTIVE_PAUSE_WINDOW_SECONDS = 0.05
+ADAPTIVE_PAUSE_PERCENTILE = 0.30
+ADAPTIVE_PAUSE_MARGIN_DB = 2.0
+ADAPTIVE_PAUSE_MAX_THRESHOLD_DB = -12.0
+SPEECH_TAIL_PADDING_SECONDS = 0.12
+NEXT_SPEECH_GUARD_SECONDS = 0.08
+BREAKPOINT_MERGE_WINDOW_SECONDS = 0.18
+WAVEFORM_SAMPLE_RATE = 8000
+WAVEFORM_BUCKETS_PER_SECOND = 400
+WAVEFORM_BYTES_PER_BUCKET = 4
 
 
 class TimelineError(ValueError):
@@ -35,7 +52,10 @@ def _probe(path: Path) -> dict[str, Any]:
         "-v",
         "error",
         "-show_entries",
-        "format=duration:stream=codec_type,width,height,avg_frame_rate,r_frame_rate,nb_frames",
+        (
+            "format=duration:stream=codec_type,width,height,avg_frame_rate,"
+            "r_frame_rate,nb_frames,sample_rate,channels"
+        ),
         "-of",
         "json",
         str(path),
@@ -55,12 +75,19 @@ def _probe(path: Path) -> dict[str, Any]:
     if duration <= 0 or fps <= 0:
         raise TimelineError("无法确定视频时长或帧率")
     frame_count = int(video.get("nb_frames") or round(duration * fps))
+    audio = next(
+        (stream for stream in data.get("streams", []) if stream.get("codec_type") == "audio"),
+        None,
+    )
     return {
         "duration": duration,
         "fps": fps,
         "frame_count": max(frame_count, 1),
         "width": video.get("width"),
         "height": video.get("height"),
+        "has_audio": audio is not None,
+        "audio_channels": int(audio.get("channels") or 0) if audio else 0,
+        "audio_sample_rate": int(audio.get("sample_rate") or 0) if audio else 0,
     }
 
 
@@ -86,7 +113,43 @@ def _scene_times(path: Path, threshold: float) -> list[float]:
     return [float(match.group(1)) for match in PTS_TIME_RE.finditer(result.stderr)]
 
 
-def _silence_end_times(path: Path, minimum_duration: float) -> list[float]:
+def _parse_silence_intervals(
+    output: str, *, media_duration: float | None = None
+) -> list[dict[str, Any]]:
+    intervals: list[dict[str, Any]] = []
+    start: float | None = None
+    for match in SILENCE_EVENT_RE.finditer(output):
+        event, raw_seconds = match.groups()
+        seconds = float(raw_seconds)
+        if event == "start":
+            start = seconds
+            continue
+        if start is None or seconds < start:
+            continue
+        intervals.append(
+            {
+                "start_seconds": start,
+                "end_seconds": seconds,
+                "duration_seconds": seconds - start,
+                "complete": True,
+            }
+        )
+        start = None
+    if start is not None and media_duration is not None and media_duration >= start:
+        intervals.append(
+            {
+                "start_seconds": start,
+                "end_seconds": media_duration,
+                "duration_seconds": media_duration - start,
+                "complete": False,
+            }
+        )
+    return intervals
+
+
+def _silence_intervals(
+    path: Path, minimum_duration: float, *, media_duration: float
+) -> list[dict[str, Any]]:
     command = [
         "ffmpeg",
         "-hide_banner",
@@ -95,74 +158,360 @@ def _silence_end_times(path: Path, minimum_duration: float) -> list[float]:
         str(path),
         "-vn",
         "-af",
-        f"silencedetect=noise=-35dB:d={minimum_duration}",
+        f"silencedetect=noise={SILENCE_NOISE_DB:g}dB:d={minimum_duration}",
         "-f",
         "null",
         "-",
     ]
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     # No audio stream is valid for timeline review; it simply contributes no candidates.
-    if result.returncode != 0 and "matches no streams" not in result.stderr:
-        return []
-    return [float(match.group(1)) for match in SILENCE_END_RE.finditer(result.stderr)]
+    if result.returncode != 0:
+        if "matches no streams" in result.stderr:
+            return []
+        raise TimelineError(result.stderr.strip() or "FFmpeg 语音停顿分析失败")
+    return _parse_silence_intervals(result.stderr, media_duration=media_duration)
+
+
+def _adaptive_intervals_from_levels(
+    levels_db: list[float],
+    minimum_duration: float,
+    *,
+    media_duration: float,
+    window_seconds: float = ADAPTIVE_PAUSE_WINDOW_SECONDS,
+) -> tuple[list[dict[str, Any]], float]:
+    if not levels_db:
+        return [], SILENCE_NOISE_DB
+    ordered = sorted(levels_db)
+    percentile_index = round((len(ordered) - 1) * ADAPTIVE_PAUSE_PERCENTILE)
+    threshold_db = min(
+        ADAPTIVE_PAUSE_MAX_THRESHOLD_DB,
+        max(SILENCE_NOISE_DB, ordered[percentile_index] + ADAPTIVE_PAUSE_MARGIN_DB),
+    )
+    quiet = [level <= threshold_db for level in levels_db]
+    # Ignore a single 50 ms spike inside a low-energy pause.
+    for index in range(1, len(quiet) - 1):
+        if not quiet[index] and quiet[index - 1] and quiet[index + 1]:
+            quiet[index] = True
+
+    intervals: list[dict[str, Any]] = []
+    start_index: int | None = None
+    for index, is_quiet in enumerate([*quiet, False]):
+        if is_quiet and start_index is None:
+            start_index = index
+            continue
+        if is_quiet or start_index is None:
+            continue
+        start = start_index * window_seconds
+        end = min(index * window_seconds, media_duration)
+        if end - start + 1e-9 >= minimum_duration:
+            intervals.append(
+                {
+                    "start_seconds": start,
+                    "end_seconds": end,
+                    "duration_seconds": end - start,
+                    "complete": end < media_duration - window_seconds,
+                    "detector": "adaptive_rms",
+                    "threshold_db": threshold_db,
+                }
+            )
+        start_index = None
+    return intervals, threshold_db
+
+
+def _adaptive_pause_intervals(
+    path: Path, minimum_duration: float, *, media_duration: float
+) -> tuple[list[dict[str, Any]], float]:
+    samples_per_window = round(WAVEFORM_SAMPLE_RATE * ADAPTIVE_PAUSE_WINDOW_SECONDS)
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-i",
+        str(path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(WAVEFORM_SAMPLE_RATE),
+        "-f",
+        "s16le",
+        "-acodec",
+        "pcm_s16le",
+        "-",
+    ]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if process.stdout is None or process.stderr is None:
+        process.kill()
+        raise TimelineError("无法启动自适应语音停顿分析")
+    levels_db: list[float] = []
+    samples = array("h")
+    pending_byte = b""
+    try:
+        while True:
+            chunk = process.stdout.read(65536)
+            if not chunk:
+                break
+            chunk = pending_byte + chunk
+            even_length = len(chunk) - len(chunk) % 2
+            pending_byte = chunk[even_length:]
+            decoded = array("h")
+            decoded.frombytes(chunk[:even_length])
+            if sys.byteorder != "little":
+                decoded.byteswap()
+            samples.extend(decoded)
+            while len(samples) >= samples_per_window:
+                window = samples[:samples_per_window]
+                del samples[:samples_per_window]
+                mean_square = sum(sample * sample for sample in window) / len(window)
+                rms = math.sqrt(mean_square) / 32768.0
+                levels_db.append(20 * math.log10(max(rms, 1 / 32768)))
+        error_output = process.stderr.read().decode("utf-8", errors="replace")
+        return_code = process.wait()
+        if return_code != 0 or not levels_db:
+            raise TimelineError(error_output.strip() or "FFmpeg 无法分析音频能量")
+    except Exception:
+        process.kill()
+        process.wait()
+        raise
+    return _adaptive_intervals_from_levels(
+        levels_db,
+        minimum_duration,
+        media_duration=media_duration,
+    )
+
+
+def speech_pause_candidates(
+    intervals: list[dict[str, Any]],
+    *,
+    fps: float,
+    frame_count: int,
+    tail_padding_seconds: float = SPEECH_TAIL_PADDING_SECONDS,
+    next_speech_guard_seconds: float = NEXT_SPEECH_GUARD_SECONDS,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    leading_silence_limit = 1 / fps
+    for interval in intervals:
+        start = float(interval["start_seconds"])
+        end = float(interval["end_seconds"])
+        if not interval.get("complete", True) or start <= leading_silence_limit:
+            continue
+        first_silence_frame = math.ceil(start * fps)
+        latest_safe_frame = math.floor((end - next_speech_guard_seconds) * fps)
+        if latest_safe_frame < first_silence_frame:
+            continue
+        preferred_frame = round((start + tail_padding_seconds) * fps)
+        frame = max(first_silence_frame, min(preferred_frame, latest_safe_frame))
+        if frame <= 1 or frame >= frame_count - 1:
+            continue
+        candidates.append(
+            {
+                "frame_index": frame,
+                "time_seconds": round(frame / fps, 6),
+                "reason": "speech_pause",
+                "evidence": {
+                    "silence_start_seconds": round(start, 6),
+                    "silence_end_seconds": round(end, 6),
+                    "silence_duration_seconds": round(end - start, 6),
+                    "speech_tail_padding_seconds": tail_padding_seconds,
+                    "next_speech_guard_seconds": next_speech_guard_seconds,
+                    "detector": interval.get("detector", "silencedetect"),
+                    "noise_threshold_db": round(
+                        float(interval.get("threshold_db", SILENCE_NOISE_DB)), 3
+                    ),
+                },
+            }
+        )
+    return candidates
 
 
 def merge_breakpoints(
     scene_times: list[float],
-    silence_times: list[float],
+    speech_pauses: list[dict[str, Any] | float],
     *,
     fps: float,
     frame_count: int,
-    merge_window_seconds: float = 0.18,
+    merge_window_seconds: float = BREAKPOINT_MERGE_WINDOW_SECONDS,
 ) -> list[dict[str, Any]]:
-    candidates = [
-        (max(1, min(frame_count - 1, round(value * fps))), "scene_change")
+    candidates: list[dict[str, Any]] = [
+        {
+            "frame_index": max(1, min(frame_count - 1, round(value * fps))),
+            "reason": "scene_change",
+        }
         for value in scene_times
-    ] + [
-        (max(1, min(frame_count - 1, round(value * fps))), "silence_end")
-        for value in silence_times
     ]
-    candidates.sort()
+    for pause in speech_pauses:
+        if isinstance(pause, (int, float)):
+            candidates.append(
+                {
+                    "frame_index": max(
+                        1, min(frame_count - 1, round(float(pause) * fps))
+                    ),
+                    "reason": "speech_pause",
+                }
+            )
+        else:
+            candidates.append(pause)
+    candidates.sort(key=lambda item: int(item["frame_index"]))
     merge_window = max(1, round(merge_window_seconds * fps))
-    groups: list[list[tuple[int, str]]] = []
+    groups: list[list[dict[str, Any]]] = []
     for candidate in candidates:
-        if not groups or candidate[0] - groups[-1][-1][0] > merge_window:
+        if (
+            not groups
+            or int(candidate["frame_index"])
+            - int(groups[-1][-1]["frame_index"])
+            > merge_window
+        ):
             groups.append([candidate])
         else:
             groups[-1].append(candidate)
 
     merged: list[dict[str, Any]] = []
     for group in groups:
-        reasons = sorted({reason for _, reason in group})
+        reasons = sorted({str(item["reason"]) for item in group})
         # Prefer the visual cut frame when both signals agree; it is more stable for editing.
-        visual_frames = [frame for frame, reason in group if reason == "scene_change"]
-        frame = visual_frames[0] if visual_frames else round(sum(item[0] for item in group) / len(group))
+        visual_frames = [
+            int(item["frame_index"])
+            for item in group
+            if item["reason"] == "scene_change"
+        ]
+        frame = visual_frames[0] if visual_frames else round(
+            sum(int(item["frame_index"]) for item in group) / len(group)
+        )
         if frame <= 1 or frame >= frame_count - 1:
             continue
         confidence = 0.9 if len(reasons) > 1 else (0.72 if "scene_change" in reasons else 0.55)
-        merged.append(
-            {
-                "frame_index": frame,
-                "time_seconds": round(frame / fps, 6),
-                "reasons": reasons,
-                "confidence": confidence,
-                "review_status": "machine_suggested",
-            }
-        )
+        point: dict[str, Any] = {
+            "frame_index": frame,
+            "time_seconds": round(frame / fps, 6),
+            "reasons": reasons,
+            "confidence": confidence,
+            "review_status": "machine_suggested",
+        }
+        pause_evidence = [
+            item["evidence"]
+            for item in group
+            if item.get("reason") == "speech_pause" and item.get("evidence")
+        ]
+        if pause_evidence:
+            point["evidence"] = {"speech_pauses": pause_evidence}
+        merged.append(point)
     return merged
+
+
+def _generate_waveform(path: Path, target: Path) -> dict[str, Any]:
+    samples_per_bucket = WAVEFORM_SAMPLE_RATE // WAVEFORM_BUCKETS_PER_SECOND
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-i",
+        str(path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(WAVEFORM_SAMPLE_RATE),
+        "-f",
+        "s16le",
+        "-acodec",
+        "pcm_s16le",
+        "-",
+    ]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if process.stdout is None or process.stderr is None:
+        process.kill()
+        raise TimelineError("无法启动音频波形解码")
+
+    bucket: list[int] = []
+    bucket_count = 0
+    pending_byte = b""
+    try:
+        with temporary.open("wb") as output:
+            while True:
+                chunk = process.stdout.read(65536)
+                if not chunk:
+                    break
+                chunk = pending_byte + chunk
+                even_length = len(chunk) - len(chunk) % 2
+                pending_byte = chunk[even_length:]
+                samples = array("h")
+                samples.frombytes(chunk[:even_length])
+                if sys.byteorder != "little":
+                    samples.byteswap()
+                encoded = bytearray()
+                for sample in samples:
+                    bucket.append(sample)
+                    if len(bucket) < samples_per_bucket:
+                        continue
+                    encoded.extend(struct.pack("<hh", min(bucket), max(bucket)))
+                    bucket.clear()
+                    bucket_count += 1
+                if encoded:
+                    output.write(encoded)
+            if bucket:
+                output.write(struct.pack("<hh", min(bucket), max(bucket)))
+                bucket_count += 1
+        error_output = process.stderr.read().decode("utf-8", errors="replace")
+        return_code = process.wait()
+        if return_code != 0 or bucket_count == 0:
+            raise TimelineError(error_output.strip() or "FFmpeg 无法生成音频波形")
+        temporary.replace(target)
+    except Exception:
+        process.kill()
+        process.wait()
+        temporary.unlink(missing_ok=True)
+        raise
+    return {
+        "waveform_sample_rate": WAVEFORM_SAMPLE_RATE,
+        "buckets_per_second": WAVEFORM_BUCKETS_PER_SECOND,
+        "bucket_count": bucket_count,
+    }
+
+
+def _aggregate_waveform(
+    values: list[tuple[int, int]], output_count: int
+) -> list[list[float]]:
+    if not values or output_count <= 0:
+        return []
+    output_count = min(output_count, len(values))
+    result: list[list[float]] = []
+    for index in range(output_count):
+        start = math.floor(index * len(values) / output_count)
+        end = max(start + 1, math.ceil((index + 1) * len(values) / output_count))
+        group = values[start:end]
+        minimum = min(item[0] for item in group) / 32768.0
+        maximum = max(item[1] for item in group) / 32768.0
+        result.append([round(minimum, 5), round(maximum, 5)])
+    return result
 
 
 class TimelineAnalyzer:
     def __init__(self, data_directory: Path):
         self.data_directory = data_directory
         self.data_directory.mkdir(parents=True, exist_ok=True)
+        self.waveform_directory = self.data_directory / "waveforms"
+        self.waveform_directory.mkdir(parents=True, exist_ok=True)
         self._media_tokens: dict[str, Path] = {}
 
     def _analysis_id(self, path: Path, scene_threshold: float, silence_duration: float) -> str:
         stat = path.stat()
         payload = (
             f"{path}\0{stat.st_size}\0{stat.st_mtime_ns}\0{scene_threshold}\0"
-            f"{silence_duration}\0{datetime.now(UTC).isoformat()}\0{secrets.token_hex(8)}"
+            f"{silence_duration}\0{SILENCE_NOISE_DB}\0{ADAPTIVE_PAUSE_WINDOW_SECONDS}\0"
+            f"{ADAPTIVE_PAUSE_PERCENTILE}\0{ADAPTIVE_PAUSE_MARGIN_DB}\0"
+            f"{ADAPTIVE_PAUSE_MAX_THRESHOLD_DB}\0{SPEECH_TAIL_PADDING_SECONDS}\0"
+            f"{NEXT_SPEECH_GUARD_SECONDS}\0{datetime.now(UTC).isoformat()}\0"
+            f"{secrets.token_hex(8)}"
         ).encode()
         return hashlib.sha256(payload).hexdigest()[:24]
 
@@ -177,19 +526,86 @@ class TimelineAnalyzer:
         metadata = _probe(path)
         source_stat = path.stat()
         scene_times = _scene_times(path, scene_threshold)
-        silence_times = _silence_end_times(path, silence_duration_seconds)
+        if metadata["has_audio"]:
+            try:
+                silence_intervals = _silence_intervals(
+                    path,
+                    silence_duration_seconds,
+                    media_duration=float(metadata["duration"]),
+                )
+                pause_method = "silencedetect"
+                adaptive_threshold_db = None
+                if not silence_intervals:
+                    silence_intervals, adaptive_threshold_db = _adaptive_pause_intervals(
+                        path,
+                        silence_duration_seconds,
+                        media_duration=float(metadata["duration"]),
+                    )
+                    pause_method = "adaptive_rms"
+                pause_analysis = {
+                    "speech_pause_status": "ready",
+                    "speech_pause_method": pause_method,
+                }
+                if adaptive_threshold_db is not None:
+                    pause_analysis["adaptive_pause_threshold_db"] = round(
+                        adaptive_threshold_db, 3
+                    )
+            except TimelineError as exc:
+                silence_intervals = []
+                pause_analysis = {
+                    "speech_pause_status": "failed",
+                    "speech_pause_error": str(exc),
+                }
+        else:
+            silence_intervals = []
+            pause_analysis = {"speech_pause_status": "unavailable"}
+        pause_candidates = speech_pause_candidates(
+            silence_intervals,
+            fps=float(metadata["fps"]),
+            frame_count=int(metadata["frame_count"]),
+        )
         breakpoints = merge_breakpoints(
             scene_times,
-            silence_times,
+            pause_candidates,
             fps=metadata["fps"],
             frame_count=metadata["frame_count"],
         )
         # Every run is an immutable audit record; re-analysis never replaces a human review.
         analysis_id = self._analysis_id(path, scene_threshold, silence_duration_seconds)
+        waveform_target = self.waveform_directory / f"{analysis_id}.wfm"
+        if metadata["has_audio"]:
+            try:
+                waveform_metadata = _generate_waveform(path, waveform_target)
+                audio = {
+                    "has_audio": True,
+                    "channels": metadata["audio_channels"],
+                    "sample_rate": metadata["audio_sample_rate"],
+                    "waveform_status": "ready",
+                    "waveform_url": f"/api/v1/timeline/waveforms/{analysis_id}",
+                    **pause_analysis,
+                    **waveform_metadata,
+                }
+            except (OSError, TimelineError, ValueError, struct.error) as exc:
+                audio = {
+                    "has_audio": True,
+                    "channels": metadata["audio_channels"],
+                    "sample_rate": metadata["audio_sample_rate"],
+                    "waveform_status": "failed",
+                    "waveform_error": str(exc),
+                    **pause_analysis,
+                }
+        else:
+            audio = {
+                "has_audio": False,
+                "channels": 0,
+                "sample_rate": 0,
+                "waveform_status": "unavailable",
+                **pause_analysis,
+            }
         media_token = secrets.token_urlsafe(24)
         self._media_tokens[media_token] = path
         result = {
-            "schema_version": 1,
+            "schema_version": 2,
             "analysis_id": analysis_id,
             "source_path": str(path),
             "source_name": path.name,
@@ -202,12 +618,62 @@ class TimelineAnalyzer:
             "settings": {
                 "scene_threshold": scene_threshold,
                 "silence_duration_seconds": silence_duration_seconds,
+                "silence_noise_db": SILENCE_NOISE_DB,
+                "adaptive_pause_window_seconds": ADAPTIVE_PAUSE_WINDOW_SECONDS,
+                "adaptive_pause_percentile": ADAPTIVE_PAUSE_PERCENTILE,
+                "adaptive_pause_margin_db": ADAPTIVE_PAUSE_MARGIN_DB,
+                "adaptive_pause_max_threshold_db": ADAPTIVE_PAUSE_MAX_THRESHOLD_DB,
+                "speech_tail_padding_seconds": SPEECH_TAIL_PADDING_SECONDS,
+                "next_speech_guard_seconds": NEXT_SPEECH_GUARD_SECONDS,
             },
+            "silence_intervals": silence_intervals,
             "breakpoints": breakpoints,
+            "audio": audio,
             "media_url": f"/api/v1/timeline/media/{media_token}",
         }
         self._write(analysis_id, result)
         return result
+
+    def waveform(
+        self, analysis_id: str, start_frame: int, end_frame: int, width_px: int
+    ) -> dict[str, Any]:
+        data = self.load_record(analysis_id)
+        frame_count = int(data["frame_count"])
+        fps = float(data["fps"])
+        normalized_start = max(0, min(frame_count, start_frame))
+        normalized_end = max(normalized_start, min(frame_count, end_frame))
+        if normalized_end <= normalized_start:
+            raise TimelineError("波形区间必须包含至少一帧")
+        audio = data.get("audio") or {}
+        if audio.get("waveform_status") != "ready":
+            raise TimelineError("该分析没有可用的音频波形")
+        buckets_per_second = int(
+            audio.get("buckets_per_second") or WAVEFORM_BUCKETS_PER_SECOND
+        )
+        total_buckets = int(audio.get("bucket_count") or 0)
+        first_bucket = max(
+            0, min(total_buckets, math.floor(normalized_start / fps * buckets_per_second))
+        )
+        last_bucket = max(
+            first_bucket,
+            min(total_buckets, math.ceil(normalized_end / fps * buckets_per_second)),
+        )
+        target = self.waveform_directory / f"{analysis_id}.wfm"
+        if not target.is_file():
+            raise TimelineError("音频波形缓存不存在，请重新分析")
+        with target.open("rb") as source:
+            source.seek(first_bucket * WAVEFORM_BYTES_PER_BUCKET)
+            raw = source.read((last_bucket - first_bucket) * WAVEFORM_BYTES_PER_BUCKET)
+        values = list(struct.iter_unpack("<hh", raw))
+        peaks = _aggregate_waveform(values, min(width_px, len(values)))
+        return {
+            "analysis_id": analysis_id,
+            "start_frame": normalized_start,
+            "end_frame": normalized_end,
+            "bucket_count": len(peaks),
+            "peaks": peaks,
+            "complete": True,
+        }
 
     def media_path(self, token: str) -> Path:
         try:

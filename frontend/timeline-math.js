@@ -23,6 +23,56 @@
     return Math.min(midpoint, Math.max(0, duration - 1e-6));
   }
 
+  function waveformFrameRange({
+    scrollLeft,
+    viewportWidth,
+    pixelsPerSecond,
+    fps,
+    frameCount,
+  }) {
+    const maximumStart = Math.max(0, frameCount - 1);
+    const startFrame = Math.max(0, Math.min(
+      maximumStart,
+      Math.floor(Math.max(0, scrollLeft) / pixelsPerSecond * fps),
+    ));
+    const endFrame = Math.max(startFrame + 1, Math.min(
+      frameCount,
+      Math.ceil(
+        (Math.max(0, scrollLeft) + Math.max(1, viewportWidth))
+        / pixelsPerSecond * fps,
+      ),
+    ));
+    return { startFrame, endFrame };
+  }
+
+  function waveformViewportGeometry({
+    scrollLeft,
+    viewportWidth,
+    pixelsPerSecond,
+    duration,
+  }) {
+    const timelineWidth = Math.max(1, Math.max(0, duration) * pixelsPerSecond);
+    const left = Math.max(0, Math.min(Math.max(0, scrollLeft), timelineWidth - 1));
+    const right = Math.max(left + 1, Math.min(
+      timelineWidth,
+      left + Math.max(1, viewportWidth),
+    ));
+    return { left, width: right - left };
+  }
+
+  function isAudioOnlyBreakpoint(point) {
+    const reasons = Array.isArray(point?.reasons) ? point.reasons : [];
+    return reasons.length > 0 && reasons.every(reason => (
+      reason === "speech_pause" || reason === "silence_end"
+    ));
+  }
+
+  function activeTimelineBreakpoints(breakpoints, audioLocked = false) {
+    return audioLocked
+      ? breakpoints.filter(point => !isAudioOnlyBreakpoint(point))
+      : [...breakpoints];
+  }
+
   function ranked(matches) {
     return matches.sort((left, right) => (
       left.distance - right.distance
@@ -120,14 +170,18 @@
   }
 
   return {
+    activeTimelineBreakpoints,
     choosePointerSnap,
     chooseRulerStep,
     frameFromPlaybackTime,
     frameFromPresentedTime,
     frameFromTimelineX,
+    isAudioOnlyBreakpoint,
     mediaLayoutOrientation,
     mergeSliceUnits,
     previewTimeForFrame,
     shouldTogglePlaybackFromSpace,
+    waveformFrameRange,
+    waveformViewportGeometry,
   };
 }));

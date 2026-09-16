@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -273,6 +273,20 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
             return FileResponse(timeline_analyzer.media_path(media_token))
         except TimelineError as exc:
             raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/api/v1/timeline/waveforms/{analysis_id}")
+    def timeline_waveform(
+        analysis_id: str,
+        start_frame: int = Query(ge=0),
+        end_frame: int = Query(gt=0),
+        width_px: int = Query(ge=1, le=4096),
+    ) -> dict[str, object]:
+        try:
+            return timeline_analyzer.waveform(
+                analysis_id, start_frame, end_frame, width_px
+            )
+        except (TimelineError, OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.put("/api/v1/timeline/decisions")
     def save_timeline_decision(request: TimelineDecisionRequest) -> dict[str, object]:

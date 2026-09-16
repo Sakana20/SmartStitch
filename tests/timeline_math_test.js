@@ -1,14 +1,18 @@
 const assert = require("node:assert/strict");
 const {
+  activeTimelineBreakpoints,
   choosePointerSnap,
   chooseRulerStep,
   frameFromPlaybackTime,
   frameFromPresentedTime,
   frameFromTimelineX,
+  isAudioOnlyBreakpoint,
   mediaLayoutOrientation,
   mergeSliceUnits,
   previewTimeForFrame,
   shouldTogglePlaybackFromSpace,
+  waveformFrameRange,
+  waveformViewportGeometry,
 } = require("../frontend/timeline-math.js");
 
 assert.equal(frameFromTimelineX(400, 40, 30, 0, 999), 300);
@@ -134,5 +138,56 @@ assert.equal(mediaLayoutOrientation(1080, 1920), "portrait");
 assert.equal(mediaLayoutOrientation(1920, 1080), "landscape");
 assert.equal(mediaLayoutOrientation(1080, 1080), "landscape");
 assert.equal(mediaLayoutOrientation(0, 0), "landscape");
+
+assert.deepEqual(waveformFrameRange({
+  scrollLeft: 400,
+  viewportWidth: 800,
+  pixelsPerSecond: 40,
+  fps: 25,
+  frameCount: 1000,
+}), { startFrame: 250, endFrame: 750 });
+assert.deepEqual(waveformFrameRange({
+  scrollLeft: 99999,
+  viewportWidth: 800,
+  pixelsPerSecond: 40,
+  fps: 25,
+  frameCount: 1000,
+}), { startFrame: 999, endFrame: 1000 });
+
+assert.deepEqual(waveformViewportGeometry({
+  scrollLeft: 400,
+  viewportWidth: 800,
+  pixelsPerSecond: 40,
+  duration: 100,
+}), { left: 400, width: 800 });
+assert.deepEqual(waveformViewportGeometry({
+  scrollLeft: 0,
+  viewportWidth: 800,
+  pixelsPerSecond: 4,
+  duration: 100,
+}), { left: 0, width: 400 });
+assert.deepEqual(waveformViewportGeometry({
+  scrollLeft: 9999,
+  viewportWidth: 800,
+  pixelsPerSecond: 4,
+  duration: 100,
+}), { left: 399, width: 1 });
+
+const trackBreakpoints = [
+  { frame_index: 10, reasons: ["scene_change"] },
+  { frame_index: 20, reasons: ["speech_pause"] },
+  { frame_index: 30, reasons: ["scene_change", "speech_pause"] },
+  { frame_index: 40, reasons: ["human_added"] },
+];
+assert.equal(isAudioOnlyBreakpoint(trackBreakpoints[1]), true);
+assert.equal(isAudioOnlyBreakpoint(trackBreakpoints[2]), false);
+assert.deepEqual(
+  activeTimelineBreakpoints(trackBreakpoints, true).map(point => point.frame_index),
+  [10, 30, 40],
+);
+assert.deepEqual(
+  activeTimelineBreakpoints(trackBreakpoints, false).map(point => point.frame_index),
+  [10, 20, 30, 40],
+);
 
 console.log("timeline interaction math ok");
