@@ -39,6 +39,20 @@ smartstitch
 
 macOS 复制文件或文件夹路径时可能附带一对单引号或双引号。路径输入框会在粘贴时自动移除最外层引号，中文、空格和 `#` 等文件名字符保持不变。
 
+### NAS 共享配置
+
+应用启动时如果检测到 `/Volumes/home/Smartstitch`，会直接把该目录作为共享配置目录并读取根目录下的 YAML。这样其他 Mac 安装 SmartStitch 并将同一 NAS 挂载到 `/Volumes/home` 后，无需复制本地配置即可看到并使用共享视频库；NAS 未挂载时自动回退到项目内的 `config` 目录。
+
+非默认挂载位置可通过命令行或环境变量指定：
+
+```bash
+smartstitch --config-directory /自定义/NAS/Smartstitch
+# 或
+SMARTSTITCH_CONFIG_DIRECTORY=/自定义/NAS/Smartstitch smartstitch
+```
+
+共享配置被编辑时，旧版本会备份到共享目录下的 `backups`。多台电脑应避免同时编辑同一个配置文件；扫描和生成可以各自在本机运行。
+
 ## 首次使用
 
 本机已配置 `config/taobao-xingguang.yaml`。该文件包含真实素材路径，已设置为仅本地使用，不会提交到 Git：

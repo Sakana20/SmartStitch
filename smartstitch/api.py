@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -43,9 +44,38 @@ from .slicer import SliceConflictError, SliceError, TimelineSlicer
 from .timeline import TimelineAnalyzer, TimelineError, list_source_videos
 
 
-def create_app(base_directory: Path | None = None) -> FastAPI:
+DEFAULT_SHARED_CONFIG_DIRECTORY = Path("/Volumes/home/Smartstitch")
+CONFIG_DIRECTORY_ENV = "SMARTSTITCH_CONFIG_DIRECTORY"
+
+
+def resolve_config_directory(
+    application_root: Path,
+    *,
+    allow_shared_default: bool,
+    shared_directory: Path = DEFAULT_SHARED_CONFIG_DIRECTORY,
+) -> Path:
+    override = os.environ.get(CONFIG_DIRECTORY_ENV, "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    if allow_shared_default and shared_directory.is_dir():
+        return shared_directory.resolve()
+    return application_root / "config"
+
+
+def create_app(
+    base_directory: Path | None = None,
+    config_directory: Path | None = None,
+) -> FastAPI:
     root = (base_directory or Path(__file__).resolve().parent.parent).resolve()
-    config_store = ConfigStore(root / "config")
+    resolved_config_directory = (
+        config_directory.expanduser().resolve()
+        if config_directory is not None
+        else resolve_config_directory(
+            root,
+            allow_shared_default=base_directory is None,
+        )
+    )
+    config_store = ConfigStore(resolved_config_directory)
     library_service = LibraryService(config_store)
     job_manager = JobManager(config_store, root / "data")
     timeline_analyzer = TimelineAnalyzer(root / "data" / "timelines")
@@ -65,6 +95,8 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
             "version": __version__,
             "ffmpeg": shutil.which("ffmpeg"),
             "ffprobe": shutil.which("ffprobe"),
+            "config_directory": str(config_store.directory),
+            "shared_config": config_store.directory != root / "config",
         }
 
     @app.post("/api/v1/system/directory-picker")

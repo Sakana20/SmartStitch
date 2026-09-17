@@ -4,11 +4,12 @@ import base64
 import json
 import struct
 import subprocess
+from pathlib import Path
 
 import yaml
 from fastapi.testclient import TestClient
 
-from smartstitch.api import create_app
+from smartstitch.api import create_app, resolve_config_directory
 from smartstitch.slicer import SliceConflictError
 
 
@@ -37,7 +38,36 @@ def test_health_and_config_listing(tmp_path):
     response = client.get("/api/v1/system/health")
     assert response.status_code == 200
     assert response.json()["ok"] is True
+    assert response.json()["config_directory"] == str(tmp_path / "config")
+    assert response.json()["shared_config"] is False
     assert client.get("/api/v1/configs").json() == []
+
+
+def test_config_directory_prefers_mounted_shared_root_and_supports_override(
+    tmp_path, monkeypatch
+):
+    application_root = tmp_path / "application"
+    shared_root = tmp_path / "nas" / "Smartstitch"
+    shared_root.mkdir(parents=True)
+
+    assert resolve_config_directory(
+        application_root,
+        allow_shared_default=True,
+        shared_directory=shared_root,
+    ) == shared_root.resolve()
+    assert resolve_config_directory(
+        application_root,
+        allow_shared_default=False,
+        shared_directory=shared_root,
+    ) == application_root / "config"
+
+    override = tmp_path / "custom-configs"
+    monkeypatch.setenv("SMARTSTITCH_CONFIG_DIRECTORY", str(override))
+    assert resolve_config_directory(
+        application_root,
+        allow_shared_default=False,
+        shared_directory=Path("/missing"),
+    ) == override.resolve()
 
 
 def test_structured_config_update(tmp_path):
