@@ -1,0 +1,124 @@
+schema_version: 3
+workflow_type: generic
+id: hongguoduanju-erjian
+name: 红果短剧一口价二剪
+enabled: true
+description: SmartStitch 通用视频库
+source_root: /Volumes/home/红果短剧一口价二剪
+timeline:
+- pool_1
+- pool_2
+- pool_3
+- pool_4
+sources:
+  pool_1:
+    label: 数字人综述
+    description: ''
+    mode: required
+    directory: 视频库/pool_1
+    extensions:
+    - .mp4
+    - .mov
+    - .mkv
+    default_weight: 1.0
+    image_duration_seconds: 1.5
+    items: []
+  pool_2:
+    label: 剪辑综述
+    description: ''
+    mode: required
+    directory: 视频库/pool_2
+    extensions:
+    - .mp4
+    - .mov
+    - .mkv
+    default_weight: 1.0
+    image_duration_seconds: 1.5
+    items: []
+  pool_3:
+    label: 表情包钩子
+    description: ''
+    mode: required
+    directory: 视频库/pool_3
+    extensions:
+    - .mp4
+    - .mov
+    - .mkv
+    default_weight: 1.0
+    image_duration_seconds: 1.5
+    items: []
+  pool_4:
+    label: 创意钩子
+    description: ''
+    mode: required
+    directory: 视频库/pool_4
+    extensions:
+    - .mp4
+    - .mov
+    - .mkv
+    default_weight: 1.0
+    image_duration_seconds: 1.5
+    items: []
+benefit_overlays:
+  mode: optional
+  file: ''
+  image_duration_seconds: 1.5
+  placement:
+    scale_mode: original
+    x: '0'
+    y: '0'
+    shrink_if_oversized: true
+    opacity: 1.0
+  timing:
+    scope: full
+    start_seconds: 0.0
+    end_seconds: null
+matching:
+  enabled: false
+  strategy: product_tag
+  allow_untagged_as_global: true
+  on_missing_match: error
+randomization:
+  mode: quota_shuffle
+  duplicate_policy: best_effort
+  default_seed: null
+output:
+  directory: /Volumes/home/红果短剧一口价二剪/成片输出
+  width: 720
+  height: 1280
+  fps: 30.0
+  video_codec: libx264
+  pixel_format: yuv420p
+  video_preset: medium
+  rate_control: crf
+  video_bitrate_kbps: 3000
+  crf: 18
+  audio_codec: aac
+  audio_bitrate: 192k
+  audio_sample_rate: 48000
+  audio_channels: 2
+  loudness:
+    enabled: false
+    target_lufs: -14.0
+    loudness_range_lu: 7.0
+    true_peak_dbtp: -1.5
+    preview_duration_seconds: 12.0
+  resize_mode: fit_pad
+  background_color: black
+  filename_template: '{config}_{date}_{batch}_{index:04d}.mp4'
+  collision_policy: increment
+  faststart: true
+batch:
+  default_count: 10
+  max_count: 1000
+  concurrency: 1
+  retry_count: 1
+  minimum_free_space_gb: 5.0
+scanner:
+  recursive: false
+  ignore_hidden_files: true
+  ignore_prefixes:
+  - ._
+  - .~
+  ignore_names:
+  - .DS_Store
