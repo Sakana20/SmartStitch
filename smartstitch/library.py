@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import platform
@@ -21,6 +23,7 @@ from .models import (
     DeletePoolRequest,
     LibraryPreflightRequest,
     MAX_GENERIC_POOLS,
+    ReplaceOverlayImageRequest,
     ReorderTimelineRequest,
     SourceGroupConfig,
     SourceMode,
@@ -59,6 +62,8 @@ GENERIC_DIRECTORIES = (
     Path(".smartstitch"),
 )
 INVALID_FOLDER_CHARACTERS = re.compile(r'[<>:"/\\|?*\x00]')
+OVERLAY_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+MAX_OVERLAY_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 class LibraryError(ValueError):
@@ -566,6 +571,93 @@ class LibraryService:
             return {
                 "ok": True,
                 "timeline": updated.timeline,
+                "config": updated.model_dump(mode="json"),
+                "content_hash": self.config_store.content_hash(config_id),
+            }
+
+    def replace_overlay_image(
+        self, config_id: str, request: ReplaceOverlayImageRequest
+    ) -> dict[str, Any]:
+        with self._lock, self.config_store.lock:
+            config = self.config_store.load(config_id)
+            self._check_hash(config_id, request.current_config_hash)
+            root = Path(config.source_root).expanduser().resolve()
+            marker = self._load_marker(root)
+            if config.workflow_type == "generic":
+                self._ensure_generic_overlay_layout(root, marker)
+            paths = marker.get("paths")
+            relative_value = paths.get("overlays") if isinstance(paths, dict) else None
+            if not isinstance(relative_value, str) or not relative_value.strip():
+                raise LibraryError("项目库没有风险提示语图片目录")
+
+            filename = request.filename.strip()
+            if Path(filename).name != filename or INVALID_FOLDER_CHARACTERS.search(filename):
+                raise LibraryError("图片文件名包含非法字符")
+            extension = Path(filename).suffix.lower()
+            if extension not in OVERLAY_IMAGE_EXTENSIONS:
+                raise LibraryError("风险提示语图片仅支持 PNG、JPG、WEBP 或 BMP")
+            if len(request.data_base64) > MAX_OVERLAY_IMAGE_BYTES * 2:
+                raise LibraryError("风险提示语图片不能超过 20 MB")
+            try:
+                content = base64.b64decode(request.data_base64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise LibraryError("风险提示语图片数据无效") from exc
+            if not content or len(content) > MAX_OVERLAY_IMAGE_BYTES:
+                raise LibraryError("风险提示语图片不能为空且不能超过 20 MB")
+
+            relative = Path(relative_value)
+            overlay_directory = root / relative
+            if (
+                relative.is_absolute()
+                or not _within(root, overlay_directory)
+                or overlay_directory.is_symlink()
+            ):
+                raise LibraryError("风险提示语图片目录无效或越过项目库边界")
+            overlay_directory.mkdir(parents=True, exist_ok=True)
+            target = overlay_directory / filename
+            if target.is_symlink() or not _within(root, target):
+                raise LibraryError("风险提示语图片目标无效")
+
+            temporary = overlay_directory / f".{uuid.uuid4().hex}.upload{extension}"
+            temporary.write_bytes(content)
+            try:
+                from .scanner import probe_media
+
+                probe_media(temporary)
+            except Exception as exc:
+                temporary.unlink(missing_ok=True)
+                raise LibraryError(f"无法读取风险提示语图片: {exc}") from exc
+
+            existing = [
+                path
+                for path in overlay_directory.iterdir()
+                if path.is_file()
+                and not path.name.startswith(".")
+                and path.suffix.lower() in OVERLAY_IMAGE_EXTENSIONS
+            ]
+            backup_paths: list[str] = []
+            if existing:
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+                backup_directory = root / ".smartstitch" / "overlay-backups" / stamp
+                backup_directory.mkdir(parents=True, exist_ok=False)
+                for previous in existing:
+                    destination = backup_directory / previous.name
+                    previous.replace(destination)
+                    backup_paths.append(str(destination))
+            temporary.replace(target)
+
+            updated = config.model_copy(deep=True)
+            updated.benefit_overlays.mode = SourceMode.REQUIRED
+            updated.benefit_overlays.file = ""
+            if updated.workflow_type == "generic":
+                updated.benefit_overlays.timing.scope = "full"
+            self.config_store.save_config(config_id, updated)
+            return {
+                "ok": True,
+                "filename": filename,
+                "directory": str(overlay_directory),
+                "path": str(target),
+                "backups": backup_paths,
                 "config": updated.model_dump(mode="json"),
                 "content_hash": self.config_store.content_hash(config_id),
             }

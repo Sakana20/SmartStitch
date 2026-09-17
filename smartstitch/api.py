@@ -27,6 +27,7 @@ from .models import (
     LibraryPreflightRequest,
     LoudnessPreviewRequest,
     PreviewRequest,
+    ReplaceOverlayImageRequest,
     ReorderTimelineRequest,
     StructuredConfigUpdateRequest,
     TimelineAnalyzeRequest,
@@ -153,6 +154,17 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
     ) -> dict[str, object]:
         try:
             return library_service.reorder_timeline(config_id, request)
+        except LibraryConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/configs/{config_id}/overlay-image")
+    def replace_overlay_image(
+        config_id: str, request: ReplaceOverlayImageRequest
+    ) -> dict[str, object]:
+        try:
+            return library_service.replace_overlay_image(config_id, request)
         except LibraryConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
         except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260917-16" />
+    <link rel="stylesheet" href="/styles.css?v=20260917-22" />
   </head>
   <body>
     <div class="noise"></div>
@@ -292,12 +292,13 @@
           <div><p class="eyebrow">CONFIGURATION</p><h2>配置管理</h2></div>
           <button class="drawer-close" data-close-modal>×</button>
         </div>
-        <p>通过表单调整素材目录、叠图、输出和随机策略。保存前会完整校验并备份原配置。</p>
         <div class="config-mode-tabs">
-          <button class="config-mode-tab active" data-config-mode="visual">可视化配置</button>
+          <button class="config-mode-tab active" data-config-mode="simple">简单模式</button>
+          <button class="config-mode-tab" data-config-mode="advanced">高级模式</button>
           <button class="config-mode-tab" data-config-mode="yaml">YAML 专家模式</button>
         </div>
-        <div id="visualConfigEditor" class="visual-config-editor"></div>
+        <div id="simpleConfigEditor" class="simple-config-editor"></div>
+        <div id="visualConfigEditor" class="visual-config-editor hidden"></div>
         <div id="yamlConfigEditor" class="hidden">
           <div class="editor-notice">专家模式会直接保存 YAML。字段说明可查看 <code>config/template.commented.yaml</code>。</div>
           <textarea id="yamlEditor" spellcheck="false"></textarea>
@@ -350,7 +351,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260917-16" defer></script>
-    <script src="/app.js?v=20260917-16" defer></script>
+    <script src="/timeline-math.js?v=20260917-22" defer></script>
+    <script src="/app.js?v=20260917-22" defer></script>
   </body>
 </html>

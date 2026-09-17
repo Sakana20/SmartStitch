@@ -9,13 +9,53 @@ const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260917-16"/,
+  /href="\/styles\.css\?v=20260917-22"/,
   "源视频切换样式更新后必须刷新 CSS 缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
 assert.equal(staticVersions.length, 3, "三个前端静态资源都必须声明缓存版本");
 assert.equal(new Set(staticVersions).size, 1, "CSS 与 JS 必须使用同一个发布版本，避免新旧资源混用");
+assert.match(
+  html,
+  /data-config-mode="simple">简单模式[\s\S]*data-config-mode="advanced">高级模式[\s\S]*data-config-mode="yaml">YAML 专家模式/,
+  "配置管理必须提供简单、高级和 YAML 三级模式",
+);
+assert.match(
+  html,
+  /id="simpleConfigEditor"[\s\S]*id="visualConfigEditor"[^>]*hidden/,
+  "简单模式必须默认显示，原可视化配置应作为隐藏的高级模式",
+);
+assert.match(
+  app,
+  /function renderSimpleConfig\(\)[\s\S]*这是哪个项目[\s\S]*要不要显示风险提示语[\s\S]*视频按什么顺序拼接[\s\S]*成片想要什么效果[\s\S]*组合重复规则/,
+  "简单模式必须使用大区块展示核心配置逻辑",
+);
+assert.match(
+  app,
+  /function currentStructuredDraft\(\)[\s\S]*state\.configMode === "advanced"[\s\S]*collectVisualConfig\(\)[\s\S]*structuredClone\(state\.configDraft\)/,
+  "简单模式保存时必须保留未展示的高级配置字段",
+);
+assert.match(
+  app,
+  /simpleOverlayFile[\s\S]*uploadOverlayImage[\s\S]*\/overlay-image/,
+  "简单模式必须支持直接更换风险提示语图片",
+);
+assert.match(
+  app,
+  /simpleChoiceButtons[\s\S]*data-simple-choice[\s\S]*生成速度与画质[\s\S]*组合重复规则/,
+  "简单模式应使用大选项呈现常用成片设置",
+);
+assert.doesNotMatch(
+  app,
+  /simpleConfigEnabled/,
+  "简单模式不应展示意义不明确的配置启用开关",
+);
+assert.match(
+  css,
+  /\.simple-config-editor\s*\{[^}]*grid-template-columns:\s*repeat\(2,[^}]*grid-auto-rows:\s*max-content/,
+  "桌面端项目信息与风险提示语应各占一半，卡片必须按内容撑高",
+);
 assert.match(
   html,
   /id="newWorkflowType"[\s\S]*value="taobao_flash"[\s\S]*value="generic"/,

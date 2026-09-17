@@ -11,7 +11,7 @@ const state = {
   jobs: [],
   activeJob: null,
   eventSource: null,
-  configMode: "visual",
+  configMode: "simple",
   configDraft: null,
   previewAudioCleanup: null,
   timeline: {
@@ -2191,6 +2191,7 @@ function openConfig() {
   if (!state.config) return;
   state.configDraft = structuredClone(state.config);
   $("#yamlEditor").value = state.yaml;
+  renderSimpleConfig();
   renderVisualConfig();
   restoreConfigUiPreferences();
   $("#configModal").classList.add("open");
@@ -2208,9 +2209,23 @@ function closeConfig() {
 }
 
 function setConfigMode(mode) {
+  if (
+    state.configMode === "advanced"
+    && mode !== "advanced"
+    && state.configDraft
+    && $("#visualConfigEditor").children.length
+  ) {
+    state.configDraft = collectVisualConfig();
+  }
   state.configMode = mode;
+  if (mode === "simple") renderSimpleConfig();
+  if (mode === "advanced") {
+    renderVisualConfig();
+    applyAdvancedSectionPreferences(readConfigUiPreferences());
+  }
   $$(".config-mode-tab").forEach(button => button.classList.toggle("active", button.dataset.configMode === mode));
-  $("#visualConfigEditor").classList.toggle("hidden", mode !== "visual");
+  $("#simpleConfigEditor").classList.toggle("hidden", mode !== "simple");
+  $("#visualConfigEditor").classList.toggle("hidden", mode !== "advanced");
   $("#yamlConfigEditor").classList.toggle("hidden", mode !== "yaml");
   if ($("#configModal").classList.contains("open")) saveConfigUiPreferences();
 }
@@ -2236,6 +2251,7 @@ function saveConfigUiPreferences() {
   const preferences = {
     mode: state.configMode,
     sections,
+    simpleScrollTop: $("#simpleConfigEditor")?.scrollTop || 0,
     visualScrollTop: $("#visualConfigEditor")?.scrollTop || 0,
     yamlScrollTop: $("#yamlEditor")?.scrollTop || 0,
   };
@@ -2244,18 +2260,356 @@ function saveConfigUiPreferences() {
 
 function restoreConfigUiPreferences() {
   const preferences = readConfigUiPreferences();
+  applyAdvancedSectionPreferences(preferences);
+  const savedMode = preferences.mode === "visual" ? "advanced" : preferences.mode;
+  setConfigMode(["simple", "advanced", "yaml"].includes(savedMode) ? savedMode : "simple");
+}
+
+function applyAdvancedSectionPreferences(preferences) {
   $$("#visualConfigEditor details[data-config-section]").forEach(section => {
     const saved = preferences.sections?.[section.dataset.configSection];
     if (typeof saved === "boolean") section.open = saved;
     section.addEventListener("toggle", saveConfigUiPreferences);
   });
-  setConfigMode(preferences.mode === "yaml" ? "yaml" : "visual");
 }
 
 function restoreConfigEditorScroll() {
   const preferences = readConfigUiPreferences();
+  if ($("#simpleConfigEditor")) $("#simpleConfigEditor").scrollTop = Number(preferences.simpleScrollTop || 0);
   if ($("#visualConfigEditor")) $("#visualConfigEditor").scrollTop = Number(preferences.visualScrollTop || 0);
   if ($("#yamlEditor")) $("#yamlEditor").scrollTop = Number(preferences.yamlScrollTop || 0);
+}
+
+function simpleSourceModeOptions(selected) {
+  return [
+    ["required", "每条视频必须有"],
+    ["optional", "有素材时使用"],
+    ["disabled", "暂不使用"],
+  ].map(([value, label]) => `<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function simpleOutputPreset(output) {
+  if (output.width === 720 && output.height === 1280) return "portrait";
+  if (output.width === 1280 && output.height === 720) return "landscape";
+  if (output.width === 1080 && output.height === 1080) return "square";
+  return "custom";
+}
+
+function simpleQualityPreset(output) {
+  if (["ultrafast", "veryfast"].includes(output.video_preset) || output.crf >= 22) return "fast";
+  if (["slow", "slower"].includes(output.video_preset) || output.crf <= 16) return "high";
+  return "recommended";
+}
+
+function simpleOverlayDirectory() {
+  const root = state.library?.root_path || state.configDraft?.source_root || "";
+  return `${String(root).replace(/\/+$/, "")}/风险提示语图片`;
+}
+
+function simpleChoiceButtons(name, choices, selected) {
+  return `<div class="simple-choice-row" role="group">${choices.map(([value, title, note]) => `
+    <button type="button" class="simple-choice ${selected === value ? "active" : ""}" data-simple-choice="${name}" data-simple-value="${value}">
+      <strong>${title}</strong>${note ? `<small>${note}</small>` : ""}
+    </button>`).join("")}</div>`;
+}
+
+function renderSimpleConfig() {
+  const config = state.configDraft;
+  if (!config) return;
+  const generic = config.workflow_type === "generic";
+  const categories = config.timeline.filter(category => config.sources[category]);
+  const benefitCategories = categories.filter(isBenefitCategory);
+  const sourceCards = categories.map((category, index) => {
+    const group = config.sources[category];
+    const count = state.scan?.assets?.[category]?.length ?? 0;
+    const label = group.label?.trim() || categoryLabel(category);
+    const canDelete = generic || (isBenefitCategory(category) && benefitCategories.length > 1);
+    const canMove = generic || isBenefitCategory(category);
+    const draggable = generic || isBenefitCategory(category);
+    const movableCategories = generic ? categories : benefitCategories;
+    const movableIndex = movableCategories.indexOf(category);
+    return `
+      <article class="simple-source-card ${group.mode === "disabled" ? "is-disabled" : ""}" data-simple-source-card="${escapeHtml(category)}" ${draggable ? 'draggable="true"' : ""}>
+        <div class="simple-source-step"><span>${String(index + 1).padStart(2, "0")}</span>${draggable ? '<i title="拖动改变顺序">⠿</i>' : ""}</div>
+        <div class="simple-source-main">
+          ${generic
+            ? `<input class="simple-source-name" data-simple-source-name="${escapeHtml(category)}" value="${escapeHtml(label)}" aria-label="视频库名称">`
+            : `<strong>${escapeHtml(label)}</strong>`}
+          <div class="simple-source-meta"><span class="${count ? "has-assets" : ""}">${count ? `${count} 个素材可用` : "还没有素材"}</span></div>
+        </div>
+        <label class="simple-source-mode">
+          <span>使用规则</span>
+          <select data-simple-source-mode="${escapeHtml(category)}">${simpleSourceModeOptions(group.mode)}</select>
+        </label>
+        ${canMove ? `<div class="simple-source-actions">
+          <button type="button" class="text-btn" data-simple-source-action="up" data-simple-source-id="${escapeHtml(category)}" ${movableIndex <= 0 ? "disabled" : ""}>上移</button>
+          <button type="button" class="text-btn" data-simple-source-action="down" data-simple-source-id="${escapeHtml(category)}" ${movableIndex === movableCategories.length - 1 ? "disabled" : ""}>下移</button>
+          ${canDelete ? `<button type="button" class="text-btn danger-text" data-simple-source-action="delete" data-simple-source-id="${escapeHtml(category)}">删除</button>` : ""}
+        </div>` : ""}
+      </article>`;
+  }).join("");
+  const overlay = config.benefit_overlays;
+  const overlayEnabled = overlay.mode !== "disabled";
+  const overlayAsset = (state.scan?.assets?.benefit_overlay || []).find(asset => asset.valid);
+  const overlayName = overlayAsset?.name || (overlay.file ? overlay.file.split("/").pop() : "尚未识别到图片");
+  const overlayStatus = overlayEnabled
+    ? (overlayAsset ? "已识别并将在生成时叠加" : "已开启，请添加一张图片")
+    : "当前关闭，不会叠加到成片";
+  const timingChoices = generic
+    ? [["full", "整条视频"], ["custom", "指定时间"]]
+    : [["full", "整条视频"], ["main", "主要内容"], ["benefits", "利益点部分"], ["custom", "指定时间"]];
+  const addButton = generic
+    ? `<button id="simpleAddPoolBtn" class="button secondary" type="button" ${categories.length >= 50 ? "disabled" : ""}>＋ 添加视频库</button>`
+    : `<button id="simpleAddBenefitBtn" class="button secondary" type="button" ${benefitCategories.length >= 20 ? "disabled" : ""}>＋ 添加利益点</button>`;
+  const projectType = generic ? "通用视频拼接" : "淘宝闪购";
+  const libraryHealth = !state.library?.managed
+    ? "外部素材配置"
+    : state.library.health === "healthy" ? "项目目录正常" : "请检查项目目录";
+  const outputPreset = simpleOutputPreset(config.output);
+  const qualityPreset = simpleQualityPreset(config.output);
+  const outputChoices = [
+    ["portrait", "竖屏", "720 × 1280"],
+    ["landscape", "横屏", "1280 × 720"],
+    ["square", "方形", "1080 × 1080"],
+  ];
+  if (outputPreset === "custom") outputChoices.push(["custom", "保留当前", `${config.output.width} × ${config.output.height}`]);
+
+  $("#simpleConfigEditor").innerHTML = `
+    <div class="simple-mode-banner">
+      <div><strong>简单模式</strong><p>按下面 4 步完成设置；没有显示的高级参数会原样保留。</p></div>
+      <span class="simple-safe-badge">高级参数已保护</span>
+      <button class="text-btn" type="button" data-open-advanced>进入高级模式 →</button>
+    </div>
+
+    <section class="simple-config-card simple-half-card">
+      <header><span class="simple-card-number">01</span><div><h3>项目设置</h3><p>给它一个容易找到的名字。</p></div></header>
+      <div class="simple-card-body simple-basic-grid">
+        <label class="simple-large-field"><span>项目名称</span><input id="simpleConfigName" value="${escapeHtml(config.name)}"></label>
+        <div class="simple-info-strip"><span>${escapeHtml(projectType)}</span><span class="${state.library?.health === "healthy" ? "ok" : "warning"}">${escapeHtml(libraryHealth)}</span></div>
+      </div>
+    </section>
+
+    <section class="simple-config-card simple-half-card ${overlayEnabled ? "is-accent" : ""}">
+      <header><span class="simple-card-number">02</span><div><h3>风险提示语设置</h3><p>提示图会覆盖在成片最上层。</p></div><label class="simple-header-switch"><span>${overlayEnabled ? "显示" : "不显示"}</span><input id="simpleOverlayEnabled" class="switch-input" type="checkbox" ${overlayEnabled ? "checked" : ""}></label></header>
+      <div class="simple-card-body">
+        <div class="simple-overlay-row">
+          <div class="simple-overlay-status ${overlayAsset ? "has-file" : ""}"><i></i><div><strong>${escapeHtml(overlayName)}</strong><span>${escapeHtml(overlayStatus)}</span></div></div>
+          <div class="simple-overlay-actions">
+            <label class="button secondary ${state.library?.managed ? "" : "disabled"}">${overlayAsset ? "更换图片" : "选择图片"}<input id="simpleOverlayFile" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp" ${state.library?.managed ? "" : "disabled"}></label>
+            <button id="copyOverlayDirectoryBtn" class="text-btn" type="button">复制图片文件夹位置</button>
+          </div>
+        </div>
+        <div class="simple-timing-settings ${overlayEnabled ? "" : "hidden"}">
+          <div class="simple-setting-label">显示在哪一段？</div>
+          ${simpleChoiceButtons("timing", timingChoices.map(([value, label]) => [value, label, ""]), overlay.timing.scope)}
+          <div class="simple-inline-settings ${overlay.timing.scope === "custom" ? "" : "hidden"}">
+            <label><span>开始时间（秒）</span><input id="simpleOverlayStart" type="number" min="0" step="0.1" value="${overlay.timing.start_seconds}"></label>
+            <label><span>结束时间（秒）</span><input id="simpleOverlayEnd" type="number" min="0" step="0.1" value="${overlay.timing.end_seconds ?? ""}" placeholder="留空到片尾"></label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="simple-config-card simple-wide-card">
+      <header><span class="simple-card-number">03</span><div><h3>拼接顺序</h3><p>${generic ? "列表从上到下，就是成片从头到尾。" : "淘宝闪购主流程保持固定，利益点可以增删和排序。"}</p></div></header>
+      <div class="simple-card-body">
+        <div class="simple-logic-strip"><span>每个启用的视频库随机取 1 条</span><i>→</i><span>按下方顺序拼接</span><i>→</i><strong>输出成片</strong></div>
+        <div class="simple-source-list">${sourceCards || '<div class="simple-empty-state">还没有视频库。添加第一个视频库后即可开始。</div>'}</div>
+        <div class="simple-card-footer">${addButton}<small>拖动卡片或点击上下移动，编号会自动更新</small></div>
+      </div>
+    </section>
+
+    <section class="simple-config-card simple-wide-card">
+      <header><span class="simple-card-number">04</span><div><h3>输出设置</h3><p>选择常用方案即可，编码和码率由系统自动处理。</p></div></header>
+      <div class="simple-card-body simple-finish-settings">
+        <div class="simple-setting-group"><div class="simple-setting-label">画面方向</div>${simpleChoiceButtons("output", outputChoices, outputPreset)}</div>
+        <div class="simple-setting-group"><div class="simple-setting-label">生成速度与画质</div>${simpleChoiceButtons("quality", [["fast", "快速生成", "速度优先"], ["recommended", "清晰画质", "推荐"], ["high", "高清优先", "耗时更长"]], qualityPreset)}</div>
+        <div class="simple-setting-group"><div class="simple-setting-label">组合重复规则</div>${simpleChoiceButtons("duplicate", [["allow", "允许重复", "保持素材权重"], ["best_effort", "尽量不重复", "推荐"], ["strict", "完全不重复", "不足时停止"]], config.randomization.duplicate_policy)}</div>
+        <label class="simple-toggle-row compact"><span><b>自动均衡音量</b><small>减少不同素材之间忽大忽小的音量差</small></span><input id="simpleLoudnessEnabled" class="switch-input" type="checkbox" ${config.output.loudness?.enabled ? "checked" : ""}></label>
+      </div>
+    </section>`;
+  bindSimpleConfigControls();
+}
+
+function mutateSimpleConfig(mutator) {
+  mutator(state.configDraft);
+  renderSimpleConfig();
+}
+
+function moveSimpleSource(category, action) {
+  mutateSimpleConfig(config => {
+    const movable = config.workflow_type === "generic"
+      ? config.timeline
+      : config.timeline.filter(isBenefitCategory);
+    const position = movable.indexOf(category);
+    const other = action === "up" ? movable[position - 1] : movable[position + 1];
+    if (!other) return;
+    const currentIndex = config.timeline.indexOf(category);
+    const otherIndex = config.timeline.indexOf(other);
+    [config.timeline[currentIndex], config.timeline[otherIndex]] = [config.timeline[otherIndex], config.timeline[currentIndex]];
+  });
+}
+
+function bindSimpleConfigControls() {
+  $$('[data-open-advanced]').forEach(button => button.addEventListener("click", () => setConfigMode("advanced")));
+  $("#simpleConfigName")?.addEventListener("input", event => { state.configDraft.name = event.target.value; });
+  $$('[data-simple-source-name]').forEach(input => input.addEventListener("input", () => {
+    state.configDraft.sources[input.dataset.simpleSourceName].label = input.value;
+  }));
+  $$('[data-simple-source-mode]').forEach(select => select.addEventListener("change", () => {
+    state.configDraft.sources[select.dataset.simpleSourceMode].mode = select.value;
+    renderSimpleConfig();
+  }));
+  $("#simpleAddPoolBtn")?.addEventListener("click", event => addPoolFromEditor(event.currentTarget));
+  $("#simpleAddBenefitBtn")?.addEventListener("click", event => addBenefitFromEditor(event.currentTarget));
+  $$('[data-simple-source-action]').forEach(button => button.addEventListener("click", async () => {
+    const category = button.dataset.simpleSourceId;
+    const action = button.dataset.simpleSourceAction;
+    if (action !== "delete") {
+      moveSimpleSource(category, action);
+      return;
+    }
+    if (state.configDraft.workflow_type === "generic") {
+      const group = state.configDraft.sources[category];
+      const count = state.scan?.assets?.[category]?.length ?? 0;
+      if (!window.confirm(`删除视频库“${group.label || category}”的编排配置？\n当前扫描到 ${count} 个素材，磁盘目录和素材会原样保留。`)) return;
+      await deletePoolFromEditor(category, button);
+      return;
+    }
+    const benefits = state.configDraft.timeline.filter(isBenefitCategory);
+    if (benefits.length <= 1) { toast("至少需要保留一个利益点段", true); return; }
+    if (!window.confirm(`删除${categoryLabel(category)}的配置？\n对应文件夹和本地素材会原样保留。`)) return;
+    mutateSimpleConfig(config => {
+      config.timeline = config.timeline.filter(item => item !== category);
+      delete config.sources[category];
+    });
+  }));
+  bindSimpleSourceDrag();
+
+  $("#simpleOverlayEnabled")?.addEventListener("change", event => {
+    state.configDraft.benefit_overlays.mode = event.target.checked ? "required" : "disabled";
+    renderSimpleConfig();
+  });
+  $$('[data-simple-choice]').forEach(button => button.addEventListener("click", () => {
+    const choice = button.dataset.simpleChoice;
+    const value = button.dataset.simpleValue;
+    if (choice === "timing") {
+      state.configDraft.benefit_overlays.timing.scope = value;
+    } else if (choice === "output") {
+      const sizes = { portrait: [720, 1280], landscape: [1280, 720], square: [1080, 1080] };
+      if (sizes[value]) {
+        [state.configDraft.output.width, state.configDraft.output.height] = sizes[value];
+        state.configDraft.output.fps = 30;
+      }
+    } else if (choice === "quality") {
+      const presets = {
+        fast: { video_preset: "veryfast", crf: 23 },
+        recommended: { video_preset: "medium", crf: 18 },
+        high: { video_preset: "slow", crf: 16 },
+      };
+      Object.assign(state.configDraft.output, presets[value]);
+      state.configDraft.output.rate_control = "crf";
+    } else if (choice === "duplicate") {
+      state.configDraft.randomization.duplicate_policy = value;
+    }
+    renderSimpleConfig();
+  }));
+  $("#simpleOverlayStart")?.addEventListener("input", event => {
+    state.configDraft.benefit_overlays.timing.start_seconds = Number(event.target.value || 0);
+  });
+  $("#simpleOverlayEnd")?.addEventListener("input", event => {
+    state.configDraft.benefit_overlays.timing.end_seconds = event.target.value === "" ? null : Number(event.target.value);
+  });
+  $("#simpleOverlayFile")?.addEventListener("change", event => uploadOverlayImage(event.target.files?.[0], event.target));
+  $("#copyOverlayDirectoryBtn")?.addEventListener("click", copyOverlayDirectory);
+
+  $("#simpleLoudnessEnabled")?.addEventListener("change", event => {
+    state.configDraft.output.loudness.enabled = event.target.checked;
+  });
+}
+
+function bindSimpleSourceDrag() {
+  let dragged = null;
+  $$('[data-simple-source-card][draggable="true"]').forEach(card => {
+    card.addEventListener("dragstart", event => {
+      dragged = card.dataset.simpleSourceCard;
+      card.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", dragged);
+    });
+    card.addEventListener("dragover", event => {
+      const target = card.dataset.simpleSourceCard;
+      const generic = state.configDraft.workflow_type === "generic";
+      if (!dragged || dragged === target || (!generic && (!isBenefitCategory(dragged) || !isBenefitCategory(target)))) return;
+      event.preventDefault();
+      card.classList.add("drag-over");
+    });
+    card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
+    card.addEventListener("drop", event => {
+      event.preventDefault();
+      const target = card.dataset.simpleSourceCard;
+      if (!dragged || dragged === target) return;
+      mutateSimpleConfig(config => {
+        const next = config.timeline.filter(category => category !== dragged);
+        next.splice(next.indexOf(target), 0, dragged);
+        config.timeline = next;
+      });
+    });
+    card.addEventListener("dragend", () => {
+      dragged = null;
+      $$('[data-simple-source-card]').forEach(item => item.classList.remove("dragging", "drag-over"));
+    });
+  });
+}
+
+async function copyOverlayDirectory() {
+  const directory = simpleOverlayDirectory();
+  try {
+    await navigator.clipboard.writeText(directory);
+    toast("风险提示语图片文件夹位置已复制");
+  } catch (_) {
+    window.prompt("复制下面的文件夹位置", directory);
+  }
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 32768) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+  }
+  return btoa(binary);
+}
+
+async function uploadOverlayImage(file, input) {
+  if (!file) return;
+  if (file.size > 20 * 1024 * 1024) {
+    toast("风险提示语图片不能超过 20 MB", true);
+    input.value = "";
+    return;
+  }
+  input.disabled = true;
+  try {
+    const saved = await api(`/configs/${state.configId}/structured`, {
+      method: "PUT",
+      body: JSON.stringify({ config: currentStructuredDraft() }),
+    });
+    const dataBase64 = arrayBufferToBase64(await file.arrayBuffer());
+    const result = await api(`/configs/${state.configId}/overlay-image`, {
+      method: "POST",
+      body: JSON.stringify({
+        filename: file.name,
+        data_base64: dataBase64,
+        current_config_hash: saved.content_hash,
+      }),
+    });
+    await refreshConfigEditor($("#simpleConfigEditor").scrollTop);
+    toast(`风险提示语图片已更换为 ${result.filename}`);
+  } catch (error) {
+    toast(error.message, true);
+    input.disabled = false;
+    input.value = "";
+  }
 }
 
 function configInput(label, path, value, options = {}) {
@@ -2498,11 +2852,31 @@ function renderVisualConfig() {
 }
 
 function mutateBenefitConfig(mutator) {
-  state.configDraft = collectVisualConfig();
-  const scrollTop = $("#visualConfigEditor").scrollTop;
+  state.configDraft = currentStructuredDraft();
+  const scrollTop = configEditorScrollTop();
   mutator(state.configDraft);
+  renderSimpleConfig();
   renderVisualConfig();
-  $("#visualConfigEditor").scrollTop = scrollTop;
+  restoreActiveConfigScroll(scrollTop);
+}
+
+function currentStructuredDraft() {
+  return state.configMode === "advanced"
+    ? collectVisualConfig()
+    : structuredClone(state.configDraft);
+}
+
+function configEditorScrollTop() {
+  return state.configMode === "simple"
+    ? $("#simpleConfigEditor").scrollTop
+    : $("#visualConfigEditor").scrollTop;
+}
+
+function restoreActiveConfigScroll(scrollTop) {
+  const editor = state.configMode === "simple"
+    ? $("#simpleConfigEditor")
+    : $("#visualConfigEditor");
+  if (editor) editor.scrollTop = scrollTop;
 }
 
 function bindBenefitConfigControls() {
@@ -2591,22 +2965,24 @@ async function refreshConfigEditor(scrollTop = 0) {
   state.library = await api(`/libraries/by-config/${state.configId}`);
   state.timeline.sliceTargets = (await api(`/libraries/by-config/${state.configId}/slice-targets`)).targets;
   $("#yamlEditor").value = state.yaml;
+  renderSimpleConfig();
   renderVisualConfig();
   if (state.timeline.analysis) renderTimeline();
-  $("#visualConfigEditor").scrollTop = scrollTop;
   await scanAssets(false);
+  renderSimpleConfig();
+  restoreActiveConfigScroll(scrollTop);
 }
 
 async function addPoolFromEditor(button) {
   const label = window.prompt("新视频库名称", `视频库 ${state.configDraft.timeline.length + 1}`)?.trim();
   if (!label) return;
-  const scrollTop = $("#visualConfigEditor").scrollTop;
+  const scrollTop = configEditorScrollTop();
   button.disabled = true;
   button.textContent = "正在创建文件夹…";
   try {
     const saved = await api(`/configs/${state.configId}/structured`, {
       method: "PUT",
-      body: JSON.stringify({ config: collectVisualConfig() }),
+      body: JSON.stringify({ config: currentStructuredDraft() }),
     });
     state.configHash = saved.content_hash;
     const added = await api(`/configs/${state.configId}/pools`, {
@@ -2630,12 +3006,12 @@ async function addPoolFromEditor(button) {
 }
 
 async function deletePoolFromEditor(poolId, button) {
-  const scrollTop = $("#visualConfigEditor").scrollTop;
+  const scrollTop = configEditorScrollTop();
   button.disabled = true;
   try {
     const saved = await api(`/configs/${state.configId}/structured`, {
       method: "PUT",
-      body: JSON.stringify({ config: collectVisualConfig() }),
+      body: JSON.stringify({ config: currentStructuredDraft() }),
     });
     state.configHash = saved.content_hash;
     const result = await api(`/configs/${state.configId}/pools/${poolId}`, {
@@ -2674,11 +3050,11 @@ async function addBenefitFromEditor(button) {
     return;
   }
 
-  const scrollTop = $("#visualConfigEditor").scrollTop;
+  const scrollTop = configEditorScrollTop();
   button.disabled = true;
   button.textContent = "正在创建文件夹…";
   try {
-    const draft = collectVisualConfig();
+    const draft = currentStructuredDraft();
     const saved = await api(`/configs/${state.configId}/structured`, {
       method: "PUT",
       body: JSON.stringify({ config: draft }),
@@ -2698,9 +3074,10 @@ async function addBenefitFromEditor(button) {
     state.library = await api(`/libraries/by-config/${state.configId}`);
     state.timeline.sliceTargets = (await api(`/libraries/by-config/${state.configId}/slice-targets`)).targets;
     $("#yamlEditor").value = state.yaml;
+    renderSimpleConfig();
     renderVisualConfig();
     if (state.timeline.analysis) renderTimeline();
-    $("#visualConfigEditor").scrollTop = scrollTop;
+    restoreActiveConfigScroll(scrollTop);
     const warning = added.warnings?.length ? `；${added.warnings.join("；")}` : "";
     toast(`${categoryLabel(added.category)}已创建，文件夹：${added.directory}${warning}`, Boolean(added.warnings?.length));
   } catch (error) {
@@ -2835,8 +3212,8 @@ async function cloneConfig() {
 async function saveConfig() {
   const button = $("#saveConfigBtn"); button.disabled = true; button.textContent = "校验中…";
   try {
-    if (state.configMode === "visual") {
-      const config = collectVisualConfig();
+    if (state.configMode !== "yaml") {
+      const config = currentStructuredDraft();
       await api(`/configs/${state.configId}/structured`, { method: "PUT", body: JSON.stringify({ config }) });
     } else {
       await api(`/configs/${state.configId}`, { method: "PUT", body: JSON.stringify({ yaml_text: $("#yamlEditor").value }) });

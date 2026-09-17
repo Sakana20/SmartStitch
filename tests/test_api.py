@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 import struct
+import subprocess
 
 import yaml
 from fastapi.testclient import TestClient
@@ -229,6 +231,70 @@ def test_generic_library_pool_api_supports_crud_and_reorder(tmp_path):
     )
     assert deleted.status_code == 200
     assert (storage / "通用项目库" / "视频库" / "pool_1").is_dir()
+
+
+def test_managed_library_can_replace_overlay_image(tmp_path):
+    (tmp_path / "config").mkdir()
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    client = TestClient(create_app(tmp_path))
+    created = client.post(
+        "/api/v1/libraries",
+        json={
+            "new_id": "overlay-library",
+            "new_name": "风险图项目",
+            "parent_directory": str(storage),
+            "folder_name": "风险图项目库",
+            "workflow_type": "generic",
+            "client_request_id": "overlay-library-request",
+        },
+    ).json()
+    image = tmp_path / "风险提示.png"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=yellow:s=80x80",
+            "-frames:v", "1", str(image),
+        ],
+        check=True,
+    )
+
+    response = client.post(
+        "/api/v1/configs/overlay-library/overlay-image",
+        json={
+            "filename": image.name,
+            "data_base64": base64.b64encode(image.read_bytes()).decode("ascii"),
+            "current_config_hash": created["content_hash"],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["filename"] == image.name
+    assert (storage / "风险图项目库" / "风险提示语图片" / image.name).is_file()
+    assert payload["config"]["benefit_overlays"]["mode"] == "required"
+
+    replacement = tmp_path / "新版提示.png"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=blue:s=80x80",
+            "-frames:v", "1", str(replacement),
+        ],
+        check=True,
+    )
+    replaced = client.post(
+        "/api/v1/configs/overlay-library/overlay-image",
+        json={
+            "filename": replacement.name,
+            "data_base64": base64.b64encode(replacement.read_bytes()).decode("ascii"),
+            "current_config_hash": payload["content_hash"],
+        },
+    )
+    assert replaced.status_code == 200
+    assert len(replaced.json()["backups"]) == 1
+    assert not (storage / "风险图项目库" / "风险提示语图片" / image.name).exists()
+    assert (storage / "风险图项目库" / "风险提示语图片" / replacement.name).is_file()
 
 
 def test_directory_picker_api_returns_selected_path(tmp_path, monkeypatch):
