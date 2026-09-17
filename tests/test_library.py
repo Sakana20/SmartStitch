@@ -134,6 +134,48 @@ def test_create_generic_library_starts_empty_and_uses_independent_layout(tmp_pat
     assert config.benefit_overlays.timing.scope == "full"
 
 
+def test_create_library_uses_selected_empty_directory_when_name_matches(tmp_path):
+    store = ConfigStore(tmp_path / "config")
+    service = LibraryService(store)
+    selected = tmp_path / "通用视频项目库"
+    selected.mkdir()
+    (selected / ".DS_Store").write_text("finder metadata", encoding="utf-8")
+    request = create_generic_request(selected)
+
+    preflight = service.preflight(
+        LibraryPreflightRequest(
+            parent_directory=str(selected),
+            folder_name="通用视频项目库",
+            workflow_type="generic",
+        )
+    )
+    result = service.create(request)
+
+    assert preflight["root_path"] == str(selected)
+    assert preflight["uses_selected_directory"] is True
+    assert result["root_path"] == str(selected)
+    assert not (selected / "通用视频项目库").exists()
+    assert (selected / ".DS_Store").read_text(encoding="utf-8") == "finder metadata"
+    assert all((selected / relative).is_dir() for relative in GENERIC_DIRECTORIES)
+    assert store.load("generic-video").source_root == str(selected)
+
+
+def test_preflight_rejects_nonempty_selected_directory_when_name_matches(tmp_path):
+    service = LibraryService(ConfigStore(tmp_path / "config"))
+    selected = tmp_path / "已有项目"
+    selected.mkdir()
+    (selected / "现有素材.mp4").write_bytes(b"video")
+
+    with pytest.raises(LibraryConflictError, match="其中已有内容"):
+        service.preflight(
+            LibraryPreflightRequest(
+                parent_directory=str(selected),
+                folder_name="已有项目",
+                workflow_type="generic",
+            )
+        )
+
+
 def test_inspect_upgrades_generic_library_with_overlay_directory(tmp_path):
     store = ConfigStore(tmp_path / "config")
     service = LibraryService(store)

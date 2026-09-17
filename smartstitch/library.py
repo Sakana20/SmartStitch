@@ -64,6 +64,7 @@ GENERIC_DIRECTORIES = (
 INVALID_FOLDER_CHARACTERS = re.compile(r'[<>:"/\\|?*\x00]')
 OVERLAY_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 MAX_OVERLAY_IMAGE_BYTES = 20 * 1024 * 1024
+IGNORABLE_SELECTED_ROOT_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 
 class LibraryError(ValueError):
@@ -85,6 +86,11 @@ def _safe_folder_name(value: str) -> str:
     if name in {".", ".."} or INVALID_FOLDER_CHARACTERS.search(name):
         raise LibraryError("视频库文件夹名包含非法字符")
     return name
+
+
+def _library_root(parent: Path, folder_name: str) -> tuple[Path, bool]:
+    use_selected_directory = parent.name.casefold() == folder_name.casefold()
+    return (parent if use_selected_directory else parent / folder_name), use_selected_directory
 
 
 def open_directory_in_file_manager(path: Path) -> dict[str, Any]:
@@ -261,10 +267,22 @@ class LibraryService:
             raise LibraryError("保存位置不是文件夹")
         if not os.access(parent, os.W_OK | os.X_OK):
             raise LibraryError(f"保存位置不可写: {parent}")
-        root = parent / name
-        if root.parent != parent:
+        root, use_selected_directory = _library_root(parent, name)
+        if not use_selected_directory and root.parent != parent:
             raise LibraryError("视频库必须是保存位置的直接子目录")
-        if root.exists() or root.is_symlink():
+        if use_selected_directory:
+            occupied = sorted(
+                item.name
+                for item in root.iterdir()
+                if item.name not in IGNORABLE_SELECTED_ROOT_NAMES
+            )
+            if occupied:
+                preview = "、".join(occupied[:3])
+                suffix = "等" if len(occupied) > 3 else ""
+                raise LibraryConflictError(
+                    f"所选文件夹将直接作为视频库，但其中已有内容: {preview}{suffix}"
+                )
+        elif root.exists() or root.is_symlink():
             raise LibraryConflictError(f"同名视频库已存在: {root}")
         return {
             "ok": True,
@@ -272,6 +290,7 @@ class LibraryService:
             "parent_directory": str(parent),
             "folder_name": name,
             "root_path": str(root),
+            "uses_selected_directory": use_selected_directory,
             "directories": [
                 str(path) for path in _directories_for(request.workflow_type)
             ],
@@ -286,13 +305,13 @@ class LibraryService:
             if not parent.is_absolute():
                 raise LibraryError("保存位置必须是绝对路径")
             parent = parent.resolve()
-            root = parent / name
+            root, use_selected_directory = _library_root(parent, name)
 
             existing = self._idempotent_create_result(root, request)
             if existing is not None:
                 return existing
 
-            self.preflight(
+            preflight = self.preflight(
                 LibraryPreflightRequest(
                     parent_directory=str(parent),
                     folder_name=name,
@@ -302,22 +321,28 @@ class LibraryService:
             if self.config_store.path_for(request.new_id).exists():
                 raise LibraryConflictError(f"配置已存在: {request.new_id}")
 
-            temporary = Path(tempfile.mkdtemp(prefix=".smartstitch-create-", dir=parent))
-            committed = False
+            temporary = (
+                root
+                if use_selected_directory
+                else Path(tempfile.mkdtemp(prefix=".smartstitch-create-", dir=parent))
+            )
+            committed = use_selected_directory
             try:
+                marker = _marker_payload(request)
+                (temporary / MARKER_PATH.parent).mkdir(parents=True, exist_ok=True)
+                _write_json_atomic(temporary / MARKER_PATH, marker)
                 for relative in _directories_for(request.workflow_type):
                     (temporary / relative).mkdir(parents=True, exist_ok=True)
-                marker = _marker_payload(request)
-                _write_json_atomic(temporary / MARKER_PATH, marker)
                 config = (
                     _generic_config(request, root)
                     if request.workflow_type == "generic"
                     else _standard_config(request, root)
                 )
-                if root.exists() or root.is_symlink():
-                    raise LibraryConflictError(f"同名视频库已存在: {root}")
-                temporary.rename(root)
-                committed = True
+                if not preflight["uses_selected_directory"]:
+                    if root.exists() or root.is_symlink():
+                        raise LibraryConflictError(f"同名视频库已存在: {root}")
+                    temporary.rename(root)
+                    committed = True
                 self.config_store.create_config(config)
             except Exception:
                 cleanup_target = root if committed else temporary
@@ -970,7 +995,14 @@ class LibraryService:
         unexpected = [
             path
             for path in root.rglob("*")
-            if (path.is_file() or path.is_symlink()) and path != marker_path
+            if (
+                (path.is_file() or path.is_symlink())
+                and path != marker_path
+                and not (
+                    path.parent == root
+                    and path.name in IGNORABLE_SELECTED_ROOT_NAMES
+                )
+            )
         ]
         if unexpected:
             return

@@ -9,10 +9,12 @@ const context = { document: { addEventListener() {} } };
 vm.createContext(context);
 vm.runInContext(`${app}
 globalThis.__normalizePathInput = normalizePathInput;
+globalThis.__libraryTargetPath = libraryTargetPath;
 globalThis.__timelineState = state.timeline;
 globalThis.__filteredTimelineSourceIndexes = filteredTimelineSourceIndexes;`, context);
 
 const normalize = context.__normalizePathInput;
+const libraryTarget = context.__libraryTargetPath;
 const pathname = "/Volumes/Elements SE/陈鼎琦/原始视频/26 室友要喝我的奶茶 #剧情演绎.mp4";
 
 assert.equal(normalize(`'${pathname}'`), pathname);
@@ -21,6 +23,19 @@ assert.equal(normalize(`“${pathname}”`), pathname);
 assert.equal(normalize(pathname), pathname);
 assert.equal(normalize("  '/tmp/有 空格.mp4'\n"), "/tmp/有 空格.mp4");
 assert.equal(normalize("/tmp/文件'名.mp4"), "/tmp/文件'名.mp4");
+assert.equal(
+  libraryTarget("/Volumes/home/红果短剧一口价二剪", "红果短剧一口价二剪"),
+  "/Volumes/home/红果短剧一口价二剪",
+);
+assert.equal(
+  libraryTarget("/Volumes/home", "红果短剧一口价二剪"),
+  "/Volumes/home/红果短剧一口价二剪",
+);
+assert.equal(
+  libraryTarget("C:\\Video\\商品库", "商品库"),
+  "C:\\Video\\商品库",
+);
+assert.equal(libraryTarget("", ""), "");
 
 context.__timelineState.sourceVideos = [
   { name: "第1集-开场.mp4", path: "/tmp/1.mp4" },

@@ -9,7 +9,7 @@ const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260917-28"/,
+  /href="\/styles\.css\?v=20260917-29"/,
   "源视频切换样式更新后必须刷新 CSS 缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -105,6 +105,11 @@ assert.match(
   html,
   /id="newWorkflowType"[\s\S]*value="taobao_flash"[\s\S]*value="generic"/,
   "新建项目库时必须允许选择淘宝闪购或通用模式",
+);
+assert.match(
+  app,
+  /function libraryTargetPath[\s\S]*parentName\.toLocaleLowerCase\(\) === folder\.toLocaleLowerCase\(\)[\s\S]*不再创建同名子目录/,
+  "保存位置与项目文件夹同名时不得预览为双层目录",
 );
 assert.match(
   app,

@@ -90,6 +90,16 @@ function normalizePathField(input) {
   return normalized;
 }
 
+function libraryTargetPath(parentDirectory, folderName) {
+  const parent = normalizePathInput(parentDirectory).replace(/[\\/]+$/, "");
+  const folder = String(folderName ?? "").trim();
+  if (!parent || !folder) return "";
+  const parentName = parent.split(/[\\/]/).pop() || "";
+  if (parentName.toLocaleLowerCase() === folder.toLocaleLowerCase()) return parent;
+  const separator = parent.includes("\\") && !parent.includes("/") ? "\\" : "/";
+  return `${parent}${separator}${folder}`;
+}
+
 function clientRequestId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
@@ -2080,13 +2090,16 @@ function updateLibraryCreatePreview() {
   const parent = normalizePathInput($("#newLibraryParentInput").value);
   const workflowType = $("#newWorkflowType").value;
   const complete = /^[a-z0-9][a-z0-9-]*$/.test(newId) && newName && folder && parent;
+  const finalPath = libraryTargetPath(parent, folder);
+  const usesSelectedDirectory = Boolean(finalPath) && finalPath === parent.replace(/[\\/]+$/, "");
   $("#createConfigBtn").disabled = !complete;
-  $("#newLibraryFinalPath").textContent = parent && folder
-    ? `${parent.replace(/\/+$/, "")}/${folder}`
-    : "请先选择保存位置";
-  $("#newLibraryDirectorySummary").textContent = workflowType === "generic"
+  $("#newLibraryFinalPath").textContent = finalPath || "请先选择保存位置";
+  const directorySummary = workflowType === "generic"
     ? "将创建：原始视频 / 视频库 / 未归类 / 风险提示语图片 / 成片输出 / 工作记录；具体视频库由你随后添加"
     : "将创建：原始视频 / 切片素材 / 前贴 / 引子 / 利益点 / 结尾 / 尾帧 / 未归类 / 风险提示语图片 / 成片输出 / 工作记录";
+  $("#newLibraryDirectorySummary").textContent = usesSelectedDirectory
+    ? `将直接使用所选空文件夹，不再创建同名子目录；${directorySummary}`
+    : directorySummary;
 }
 
 async function chooseLibraryParent() {
