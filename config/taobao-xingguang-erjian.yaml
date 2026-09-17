@@ -4,7 +4,7 @@ id: taobao-xingguang-erjian
 name: 淘宝闪购-星广一口价二剪
 enabled: true
 description: SmartStitch 标准视频库
-source_root: /Volumes/Elements SE/陈鼎琦/饿了么整理/素材/星广一口价二剪
+source_root: /Volumes/home/Smartstitch/星广一口价二剪
 timeline:
 - pre_roll
 - hook
@@ -16,7 +16,7 @@ sources:
     label: ''
     description: ''
     mode: required
-    directory: /Volumes/home/星广一口价二剪/切片素材/前贴
+    directory: 切片素材/前贴
     extensions:
     - .mp4
     - .mov
@@ -28,7 +28,7 @@ sources:
     label: ''
     description: ''
     mode: required
-    directory: /Volumes/home/星广一口价二剪/切片素材/引子
+    directory: 切片素材/引子
     extensions:
     - .mp4
     default_weight: 1.0
@@ -38,7 +38,7 @@ sources:
     label: ''
     description: ''
     mode: required
-    directory: /Volumes/home/星广一口价二剪/切片素材/利益点/1
+    directory: 切片素材/利益点/1
     extensions:
     - .mp4
     default_weight: 1.0
@@ -48,7 +48,7 @@ sources:
     label: ''
     description: ''
     mode: required
-    directory: /Volumes/home/星广一口价二剪/切片素材/结尾
+    directory: 切片素材/结尾
     extensions:
     - .mp4
     default_weight: 1.0
@@ -92,7 +92,7 @@ randomization:
   duplicate_policy: best_effort
   default_seed: null
 output:
-  directory: /Volumes/Elements SE/陈鼎琦/饿了么整理/素材/星广一口价二剪/成片输出
+  directory: /Volumes/home/Smartstitch/星广一口价二剪/成片输出
   width: 720
   height: 1280
   fps: 30.0
