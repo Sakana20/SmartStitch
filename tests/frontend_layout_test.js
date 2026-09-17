@@ -9,7 +9,7 @@ const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260917-22"/,
+  /href="\/styles\.css\?v=20260917-28"/,
   "源视频切换样式更新后必须刷新 CSS 缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -28,7 +28,7 @@ assert.match(
 );
 assert.match(
   app,
-  /function renderSimpleConfig\(\)[\s\S]*这是哪个项目[\s\S]*要不要显示风险提示语[\s\S]*视频按什么顺序拼接[\s\S]*成片想要什么效果[\s\S]*组合重复规则/,
+  /function renderSimpleConfig\(\)[\s\S]*simple-half-card[\s\S]*simple-half-card[\s\S]*simple-wide-card[\s\S]*simple-wide-card[\s\S]*组合重复规则/,
   "简单模式必须使用大区块展示核心配置逻辑",
 );
 assert.match(
@@ -38,8 +38,28 @@ assert.match(
 );
 assert.match(
   app,
+  /function restoreConfigUiPreferences\(\)\s*\{[\s\S]*applyAdvancedSectionPreferences\(preferences\);[\s\S]*setConfigMode\("simple"\);/,
+  "每次打开配置管理必须默认进入简单模式",
+);
+assert.match(
+  app,
   /simpleOverlayFile[\s\S]*uploadOverlayImage[\s\S]*\/overlay-image/,
   "简单模式必须支持直接更换风险提示语图片",
+);
+assert.doesNotMatch(
+  app,
+  /copyOverlayDirectoryBtn|复制图片文件夹位置/,
+  "简单模式不应显示复制风险提示语图片文件夹入口",
+);
+assert.match(
+  css,
+  /\.simple-half-card \.simple-overlay-row\s*\{[^}]*align-items:\s*start/,
+  "风险提示语图片选择按钮必须与左侧状态框顶部对齐",
+);
+assert.match(
+  css,
+  /\.simple-half-card \.simple-overlay-actions label\.button\s*\{[^}]*flex:\s*1/,
+  "风险提示语图片选择按钮必须拉伸到与左侧状态框等高",
 );
 assert.match(
   app,
@@ -50,6 +70,31 @@ assert.doesNotMatch(
   app,
   /simpleConfigEnabled/,
   "简单模式不应展示意义不明确的配置启用开关",
+);
+assert.doesNotMatch(
+  app,
+  /data-simple-source-mode|simpleSourceModeOptions/,
+  "简单模式的视频库不应继续展示使用规则下拉框",
+);
+assert.match(
+  app,
+  /data-simple-source-enabled=.*data-active-mode=.*group\.mode !== "disabled"/,
+  "简单模式必须用开关控制视频库是否参与拼接",
+);
+assert.match(
+  app,
+  /data-open-source-directory[\s\S]*\/sources\/\$\{category\}\/open-directory/,
+  "简单模式必须显示可点击的视频库文件夹名称",
+);
+assert.doesNotMatch(
+  app,
+  /configSourceModeSwitch|data-config-type="source-mode"/,
+  "高级模式不应被简单模式的二态开关取代",
+);
+assert.match(
+  app,
+  /configSelect\("使用方式", `sources\.\$\{category\}\.mode`, group\.mode, modeChoices\)/,
+  "高级模式必须保留必需、可选和停用的详细设置",
 );
 assert.match(
   css,

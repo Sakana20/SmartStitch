@@ -165,7 +165,7 @@ def test_create_managed_library_and_add_benefit(tmp_path):
     assert (storage / "商品 视频库" / "切片素材" / "利益点" / "2").is_dir()
 
 
-def test_generic_library_pool_api_supports_crud_and_reorder(tmp_path):
+def test_generic_library_pool_api_supports_crud_and_reorder(tmp_path, monkeypatch):
     (tmp_path / "config").mkdir()
     storage = tmp_path / "storage"
     storage.mkdir()
@@ -200,6 +200,22 @@ def test_generic_library_pool_api_supports_crud_and_reorder(tmp_path):
         },
     )
     assert second.status_code == 200
+
+    opened_directories = []
+
+    def fake_open_directory(path):
+        opened_directories.append(path)
+        return {"ok": True, "path": str(path), "manager": "Finder"}
+
+    monkeypatch.setattr(
+        "smartstitch.library.open_directory_in_file_manager", fake_open_directory
+    )
+    opened = client.post(
+        "/api/v1/configs/generic-library/sources/pool_2/open-directory"
+    )
+    assert opened.status_code == 200
+    assert opened.json()["folder_name"] == "pool_2"
+    assert opened_directories == [storage / "通用项目库" / "视频库" / "pool_2"]
 
     renamed = client.patch(
         "/api/v1/configs/generic-library/pools/pool_2",

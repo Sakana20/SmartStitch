@@ -108,6 +108,15 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
         except (LibraryError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.post("/api/v1/configs/{config_id}/sources/{category}/open-directory")
+    def open_source_directory(config_id: str, category: str) -> dict[str, object]:
+        try:
+            return library_service.open_source_directory(config_id, category)
+        except (ConfigError, FileNotFoundError) as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except (LibraryError, OSError, subprocess.SubprocessError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.post("/api/v1/configs/{config_id}/benefits")
     def add_benefit(config_id: str, request: AddBenefitRequest) -> dict[str, object]:
         try:

@@ -2249,7 +2249,6 @@ function saveConfigUiPreferences() {
     sections[section.dataset.configSection] = section.open;
   });
   const preferences = {
-    mode: state.configMode,
     sections,
     simpleScrollTop: $("#simpleConfigEditor")?.scrollTop || 0,
     visualScrollTop: $("#visualConfigEditor")?.scrollTop || 0,
@@ -2261,8 +2260,7 @@ function saveConfigUiPreferences() {
 function restoreConfigUiPreferences() {
   const preferences = readConfigUiPreferences();
   applyAdvancedSectionPreferences(preferences);
-  const savedMode = preferences.mode === "visual" ? "advanced" : preferences.mode;
-  setConfigMode(["simple", "advanced", "yaml"].includes(savedMode) ? savedMode : "simple");
+  setConfigMode("simple");
 }
 
 function applyAdvancedSectionPreferences(preferences) {
@@ -2278,14 +2276,6 @@ function restoreConfigEditorScroll() {
   if ($("#simpleConfigEditor")) $("#simpleConfigEditor").scrollTop = Number(preferences.simpleScrollTop || 0);
   if ($("#visualConfigEditor")) $("#visualConfigEditor").scrollTop = Number(preferences.visualScrollTop || 0);
   if ($("#yamlEditor")) $("#yamlEditor").scrollTop = Number(preferences.yamlScrollTop || 0);
-}
-
-function simpleSourceModeOptions(selected) {
-  return [
-    ["required", "每条视频必须有"],
-    ["optional", "有素材时使用"],
-    ["disabled", "暂不使用"],
-  ].map(([value, label]) => `<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("");
 }
 
 function simpleOutputPreset(output) {
@@ -2323,6 +2313,7 @@ function renderSimpleConfig() {
     const group = config.sources[category];
     const count = state.scan?.assets?.[category]?.length ?? 0;
     const label = group.label?.trim() || categoryLabel(category);
+    const folderName = String(group.directory || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || group.directory;
     const canDelete = generic || (isBenefitCategory(category) && benefitCategories.length > 1);
     const canMove = generic || isBenefitCategory(category);
     const draggable = generic || isBenefitCategory(category);
@@ -2337,9 +2328,10 @@ function renderSimpleConfig() {
             : `<strong>${escapeHtml(label)}</strong>`}
           <div class="simple-source-meta"><span class="${count ? "has-assets" : ""}">${count ? `${count} 个素材可用` : "还没有素材"}</span></div>
         </div>
-        <label class="simple-source-mode">
-          <span>使用规则</span>
-          <select data-simple-source-mode="${escapeHtml(category)}">${simpleSourceModeOptions(group.mode)}</select>
+        <button type="button" class="text-btn simple-source-directory" data-open-source-directory="${escapeHtml(category)}" title="打开文件夹：${escapeHtml(group.directory)}">${escapeHtml(folderName)} ↗</button>
+        <label class="simple-source-switch">
+          <span>参与拼接</span>
+          <input class="switch-input" type="checkbox" data-simple-source-enabled="${escapeHtml(category)}" data-active-mode="${group.mode === "disabled" ? "required" : group.mode}" ${group.mode !== "disabled" ? "checked" : ""}>
         </label>
         ${canMove ? `<div class="simple-source-actions">
           <button type="button" class="text-btn" data-simple-source-action="up" data-simple-source-id="${escapeHtml(category)}" ${movableIndex <= 0 ? "disabled" : ""}>上移</button>
@@ -2396,7 +2388,6 @@ function renderSimpleConfig() {
           <div class="simple-overlay-status ${overlayAsset ? "has-file" : ""}"><i></i><div><strong>${escapeHtml(overlayName)}</strong><span>${escapeHtml(overlayStatus)}</span></div></div>
           <div class="simple-overlay-actions">
             <label class="button secondary ${state.library?.managed ? "" : "disabled"}">${overlayAsset ? "更换图片" : "选择图片"}<input id="simpleOverlayFile" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp" ${state.library?.managed ? "" : "disabled"}></label>
-            <button id="copyOverlayDirectoryBtn" class="text-btn" type="button">复制图片文件夹位置</button>
           </div>
         </div>
         <div class="simple-timing-settings ${overlayEnabled ? "" : "hidden"}">
@@ -2456,9 +2447,23 @@ function bindSimpleConfigControls() {
   $$('[data-simple-source-name]').forEach(input => input.addEventListener("input", () => {
     state.configDraft.sources[input.dataset.simpleSourceName].label = input.value;
   }));
-  $$('[data-simple-source-mode]').forEach(select => select.addEventListener("change", () => {
-    state.configDraft.sources[select.dataset.simpleSourceMode].mode = select.value;
-    renderSimpleConfig();
+  $$('[data-simple-source-enabled]').forEach(input => input.addEventListener("change", () => {
+    const category = input.dataset.simpleSourceEnabled;
+    state.configDraft.sources[category].mode = input.checked ? input.dataset.activeMode : "disabled";
+    input.closest(".simple-source-card")?.classList.toggle("is-disabled", !input.checked);
+  }));
+  $$('[data-open-source-directory]').forEach(button => button.addEventListener("click", async event => {
+    event.stopPropagation();
+    button.disabled = true;
+    try {
+      const category = encodeURIComponent(button.dataset.openSourceDirectory);
+      const result = await api(`/configs/${state.configId}/sources/${category}/open-directory`, { method: "POST" });
+      toast(`已在${result.manager}中打开 ${result.folder_name}`);
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
   }));
   $("#simpleAddPoolBtn")?.addEventListener("click", event => addPoolFromEditor(event.currentTarget));
   $("#simpleAddBenefitBtn")?.addEventListener("click", event => addBenefitFromEditor(event.currentTarget));
@@ -2521,7 +2526,6 @@ function bindSimpleConfigControls() {
     state.configDraft.benefit_overlays.timing.end_seconds = event.target.value === "" ? null : Number(event.target.value);
   });
   $("#simpleOverlayFile")?.addEventListener("change", event => uploadOverlayImage(event.target.files?.[0], event.target));
-  $("#copyOverlayDirectoryBtn")?.addEventListener("click", copyOverlayDirectory);
 
   $("#simpleLoudnessEnabled")?.addEventListener("change", event => {
     state.configDraft.output.loudness.enabled = event.target.checked;

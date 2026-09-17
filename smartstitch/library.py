@@ -87,6 +87,44 @@ def _safe_folder_name(value: str) -> str:
     return name
 
 
+def open_directory_in_file_manager(path: Path) -> dict[str, Any]:
+    directory = path.expanduser().resolve()
+    if not directory.exists() or not directory.is_dir():
+        raise LibraryError(f"视频库文件夹不存在: {directory}")
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            subprocess.Popen(
+                ["open", str(directory)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            manager = "Finder"
+        elif system == "Windows":
+            startfile = getattr(os, "startfile", None)
+            if callable(startfile):
+                startfile(str(directory))
+            else:
+                subprocess.Popen(
+                    ["explorer", str(directory)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            manager = "资源管理器"
+        elif system == "Linux":
+            subprocess.Popen(
+                ["xdg-open", str(directory)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            manager = "文件管理器"
+        else:
+            raise LibraryError("当前系统不支持自动打开视频库文件夹")
+    except OSError as exc:
+        raise LibraryError(f"无法打开视频库文件夹: {exc}") from exc
+    return {"ok": True, "path": str(directory), "manager": manager}
+
+
 def _within(root: Path, target: Path) -> bool:
     try:
         target.resolve().relative_to(root.resolve())
@@ -694,6 +732,19 @@ class LibraryService:
                 }
             )
         return targets
+
+    def open_source_directory(self, config_id: str, category: str) -> dict[str, Any]:
+        config = self.config_store.load(config_id)
+        group = config.sources.get(category)
+        if group is None:
+            raise LibraryError(f"配置中不存在视频库: {category}")
+        directory = resolve_directory(config, group.directory)
+        result = open_directory_in_file_manager(directory)
+        return {
+            **result,
+            "category": category,
+            "folder_name": directory.name,
+        }
 
     def resolve_slice_target(self, config_id: str, category: str) -> Path:
         config = self.config_store.load(config_id)
