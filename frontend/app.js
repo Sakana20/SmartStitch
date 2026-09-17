@@ -26,9 +26,11 @@ const state = {
     machineBreakpoints: [],
     audioLocked: true,
     selectedFrame: null,
+    selectedFrames: [],
     playheadFrame: 0,
     dragging: false,
     drag: null,
+    marquee: null,
     snapTargetFrame: null,
     suppressClickUntil: 0,
     videoFrameCallbackId: null,
@@ -249,7 +251,7 @@ function bindTimelineEvents() {
   $("#previousFrameBtn").addEventListener("click", () => stepTimelineFrame(-1));
   $("#nextFrameBtn").addEventListener("click", () => stepTimelineFrame(1));
   $("#addBreakpointBtn").addEventListener("click", addBreakpointAtPlayhead);
-  $("#deleteBreakpointBtn").addEventListener("click", deleteSelectedBreakpoint);
+  $("#deleteBreakpointBtn").addEventListener("click", deleteSelectedBreakpoints);
   $("#sliceTimelineBtn").addEventListener("click", exportTimelineSlices);
   $("#mergeSegmentsBtn").addEventListener("click", mergeSelectedSliceUnits);
   $("#clearMergeSelectionBtn").addEventListener("click", clearMergeSelection);
@@ -276,6 +278,7 @@ function bindTimelineEvents() {
     seekTimelineFrame(frame, "timeline_scrub");
     beginTimelineDrag(event, { kind: "playhead", anchorFrame: frame });
   });
+  $("#timelineMarqueeLane").addEventListener("pointerdown", beginTimelineMarquee);
   const timelineViewport = $("#timelineViewport");
   timelineViewport.addEventListener("scroll", () => {
     renderTimelineRuler();
@@ -322,9 +325,9 @@ function bindTimelineEvents() {
       return;
     }
     if (isEditing) return;
-    if (["Delete", "Backspace"].includes(event.key) && state.timeline.selectedFrame !== null) {
+    if (["Delete", "Backspace"].includes(event.key) && state.timeline.selectedFrames.length) {
       event.preventDefault();
-      deleteSelectedBreakpoint();
+      deleteSelectedBreakpoints();
       return;
     }
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
@@ -418,6 +421,7 @@ function clearTimelineAnalysisView() {
   state.timeline.breakpoints = [];
   state.timeline.machineBreakpoints = [];
   state.timeline.selectedFrame = null;
+  state.timeline.selectedFrames = [];
   state.timeline.playheadFrame = 0;
   state.timeline.reviewSaved = false;
   state.timeline.reviewRevision = null;
@@ -555,6 +559,7 @@ async function analyzeTimelineSource(sourceIndex) {
   }));
   state.timeline.machineBreakpoints = analysis.breakpoints.map(point => ({ ...point }));
   state.timeline.selectedFrame = null;
+  state.timeline.selectedFrames = [];
   state.timeline.playheadFrame = 0;
   state.timeline.snapTargetFrame = null;
   state.timeline.reviewSaved = false;
@@ -603,15 +608,10 @@ function toggleTimelineAudioLock() {
   const analysis = state.timeline.analysis;
   if (!analysis?.audio?.has_audio) return;
   state.timeline.audioLocked = !state.timeline.audioLocked;
-  if (
-    state.timeline.audioLocked
-    && state.timeline.selectedFrame !== null
-  ) {
-    const selected = state.timeline.breakpoints.find(
-      point => point.frame_index === state.timeline.selectedFrame,
-    );
-    if (TimelineMath.isAudioOnlyBreakpoint(selected)) state.timeline.selectedFrame = null;
-  }
+  const activeFrames = new Set(timelineActiveBreakpoints().map(point => point.frame_index));
+  setSelectedBreakpointFrames(
+    state.timeline.selectedFrames.filter(frame => activeFrames.has(frame)),
+  );
   state.timeline.selectedSegmentId = null;
   timelineReviewChanged();
   renderTimeline();
@@ -670,8 +670,9 @@ function renderTimeline() {
   }).join("");
   const audioLocked = state.timeline.audioLocked;
   const activeBreakpoints = timelineActiveBreakpoints();
+  const selectedFrames = new Set(state.timeline.selectedFrames);
   const markerHtml = (point, lane = "") => `
-    <button class="timeline-marker ${point.frame_index === state.timeline.selectedFrame ? "selected" : ""} ${point.frame_index === state.timeline.snapTargetFrame ? "snap-target" : ""} ${point.review_status === "machine_suggested" ? "machine" : "human"}"
+    <button class="timeline-marker ${selectedFrames.has(point.frame_index) ? "selected" : ""} ${point.frame_index === state.timeline.snapTargetFrame ? "snap-target" : ""} ${point.review_status === "machine_suggested" ? "machine" : "human"}"
       style="left:${timelineXForFrame(point.frame_index)}px" data-frame="${point.frame_index}" data-lane="${lane}"
       ${lane === "A" && audioLocked ? "disabled aria-disabled=\"true\"" : ""}
       aria-label="${lane === "V" ? "画面转场" : lane === "A" ? "语音停顿" : "人工"}断点，第 ${point.frame_index} 帧"
@@ -973,6 +974,86 @@ function toggleTimelinePlayback() {
   }
 }
 
+function setSelectedBreakpointFrames(frames) {
+  const available = new Set(state.timeline.breakpoints.map(point => point.frame_index));
+  const selected = [...new Set(frames)]
+    .filter(frame => available.has(frame))
+    .sort((first, second) => first - second);
+  state.timeline.selectedFrames = selected;
+  state.timeline.selectedFrame = selected.length === 1 ? selected[0] : null;
+  state.timeline.selectedSegmentId = null;
+}
+
+function clampTimelineX(clientX) {
+  const canvas = $("#timelineCanvas");
+  const x = timelineXFromClientX(clientX);
+  return Math.max(0, Math.min(canvas.getBoundingClientRect().width, x));
+}
+
+function beginTimelineMarquee(event) {
+  if (event.button !== 0 || !state.timeline.analysis || state.timeline.drag || state.timeline.marquee) return;
+  event.preventDefault();
+  const startX = clampTimelineX(event.clientX);
+  const captureTarget = event.currentTarget;
+  try { captureTarget.setPointerCapture(event.pointerId); } catch (_) {}
+  state.timeline.marquee = {
+    pointerId: event.pointerId,
+    captureTarget,
+    startX,
+    currentX: startX,
+    moved: false,
+  };
+  setSelectedBreakpointFrames([]);
+  syncSelectedBreakpointControls();
+  $$(".timeline-marker.selected").forEach(marker => marker.classList.remove("selected"));
+  window.addEventListener("pointermove", handleTimelineMarqueeMove);
+  window.addEventListener("pointerup", finishTimelineMarquee);
+  window.addEventListener("pointercancel", finishTimelineMarquee);
+  window.addEventListener("blur", finishTimelineMarquee);
+}
+
+function handleTimelineMarqueeMove(event) {
+  const marquee = state.timeline.marquee;
+  if (!marquee || (event.pointerId !== undefined && event.pointerId !== marquee.pointerId)) return;
+  event.preventDefault();
+  marquee.currentX = clampTimelineX(event.clientX);
+  if (Math.abs(marquee.currentX - marquee.startX) >= 3) marquee.moved = true;
+  if (!marquee.moved) return;
+
+  const left = Math.min(marquee.startX, marquee.currentX);
+  const right = Math.max(marquee.startX, marquee.currentX);
+  const box = $("#timelineMarqueeBox");
+  box.style.left = `${left}px`;
+  box.style.width = `${Math.max(1, right - left)}px`;
+  box.classList.remove("hidden");
+
+  setSelectedBreakpointFrames(TimelineMath.breakpointFramesInPixelRange({
+    breakpoints: timelineActiveBreakpoints(),
+    startX: marquee.startX,
+    endX: marquee.currentX,
+    pixelsPerSecond: state.timeline.pixelsPerSecond,
+    fps: state.timeline.analysis.fps,
+  }));
+  const selected = new Set(state.timeline.selectedFrames);
+  $$(".timeline-marker").forEach(marker => {
+    marker.classList.toggle("selected", selected.has(Number(marker.dataset.frame)));
+  });
+  syncSelectedBreakpointControls();
+}
+
+function finishTimelineMarquee(event) {
+  const marquee = state.timeline.marquee;
+  if (!marquee || (event?.pointerId !== undefined && event.pointerId !== marquee.pointerId)) return;
+  window.removeEventListener("pointermove", handleTimelineMarqueeMove);
+  window.removeEventListener("pointerup", finishTimelineMarquee);
+  window.removeEventListener("pointercancel", finishTimelineMarquee);
+  window.removeEventListener("blur", finishTimelineMarquee);
+  try { marquee.captureTarget.releasePointerCapture(marquee.pointerId); } catch (_) {}
+  state.timeline.marquee = null;
+  $("#timelineMarqueeBox").classList.add("hidden");
+  renderTimeline();
+}
+
 function bindTimelineMarker(marker) {
   marker.addEventListener("click", event => {
     event.stopPropagation();
@@ -987,8 +1068,7 @@ function bindTimelineMarker(marker) {
     const originalFrame = Number(marker.dataset.frame);
     const point = state.timeline.breakpoints.find(item => item.frame_index === originalFrame);
     if (!point) return;
-    state.timeline.selectedFrame = originalFrame;
-    state.timeline.selectedSegmentId = null;
+    setSelectedBreakpointFrames([originalFrame]);
     marker.classList.add("selected");
     syncSelectedBreakpointControls();
     beginTimelineDrag(event, { kind: "breakpoint", anchorFrame: originalFrame, point });
@@ -1103,17 +1183,17 @@ function finishTimelineDrag(event) {
       item => item !== drag.point && item.frame_index === drag.targetFrame,
     );
     if (occupied) {
-      state.timeline.selectedFrame = occupied.frame_index;
+      setSelectedBreakpointFrames([occupied.frame_index]);
     } else if (drag.targetFrame !== drag.originalFrame) {
       drag.point.frame_index = drag.targetFrame;
       drag.point.time_seconds = drag.targetFrame / state.timeline.analysis.fps;
       drag.point.review_status = "human_adjusted";
       drag.point.reasons = ["human_adjusted"];
-      state.timeline.selectedFrame = drag.targetFrame;
+      setSelectedBreakpointFrames([drag.targetFrame]);
       sortTimelineBreakpoints();
       timelineReviewChanged();
     } else {
-      state.timeline.selectedFrame = drag.originalFrame;
+      setSelectedBreakpointFrames([drag.originalFrame]);
     }
   }
 
@@ -1288,8 +1368,7 @@ function addTimelineBreakpoint(frame, reviewStatus) {
     review_status: reviewStatus,
   });
   sortTimelineBreakpoints();
-  state.timeline.selectedFrame = frame;
-  state.timeline.selectedSegmentId = null;
+  setSelectedBreakpointFrames([frame]);
   timelineReviewChanged();
   renderTimeline();
 }
@@ -1305,19 +1384,20 @@ function moveSelectedBreakpoint(frame) {
   point.time_seconds = frame / analysis.fps;
   point.review_status = "human_adjusted";
   point.reasons = ["human_adjusted"];
-  state.timeline.selectedFrame = frame;
+  setSelectedBreakpointFrames([frame]);
   sortTimelineBreakpoints();
-  state.timeline.selectedSegmentId = null;
   timelineReviewChanged();
   seekTimelineFrame(frame);
   renderTimeline();
 }
 
-function deleteSelectedBreakpoint() {
-  const frame = state.timeline.selectedFrame;
-  if (frame === null) return;
-  state.timeline.breakpoints = state.timeline.breakpoints.filter(point => point.frame_index !== frame);
-  state.timeline.selectedFrame = null;
+function deleteSelectedBreakpoints() {
+  const selected = new Set(state.timeline.selectedFrames);
+  if (!selected.size) return;
+  state.timeline.breakpoints = state.timeline.breakpoints.filter(
+    point => !selected.has(point.frame_index),
+  );
+  setSelectedBreakpointFrames([]);
   timelineReviewChanged();
   renderTimeline();
 }
@@ -1346,8 +1426,7 @@ function timelineReviewChanged() {
 }
 
 function selectTimelineBreakpoint(frame) {
-  state.timeline.selectedFrame = frame;
-  state.timeline.selectedSegmentId = null;
+  setSelectedBreakpointFrames([frame]);
   renderTimeline();
 }
 
@@ -1356,12 +1435,15 @@ function sortTimelineBreakpoints() {
 }
 
 function syncSelectedBreakpointControls() {
-  const selected = state.timeline.selectedFrame;
+  const selected = state.timeline.selectedFrames;
+  const singleFrame = selected.length === 1 ? selected[0] : null;
   const input = $("#selectedFrameInput");
-  input.disabled = selected === null;
-  input.value = selected ?? "";
+  input.disabled = singleFrame === null;
+  input.value = singleFrame ?? "";
   input.max = String((state.timeline.analysis?.frame_count || 1) - 1);
-  $("#deleteBreakpointBtn").disabled = selected === null;
+  const deleteButton = $("#deleteBreakpointBtn");
+  deleteButton.disabled = selected.length === 0;
+  deleteButton.textContent = selected.length > 1 ? `删除 ${selected.length} 个断点` : "删除断点";
 }
 
 function renderTimelinePlayhead(forcedFrame = null) {
@@ -1450,8 +1532,8 @@ function selectTimelineSegment(segmentId, scrollIntoView = false) {
   const segment = timelineSegments().find(item => item.id === segmentId);
   if (!segment) return;
   if (!sliceUnitForSegment(segment.id)) state.timeline.sliceUnits.push(newSliceUnit([segment.id]));
+  setSelectedBreakpointFrames([]);
   state.timeline.selectedSegmentId = segment.id;
-  state.timeline.selectedFrame = null;
   $("#timelineVideo").pause();
   seekTimelineFrame(segment.startFrame, "segment_select");
   renderTimeline();

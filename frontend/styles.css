@@ -177,13 +177,17 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .timeline-zoom-control input { width: 150px; height: 4px; padding: 0; border: 0; accent-color: var(--green); }
 .timeline-zoom-control output { min-width: 52px; font: 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .timeline-viewport { position: relative; overflow-x: auto; overflow-y: hidden; border: 1px solid rgba(29,92,67,.16); border-radius: 12px; background: #dfe7e1; scrollbar-color: #a9b8ae #edf0eb; }
-.timeline-canvas { position: relative; min-width: 100%; height: 176px; user-select: none; }
+.timeline-canvas { position: relative; min-width: 100%; height: 208px; user-select: none; }
 .timeline-ruler-bar { position: relative; height: 42px; color: var(--muted); background: #edf0eb; cursor: ew-resize; touch-action: none; overflow: hidden; }
 .timeline-ticks { position: absolute; inset: 0; pointer-events: none; }
 .timeline-ticks i { position: absolute; bottom: 0; width: 1px; background: #9ca8a0; font-style: normal; }
 .timeline-ticks i.minor { height: 9px; opacity: .65; }
 .timeline-ticks i.major { height: 20px; background: #718078; }
 .timeline-ticks i span { position: absolute; left: 5px; bottom: 20px; width: max-content; color: #68756e; font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.timeline-marquee-lane { position: relative; z-index: 2; height: 32px; box-sizing: border-box; overflow: hidden; border-top: 1px solid rgba(29,92,67,.13); background: rgba(237,240,235,.72); cursor: crosshair; touch-action: none; }
+.timeline-marquee-lane:hover { background: rgba(237,244,239,.88); }
+.timeline-marquee-lane > span { position: sticky; left: 10px; display: inline-block; padding: 8px 0 0 10px; color: var(--muted); font-size: 8px; letter-spacing: .03em; pointer-events: none; }
+.timeline-marquee-box { position: absolute; z-index: 4; top: 42px; bottom: 0; min-width: 1px; border: 1px solid rgba(29,92,67,.72); background: rgba(29,92,67,.1); box-sizing: border-box; pointer-events: none; }
 .timeline-track { position: relative; height: 70px; border-top: 1px solid rgba(29,92,67,.13); background: #dfe7e1; cursor: default; touch-action: none; }
 .timeline-track.is-dragging, .timeline-ruler-bar:active { cursor: ew-resize; }
 .timeline-lane-markers, #timelineMarkers { position: absolute; inset: 0; pointer-events: none; }

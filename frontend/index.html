@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260917-31" />
+    <link rel="stylesheet" href="/styles.css?v=20260917-32" />
   </head>
   <body>
     <div class="noise"></div>
@@ -195,6 +195,9 @@
                 <div id="timelineRulerBar" class="timeline-ruler-bar" title="单击或拖动定位播放头">
                   <div id="timelineTicks" class="timeline-ticks"></div>
                 </div>
+                <div id="timelineMarqueeLane" class="timeline-marquee-lane" title="横向拖拽框选多个断点">
+                  <span>拖拽框选断点</span>
+                </div>
                 <div id="timelineTrack" class="timeline-track" title="点击片段进行选择，拖动断点调整位置">
                   <div id="timelineSegments" class="timeline-segments"></div>
                   <div id="timelineVideoMarkers" class="timeline-lane-markers" aria-label="画面转场候选"></div>
@@ -209,11 +212,12 @@
                   </div>
                   <span id="timelineAudioState" class="timeline-audio-state"></span>
                 </div>
+                <div id="timelineMarqueeBox" class="timeline-marquee-box hidden" aria-hidden="true"></div>
                 <div id="timelinePlayhead" class="timeline-playhead" aria-hidden="true"><i></i></div>
                 <div id="timelineSnapGuide" class="timeline-snap-guide hidden"><span></span></div>
               </div>
             </div>
-            <p class="timeline-gesture-hint">点击色块选择片段 · 悬停时间线或播放窗口按空格播放/暂停 · Option + 滚轮缩放 · Shift + 拖动吸附</p>
+            <p class="timeline-gesture-hint">在空白框选区拖拽可多选断点并批量删除 · 点击色块选择片段 · 空格播放/暂停 · Option + 滚轮缩放 · Shift + 拖动吸附</p>
 
             <div class="timeline-review-heading">
               <div><strong>片段列表</strong><small id="timelineBreakpointSummary"></small></div>
@@ -351,7 +355,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260917-31" defer></script>
-    <script src="/app.js?v=20260917-31" defer></script>
+    <script src="/timeline-math.js?v=20260917-32" defer></script>
+    <script src="/app.js?v=20260917-32" defer></script>
   </body>
 </html>

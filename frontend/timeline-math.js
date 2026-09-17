@@ -73,6 +73,26 @@
       : [...breakpoints];
   }
 
+  function breakpointFramesInPixelRange({
+    breakpoints,
+    startX,
+    endX,
+    pixelsPerSecond,
+    fps,
+    markerHalfWidth = 8,
+  }) {
+    const left = Math.min(startX, endX);
+    const right = Math.max(startX, endX);
+    const frames = breakpoints
+      .map(point => Number(point?.frame_index))
+      .filter(Number.isFinite)
+      .filter(frame => {
+        const x = frame / fps * pixelsPerSecond;
+        return x + markerHalfWidth >= left && x - markerHalfWidth <= right;
+      });
+    return [...new Set(frames)].sort((first, second) => first - second);
+  }
+
   function ranked(matches) {
     return matches.sort((left, right) => (
       left.distance - right.distance
@@ -171,6 +191,7 @@
 
   return {
     activeTimelineBreakpoints,
+    breakpointFramesInPixelRange,
     choosePointerSnap,
     chooseRulerStep,
     frameFromPlaybackTime,

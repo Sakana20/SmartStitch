@@ -9,8 +9,8 @@ const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260917-31"/,
-  "断点删除快捷键更新后必须刷新静态资源缓存版本",
+  /href="\/styles\.css\?v=20260917-32"/,
+  "断点框选功能更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
@@ -168,13 +168,28 @@ assert.match(
 );
 assert.match(
   app,
-  /\["Delete", "Backspace"\]\.includes\(event\.key\) && state\.timeline\.selectedFrame !== null[\s\S]*event\.preventDefault\(\);[\s\S]*deleteSelectedBreakpoint\(\);/,
-  "时间线选中断点后必须支持用 Del 或退格键删除",
+  /\["Delete", "Backspace"\]\.includes\(event\.key\) && state\.timeline\.selectedFrames\.length[\s\S]*event\.preventDefault\(\);[\s\S]*deleteSelectedBreakpoints\(\);/,
+  "时间线选中一个或多个断点后必须支持用 Del 或退格键删除",
 );
 assert.match(
   html,
   /id="deleteBreakpointBtn"[^>]*title="删除选中断点（Del \/ Backspace）"/,
   "删除断点按钮必须提示 Del 和退格快捷键",
+);
+assert.match(
+  html,
+  /id="timelineMarqueeLane"[^>]*title="横向拖拽框选多个断点"[\s\S]*id="timelineTrack"[\s\S]*id="timelineMarqueeBox"/,
+  "V1 上方必须提供独立的断点框选区和选框覆盖层",
+);
+assert.match(
+  css,
+  /\.timeline-canvas\s*\{[^}]*height:\s*208px[\s\S]*\.timeline-marquee-lane\s*\{[^}]*height:\s*32px[\s\S]*\.timeline-marquee-box\s*\{[^}]*top:\s*42px;[^}]*bottom:\s*0;/,
+  "时间线必须为框选区增加空间，并让选框贯穿下方轨道",
+);
+assert.match(
+  app,
+  /timelineMarqueeLane[\s\S]*beginTimelineMarquee[\s\S]*breakpointFramesInPixelRange[\s\S]*selectedFrames/,
+  "框选区拖拽必须计算并保存多选断点",
 );
 
 assert.match(

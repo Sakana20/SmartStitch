@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const {
   activeTimelineBreakpoints,
+  breakpointFramesInPixelRange,
   choosePointerSnap,
   chooseRulerStep,
   frameFromPlaybackTime,
@@ -188,6 +189,27 @@ assert.deepEqual(
 assert.deepEqual(
   activeTimelineBreakpoints(trackBreakpoints, false).map(point => point.frame_index),
   [10, 20, 30, 40],
+);
+assert.deepEqual(
+  breakpointFramesInPixelRange({
+    breakpoints: trackBreakpoints,
+    startX: 42,
+    endX: 18,
+    pixelsPerSecond: 25,
+    fps: 25,
+  }),
+  [10, 20, 30, 40],
+);
+assert.deepEqual(
+  breakpointFramesInPixelRange({
+    breakpoints: trackBreakpoints,
+    startX: 29,
+    endX: 31,
+    pixelsPerSecond: 25,
+    fps: 25,
+    markerHalfWidth: 0,
+  }),
+  [30],
 );
 
 console.log("timeline interaction math ok");
