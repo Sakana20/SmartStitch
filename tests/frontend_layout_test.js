@@ -9,8 +9,8 @@ const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260917-29"/,
-  "源视频切换样式更新后必须刷新 CSS 缓存版本",
+  /href="\/styles\.css\?v=20260917-31"/,
+  "断点删除快捷键更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
@@ -165,6 +165,16 @@ assert.match(
   app,
   /videoStage\.addEventListener\("pointerenter"[\s\S]*pointerOverVideo = true;[\s\S]*videoStage\.addEventListener\("pointerleave"[\s\S]*pointerOverVideo = false;/,
   "播放窗口必须跟踪鼠标进入和离开",
+);
+assert.match(
+  app,
+  /\["Delete", "Backspace"\]\.includes\(event\.key\) && state\.timeline\.selectedFrame !== null[\s\S]*event\.preventDefault\(\);[\s\S]*deleteSelectedBreakpoint\(\);/,
+  "时间线选中断点后必须支持用 Del 或退格键删除",
+);
+assert.match(
+  html,
+  /id="deleteBreakpointBtn"[^>]*title="删除选中断点（Del \/ Backspace）"/,
+  "删除断点按钮必须提示 Del 和退格快捷键",
 );
 
 assert.match(

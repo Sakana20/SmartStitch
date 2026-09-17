@@ -322,6 +322,11 @@ function bindTimelineEvents() {
       return;
     }
     if (isEditing) return;
+    if (["Delete", "Backspace"].includes(event.key) && state.timeline.selectedFrame !== null) {
+      event.preventDefault();
+      deleteSelectedBreakpoint();
+      return;
+    }
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault();
       stepTimelineFrame(event.key === "ArrowLeft" ? -1 : 1);
