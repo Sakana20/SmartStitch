@@ -1,4 +1,5 @@
 schema_version: 2
+workflow_type: taobao_flash
 id: taobao-xingguang-erjian
 name: 淘宝闪购-星广一口价二剪
 enabled: true
@@ -12,8 +13,10 @@ timeline:
 - end_card
 sources:
   pre_roll:
+    label: ''
+    description: ''
     mode: required
-    directory: /Volumes/Elements SE/陈鼎琦/饿了么整理/素材/星广一口价二剪/切片素材/前贴
+    directory: /Volumes/home/星广一口价二剪/切片素材/前贴
     extensions:
     - .mp4
     - .mov
@@ -22,31 +25,39 @@ sources:
     image_duration_seconds: 1.5
     items: []
   hook:
+    label: ''
+    description: ''
     mode: required
-    directory: 切片素材/引子
+    directory: /Volumes/home/星广一口价二剪/切片素材/引子
     extensions:
     - .mp4
     default_weight: 1.0
     image_duration_seconds: 1.5
     items: []
   benefit_1:
+    label: ''
+    description: ''
     mode: required
-    directory: 切片素材/利益点/1
+    directory: /Volumes/home/星广一口价二剪/切片素材/利益点/1
     extensions:
     - .mp4
     default_weight: 1.0
     image_duration_seconds: 1.5
     items: []
   ending:
+    label: ''
+    description: ''
     mode: required
-    directory: 切片素材/结尾
+    directory: /Volumes/home/星广一口价二剪/切片素材/结尾
     extensions:
     - .mp4
     default_weight: 1.0
     image_duration_seconds: 1.5
     items: []
   end_card:
-    mode: optional
+    label: ''
+    description: ''
+    mode: disabled
     directory: 切片素材/尾帧
     extensions:
     - .png
