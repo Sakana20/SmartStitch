@@ -9,7 +9,11 @@ from pathlib import Path
 import yaml
 from fastapi.testclient import TestClient
 
-from smartstitch.api import create_app, resolve_config_directory
+from smartstitch.api import (
+    canonical_config_directory,
+    create_app,
+    resolve_config_directory,
+)
 from smartstitch.slicer import SliceConflictError
 
 
@@ -46,6 +50,7 @@ def test_health_and_config_listing(tmp_path):
 def test_config_directory_prefers_mounted_shared_root_and_supports_override(
     tmp_path, monkeypatch
 ):
+    monkeypatch.delenv("SMARTSTITCH_CONFIG_DIRECTORY", raising=False)
     application_root = tmp_path / "application"
     shared_root = tmp_path / "nas" / "Smartstitch"
     shared_root.mkdir(parents=True)
@@ -60,6 +65,20 @@ def test_config_directory_prefers_mounted_shared_root_and_supports_override(
         allow_shared_default=False,
         shared_directory=shared_root,
     ) == application_root / "config"
+
+    missing_canonical = tmp_path / "volumes" / "home" / "Smartstitch"
+    homes_root = tmp_path / "volumes" / "homes"
+    alternate = homes_root / "nas-user" / "Smartstitch"
+    alternate.mkdir(parents=True)
+    assert resolve_config_directory(
+        application_root,
+        allow_shared_default=True,
+        shared_directory=missing_canonical,
+        alternate_shared_parent=homes_root,
+    ) == alternate.resolve()
+    assert canonical_config_directory(
+        Path("/Volumes/homes/yiranmobi/Smartstitch")
+    ) == Path("/Volumes/home/Smartstitch")
 
     override = tmp_path / "custom-configs"
     monkeypatch.setenv("SMARTSTITCH_CONFIG_DIRECTORY", str(override))

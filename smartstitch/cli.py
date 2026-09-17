@@ -13,7 +13,10 @@ def main() -> None:
     parser.add_argument("--reload", action="store_true", help="开发时自动重载")
     parser.add_argument(
         "--config-directory",
-        help="共享配置目录；默认在已挂载时自动使用 /Volumes/home/Smartstitch",
+        help=(
+            "共享配置目录；默认自动识别 /Volumes/home/Smartstitch "
+            "及 /Volumes/homes/<用户>/Smartstitch"
+        ),
     )
     args = parser.parse_args()
     if args.config_directory:

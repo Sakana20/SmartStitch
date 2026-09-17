@@ -17,11 +17,68 @@ class ConfigError(ValueError):
 
 
 class ConfigStore:
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, canonical_directory: Path | None = None):
         self.directory = directory
+        self.canonical_directory = canonical_directory or directory
         self.backup_directory = directory / "backups"
         self.lock = threading.RLock()
         self.directory.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def has_path_alias(self) -> bool:
+        return self.directory != self.canonical_directory
+
+    @staticmethod
+    def _replace_path_prefix(value: str, source: Path, target: Path) -> str:
+        if not value:
+            return value
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            return value
+        try:
+            relative = path.relative_to(source)
+        except ValueError:
+            return value
+        return str(target / relative)
+
+    def _remap_config_paths(
+        self, config: AppConfig, source: Path, target: Path
+    ) -> AppConfig:
+        if source == target:
+            return config
+        remapped = config.model_copy(deep=True)
+        remapped.source_root = self._replace_path_prefix(
+            remapped.source_root, source, target
+        )
+        remapped.output.directory = self._replace_path_prefix(
+            remapped.output.directory, source, target
+        )
+        remapped.benefit_overlays.file = self._replace_path_prefix(
+            remapped.benefit_overlays.file, source, target
+        )
+        for group in remapped.sources.values():
+            group.directory = self._replace_path_prefix(
+                group.directory, source, target
+            )
+            for item in group.items:
+                item.path = self._replace_path_prefix(item.path, source, target)
+        return remapped
+
+    def _to_runtime(self, config: AppConfig) -> AppConfig:
+        return self._remap_config_paths(
+            config, self.canonical_directory, self.directory
+        )
+
+    def _to_storage(self, config: AppConfig) -> AppConfig:
+        return self._remap_config_paths(
+            config, self.directory, self.canonical_directory
+        )
+
+    def _dump_for_storage(self, config: AppConfig) -> str:
+        stored = self._to_storage(config)
+        return yaml.safe_dump(
+            stored.model_dump(mode="json"), allow_unicode=True, sort_keys=False
+        )
 
     def list(self) -> list[dict[str, object]]:
         with self.lock:
@@ -75,7 +132,7 @@ class ConfigStore:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 raise ConfigError("配置根节点必须是对象")
-            return AppConfig.model_validate(data)
+            return self._to_runtime(AppConfig.model_validate(data))
         except (yaml.YAMLError, ValueError) as exc:
             raise ConfigError(str(exc)) from exc
 
@@ -93,7 +150,7 @@ class ConfigStore:
             data = yaml.safe_load(text)
             if not isinstance(data, dict):
                 raise ConfigError("配置根节点必须是对象")
-            return AppConfig.model_validate(data)
+            return self._to_runtime(AppConfig.model_validate(data))
         except (yaml.YAMLError, ValueError) as exc:
             raise ConfigError(str(exc)) from exc
 
@@ -109,13 +166,11 @@ class ConfigStore:
                     f"YAML 内 id={config.id!r} 与目标配置 {config_id!r} 不一致"
                 )
             text = request.yaml_text
-            if (
+            if self.has_path_alias or (
                 not isinstance(source_data, dict)
                 or source_data.get("schema_version", 1) != 2
             ):
-                text = yaml.safe_dump(
-                    config.model_dump(mode="json"), allow_unicode=True, sort_keys=False
-                )
+                text = self._dump_for_storage(config)
             self._atomic_save(self.path_for(config_id), text)
             return config
 
@@ -125,9 +180,8 @@ class ConfigStore:
                 raise ConfigError(
                     f"配置内 id={config.id!r} 与目标配置 {config_id!r} 不一致"
                 )
-            text = yaml.safe_dump(
-                config.model_dump(mode="json"), allow_unicode=True, sort_keys=False
-            )
+            config = self._to_runtime(config)
+            text = self._dump_for_storage(config)
             self._atomic_save(self.path_for(config_id), text)
             return config
 
@@ -140,9 +194,7 @@ class ConfigStore:
             data["id"] = new_id
             data["name"] = new_name
             config = self.validate_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
-            text = yaml.safe_dump(
-                config.model_dump(mode="json"), allow_unicode=True, sort_keys=False
-            )
+            text = self._dump_for_storage(config)
             self._atomic_save(destination, text, backup=False)
             return config
 
@@ -173,9 +225,8 @@ class ConfigStore:
             destination = self.path_for(config.id)
             if destination.exists():
                 raise ConfigError(f"配置已存在: {config.id}")
-            text = yaml.safe_dump(
-                config.model_dump(mode="json"), allow_unicode=True, sort_keys=False
-            )
+            config = self._to_runtime(config)
+            text = self._dump_for_storage(config)
             self._atomic_save(destination, text, backup=False)
             return config
 
@@ -215,9 +266,7 @@ class ConfigStore:
                     for item in category_updates
                 ]
 
-            text = yaml.safe_dump(
-                config.model_dump(mode="json"), allow_unicode=True, sort_keys=False
-            )
+            text = self._dump_for_storage(config)
             self._atomic_save(self.path_for(config_id), text)
             return config
 

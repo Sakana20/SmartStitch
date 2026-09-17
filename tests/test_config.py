@@ -174,6 +174,58 @@ def test_loading_legacy_file_does_not_rewrite_until_explicit_save(tmp_path):
     assert "benefit_video" not in saved["sources"]
 
 
+def test_shared_config_paths_follow_mount_alias_without_rewriting_yaml(tmp_path):
+    canonical = tmp_path / "Volumes" / "home" / "Smartstitch"
+    mounted = tmp_path / "Volumes" / "homes" / "nas-user" / "Smartstitch"
+    mounted.mkdir(parents=True)
+    library_root = canonical / "共享视频库"
+    data = config_data(library_root)
+    data["sources"]["hook"]["directory"] = str(
+        library_root / "切片素材" / "引子"
+    )
+    data["sources"]["hook"]["items"] = [
+        {"path": str(library_root / "切片素材" / "引子" / "素材.mp4")}
+    ]
+    data["benefit_overlays"] = {
+        "mode": "optional",
+        "file": str(library_root / "风险提示语图片" / "提示语.png"),
+    }
+    data["output"]["directory"] = str(library_root / "成片输出")
+    path = mounted / "config-test.yaml"
+    path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    store = ConfigStore(mounted, canonical_directory=canonical)
+
+    config = store.load("config-test")
+    mounted_library = mounted / "共享视频库"
+    assert config.source_root == str(mounted_library)
+    assert config.sources["hook"].directory == str(
+        mounted_library / "切片素材" / "引子"
+    )
+    assert config.sources["hook"].items[0].path == str(
+        mounted_library / "切片素材" / "引子" / "素材.mp4"
+    )
+    assert config.benefit_overlays.file == str(
+        mounted_library / "风险提示语图片" / "提示语.png"
+    )
+    assert config.output.directory == str(mounted_library / "成片输出")
+
+    config.name = "远端电脑修改"
+    store.save_config("config-test", config)
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert saved["name"] == "远端电脑修改"
+    assert saved["source_root"] == str(library_root)
+    assert saved["sources"]["hook"]["directory"] == str(
+        library_root / "切片素材" / "引子"
+    )
+    assert saved["benefit_overlays"]["file"] == str(
+        library_root / "风险提示语图片" / "提示语.png"
+    )
+    assert saved["output"]["directory"] == str(library_root / "成片输出")
+
+
 def test_benefit_segments_allow_gaps_and_follow_timeline_order(tmp_path):
     data = config_data(tmp_path)
     data["timeline"] = ["hook", "benefit_3", "benefit_1", "ending"]

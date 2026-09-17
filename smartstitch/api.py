@@ -45,7 +45,21 @@ from .timeline import TimelineAnalyzer, TimelineError, list_source_videos
 
 
 DEFAULT_SHARED_CONFIG_DIRECTORY = Path("/Volumes/home/Smartstitch")
+DEFAULT_SHARED_CONFIG_ALTERNATE_PARENT = Path("/Volumes/homes")
 CONFIG_DIRECTORY_ENV = "SMARTSTITCH_CONFIG_DIRECTORY"
+
+
+def alternate_shared_config_directories(parent: Path) -> list[Path]:
+    if not parent.is_dir():
+        return []
+    return sorted(
+        (
+            candidate
+            for candidate in parent.glob("*/Smartstitch")
+            if candidate.is_dir()
+        ),
+        key=lambda candidate: str(candidate).casefold(),
+    )
 
 
 def resolve_config_directory(
@@ -53,13 +67,30 @@ def resolve_config_directory(
     *,
     allow_shared_default: bool,
     shared_directory: Path = DEFAULT_SHARED_CONFIG_DIRECTORY,
+    alternate_shared_parent: Path = DEFAULT_SHARED_CONFIG_ALTERNATE_PARENT,
 ) -> Path:
     override = os.environ.get(CONFIG_DIRECTORY_ENV, "").strip()
     if override:
         return Path(override).expanduser().resolve()
     if allow_shared_default and shared_directory.is_dir():
         return shared_directory.resolve()
+    if allow_shared_default:
+        alternatives = alternate_shared_config_directories(
+            alternate_shared_parent
+        )
+        if len(alternatives) == 1:
+            return alternatives[0].resolve()
     return application_root / "config"
+
+
+def canonical_config_directory(directory: Path) -> Path:
+    try:
+        relative = directory.relative_to(DEFAULT_SHARED_CONFIG_ALTERNATE_PARENT)
+    except ValueError:
+        return directory
+    if len(relative.parts) == 2 and relative.parts[1] == "Smartstitch":
+        return DEFAULT_SHARED_CONFIG_DIRECTORY
+    return directory
 
 
 def create_app(
@@ -75,7 +106,12 @@ def create_app(
             allow_shared_default=base_directory is None,
         )
     )
-    config_store = ConfigStore(resolved_config_directory)
+    config_store = ConfigStore(
+        resolved_config_directory,
+        canonical_directory=canonical_config_directory(
+            resolved_config_directory
+        ),
+    )
     library_service = LibraryService(config_store)
     job_manager = JobManager(config_store, root / "data")
     timeline_analyzer = TimelineAnalyzer(root / "data" / "timelines")
@@ -96,7 +132,11 @@ def create_app(
             "ffmpeg": shutil.which("ffmpeg"),
             "ffprobe": shutil.which("ffprobe"),
             "config_directory": str(config_store.directory),
+            "canonical_config_directory": str(
+                config_store.canonical_directory
+            ),
             "shared_config": config_store.directory != root / "config",
+            "config_path_mapped": config_store.has_path_alias,
         }
 
     @app.post("/api/v1/system/directory-picker")
