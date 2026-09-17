@@ -17,19 +17,23 @@ from .jobs import JobManager, TERMINAL_STATES
 from .library import LibraryConflictError, LibraryError, LibraryService, pick_directory
 from .models import (
     AddBenefitRequest,
+    AddPoolRequest,
     CloneConfigRequest,
     ConfigUpdateRequest,
     CreateConfigRequest,
     CreateLibraryRequest,
+    DeletePoolRequest,
     JobCreateRequest,
     LibraryPreflightRequest,
     LoudnessPreviewRequest,
     PreviewRequest,
+    ReorderTimelineRequest,
     StructuredConfigUpdateRequest,
     TimelineAnalyzeRequest,
     TimelineDecisionRequest,
     TimelineSourceDirectoryRequest,
     TimelineSliceRequest,
+    UpdatePoolRequest,
     WeightUpdateRequest,
 )
 from .planner import PlanError, build_plan
@@ -107,6 +111,48 @@ def create_app(base_directory: Path | None = None) -> FastAPI:
     def add_benefit(config_id: str, request: AddBenefitRequest) -> dict[str, object]:
         try:
             return library_service.add_benefit(config_id, request)
+        except LibraryConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/configs/{config_id}/pools")
+    def add_pool(config_id: str, request: AddPoolRequest) -> dict[str, object]:
+        try:
+            return library_service.add_pool(config_id, request)
+        except LibraryConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.patch("/api/v1/configs/{config_id}/pools/{pool_id}")
+    def update_pool(
+        config_id: str, pool_id: str, request: UpdatePoolRequest
+    ) -> dict[str, object]:
+        try:
+            return library_service.update_pool(config_id, pool_id, request)
+        except LibraryConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.delete("/api/v1/configs/{config_id}/pools/{pool_id}")
+    def delete_pool(
+        config_id: str, pool_id: str, request: DeletePoolRequest
+    ) -> dict[str, object]:
+        try:
+            return library_service.delete_pool(config_id, pool_id, request)
+        except LibraryConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.put("/api/v1/configs/{config_id}/timeline")
+    def reorder_timeline(
+        config_id: str, request: ReorderTimelineRequest
+    ) -> dict[str, object]:
+        try:
+            return library_service.reorder_timeline(config_id, request)
         except LibraryConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
         except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:

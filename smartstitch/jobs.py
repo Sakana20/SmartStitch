@@ -151,7 +151,13 @@ class JobManager:
             "config_id": config.id,
             "config_name": config.name,
             "schema_version": config.schema_version,
+            "workflow_type": config.workflow_type,
             "timeline": list(config.timeline),
+            "pool_labels": {
+                category: config.sources[category].label or category
+                for category in config.timeline
+                if config.workflow_type == "generic"
+            },
             "status": "draft",
             "count": plan.count,
             "seed": plan.seed,
@@ -363,10 +369,26 @@ class JobManager:
         available = {key for item in job["items"] for key in item["selections"]}
         categories = [category for category in job.get("timeline", []) if category in available]
         categories.extend(sorted(available - set(categories)))
+        pool_labels = job.get("pool_labels", {})
+        category_columns = {
+            category: (
+                f"{index:02d}_{category}_{pool_labels.get(category, category)}"
+                if job.get("workflow_type") == "generic"
+                else category
+            )
+            for index, category in enumerate(categories, start=1)
+        }
         with path.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(
                 handle,
-                fieldnames=["index", "status", *categories, "benefit_overlay", "output_path", "error"],
+                fieldnames=[
+                    "index",
+                    "status",
+                    *category_columns.values(),
+                    "benefit_overlay",
+                    "output_path",
+                    "error",
+                ],
             )
             writer.writeheader()
             for item in job["items"]:
@@ -379,5 +401,5 @@ class JobManager:
                 }
                 for category in categories:
                     asset = item["selections"].get(category)
-                    row[category] = asset["path"] if asset else ""
+                    row[category_columns[category]] = asset["path"] if asset else ""
                 writer.writerow(row)

@@ -356,6 +356,13 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .source-config-actions { display: flex; align-items: center; gap: 4px; }
 .source-config-actions .text-btn { padding: 4px 7px; font-size: 9px; }
 .source-config-actions .text-btn:disabled { opacity: .35; cursor: default; }
+.pool-config-card { cursor: grab; transition: opacity .15s, border-color .15s, transform .15s; }
+.pool-config-card:active { cursor: grabbing; }
+.pool-config-card.dragging { opacity: .45; }
+.pool-config-card.drag-over { border-color: var(--green); transform: translateY(2px); }
+.pool-drag-handle { color: var(--green); font-size: 17px; line-height: 1; cursor: grab; }
+.managed-pool-path { display: block; min-height: 38px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 9px; background: rgba(248,248,244,.85); color: var(--muted); font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.empty-pool-state { padding: 28px 18px; border: 1px dashed #bdc9c1; border-radius: 12px; color: var(--muted); text-align: center; font-size: 11px; }
 .benefit-config-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 12px; padding: 12px 14px; border-radius: 12px; background: #eaf1ec; }
 .benefit-config-toolbar strong, .benefit-config-toolbar small { display: block; }
 .benefit-config-toolbar strong { font-size: 11px; }

@@ -9,13 +9,28 @@ const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260917-14"/,
+  /href="\/styles\.css\?v=20260917-15"/,
   "源视频切换样式更新后必须刷新 CSS 缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
 assert.equal(staticVersions.length, 3, "三个前端静态资源都必须声明缓存版本");
 assert.equal(new Set(staticVersions).size, 1, "CSS 与 JS 必须使用同一个发布版本，避免新旧资源混用");
+assert.match(
+  html,
+  /id="newWorkflowType"[\s\S]*value="taobao_flash"[\s\S]*value="generic"/,
+  "新建项目库时必须允许选择淘宝闪购或通用模式",
+);
+assert.match(
+  app,
+  /data-pool-card[\s\S]*dragstart[\s\S]*dragover[\s\S]*drop/,
+  "通用视频库卡片必须支持拖拽调整拼接顺序",
+);
+assert.match(
+  app,
+  /\/configs\/\$\{state\.configId\}\/pools[\s\S]*current_config_hash/,
+  "通用视频库新增操作必须携带配置版本哈希",
+);
 assert.match(
   html,
   /<span>源视频文件夹[\s\S]*id="chooseTimelineDirectoryBtn"[\s\S]*id="previousVideoBtn"[\s\S]*id="timelineCurrentSource"[\s\S]*id="nextVideoBtn"/,

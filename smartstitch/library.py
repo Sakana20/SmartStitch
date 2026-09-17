@@ -15,17 +15,24 @@ from typing import Any
 from .config import ConfigError, ConfigStore
 from .models import (
     AddBenefitRequest,
+    AddPoolRequest,
     AppConfig,
     CreateLibraryRequest,
+    DeletePoolRequest,
     LibraryPreflightRequest,
+    MAX_GENERIC_POOLS,
+    ReorderTimelineRequest,
     SourceGroupConfig,
     SourceMode,
+    UpdatePoolRequest,
     is_benefit_category,
+    is_pool_category,
     resolve_directory,
 )
 
 
 LAYOUT_VERSION = 1
+GENERIC_LAYOUT_VERSION = 2
 MARKER_PATH = Path(".smartstitch/library.json")
 STANDARD_DIRECTORIES = (
     Path("原始视频"),
@@ -36,6 +43,15 @@ STANDARD_DIRECTORIES = (
     Path("切片素材/尾帧"),
     Path("切片素材/未归类"),
     Path("风险提示语图片"),
+    Path("成片输出"),
+    Path("工作记录/切片清单"),
+    Path("工作记录/生成清单"),
+    Path(".smartstitch"),
+)
+GENERIC_DIRECTORIES = (
+    Path("原始视频"),
+    Path("视频库"),
+    Path("未归类"),
     Path("成片输出"),
     Path("工作记录/切片清单"),
     Path("工作记录/生成清单"),
@@ -82,6 +98,25 @@ def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
 
 
 def _marker_payload(request: CreateLibraryRequest) -> dict[str, Any]:
+    if request.workflow_type == "generic":
+        return {
+            "layout_version": GENERIC_LAYOUT_VERSION,
+            "workflow_type": "generic",
+            "library_id": str(uuid.uuid4()),
+            "created_for_config_id": request.new_id,
+            "display_name": request.new_name.strip(),
+            "created_at": _now(),
+            "create_request_id": request.client_request_id,
+            "next_pool_number": 1,
+            "recent_requests": {},
+            "paths": {
+                "originals": "原始视频",
+                "pools": "视频库",
+                "unclassified": "未归类",
+                "outputs": "成片输出",
+                "records": "工作记录",
+            },
+        }
     return {
         "layout_version": LAYOUT_VERSION,
         "library_id": str(uuid.uuid4()),
@@ -137,6 +172,32 @@ def _standard_config(request: CreateLibraryRequest, root: Path) -> AppConfig:
     )
 
 
+def _generic_config(request: CreateLibraryRequest, root: Path) -> AppConfig:
+    return AppConfig.model_validate(
+        {
+            "schema_version": 3,
+            "workflow_type": "generic",
+            "id": request.new_id,
+            "name": request.new_name.strip(),
+            "enabled": True,
+            "description": "SmartStitch 通用视频库",
+            "source_root": str(root),
+            "timeline": [],
+            "sources": {},
+            "benefit_overlays": {
+                "mode": "disabled",
+                "file": "",
+                "timing": {"scope": "full"},
+            },
+            "output": {"directory": str(root / "成片输出")},
+        }
+    )
+
+
+def _directories_for(workflow_type: str) -> tuple[Path, ...]:
+    return GENERIC_DIRECTORIES if workflow_type == "generic" else STANDARD_DIRECTORIES
+
+
 class LibraryService:
     def __init__(self, config_store: ConfigStore):
         self.config_store = config_store
@@ -162,10 +223,13 @@ class LibraryService:
             raise LibraryConflictError(f"同名视频库已存在: {root}")
         return {
             "ok": True,
+            "workflow_type": request.workflow_type,
             "parent_directory": str(parent),
             "folder_name": name,
             "root_path": str(root),
-            "directories": [str(path) for path in STANDARD_DIRECTORIES],
+            "directories": [
+                str(path) for path in _directories_for(request.workflow_type)
+            ],
         }
 
     def create(self, request: CreateLibraryRequest) -> dict[str, Any]:
@@ -185,7 +249,9 @@ class LibraryService:
 
             self.preflight(
                 LibraryPreflightRequest(
-                    parent_directory=str(parent), folder_name=name
+                    parent_directory=str(parent),
+                    folder_name=name,
+                    workflow_type=request.workflow_type,
                 )
             )
             if self.config_store.path_for(request.new_id).exists():
@@ -194,11 +260,15 @@ class LibraryService:
             temporary = Path(tempfile.mkdtemp(prefix=".smartstitch-create-", dir=parent))
             committed = False
             try:
-                for relative in STANDARD_DIRECTORIES:
+                for relative in _directories_for(request.workflow_type):
                     (temporary / relative).mkdir(parents=True, exist_ok=True)
                 marker = _marker_payload(request)
                 _write_json_atomic(temporary / MARKER_PATH, marker)
-                config = _standard_config(request, root)
+                config = (
+                    _generic_config(request, root)
+                    if request.workflow_type == "generic"
+                    else _standard_config(request, root)
+                )
                 if root.exists() or root.is_symlink():
                     raise LibraryConflictError(f"同名视频库已存在: {root}")
                 temporary.rename(root)
@@ -234,7 +304,15 @@ class LibraryService:
                 "error": str(exc),
                 "missing_directories": [],
             }
-        required = [root / relative for relative in STANDARD_DIRECTORIES]
+        required = [
+            root / relative
+            for relative in _directories_for(config.workflow_type)
+        ]
+        required.extend(
+            resolve_directory(config, group.directory)
+            for group in config.sources.values()
+            if config.workflow_type == "generic"
+        )
         missing = [str(path) for path in required if not path.is_dir()]
         return {
             "managed": True,
@@ -242,13 +320,17 @@ class LibraryService:
             "root_path": str(root.resolve()),
             "library_id": marker["library_id"],
             "layout_version": marker["layout_version"],
-            "next_benefit_number": marker["next_benefit_number"],
+            "workflow_type": config.workflow_type,
+            "next_benefit_number": marker.get("next_benefit_number"),
+            "next_pool_number": marker.get("next_pool_number"),
             "missing_directories": missing,
         }
 
     def add_benefit(self, config_id: str, request: AddBenefitRequest) -> dict[str, Any]:
         with self._lock, self.config_store.lock:
             config = self.config_store.load(config_id)
+            if config.workflow_type != "taobao_flash":
+                raise LibraryError("通用视频库不支持新增利益点，请新增视频库")
             root = Path(config.source_root).expanduser().resolve()
             marker = self._load_marker(root)
             recent = marker.setdefault("recent_requests", {})
@@ -329,15 +411,163 @@ class LibraryService:
             result["warnings"] = warnings
             return result
 
+    def add_pool(self, config_id: str, request: AddPoolRequest) -> dict[str, Any]:
+        with self._lock, self.config_store.lock:
+            if not request.label.strip():
+                raise LibraryError("视频库名称不能为空")
+            config, root, marker = self._generic_library(config_id)
+            recent = marker.setdefault("recent_requests", {})
+            if not isinstance(recent, dict):
+                recent = {}
+                marker["recent_requests"] = recent
+            previous = recent.get(request.client_request_id)
+            if isinstance(previous, dict) and previous.get("pool_id") in config.sources:
+                return self._pool_result(
+                    config,
+                    root,
+                    str(previous["pool_id"]),
+                    idempotent=True,
+                )
+            self._check_hash(config_id, request.current_config_hash)
+            if len(config.sources) >= MAX_GENERIC_POOLS:
+                raise LibraryError(f"通用视频库最多 {MAX_GENERIC_POOLS} 个素材库")
+
+            number = self._next_pool_number(root, config, marker)
+            pool_id = f"pool_{number}"
+            relative = Path("视频库") / pool_id
+            target = root / relative
+            pools_root = root / "视频库"
+            if not pools_root.is_dir():
+                raise LibraryError("视频库根目录缺失，请先修复项目库")
+            if not _within(root, target) or target.is_symlink():
+                raise LibraryError("视频库目录无效或越过项目库边界")
+            created = False
+            if target.exists():
+                if not target.is_dir():
+                    raise LibraryConflictError(f"视频库目标不是文件夹: {target}")
+            else:
+                target.mkdir()
+                created = True
+
+            updated = config.model_copy(deep=True)
+            updated.sources[pool_id] = SourceGroupConfig(
+                label=request.label.strip(),
+                description=request.description.strip(),
+                mode=request.mode,
+                directory=str(relative),
+                extensions=[".mp4", ".mov", ".mkv"],
+                default_weight=request.default_weight,
+                items=[],
+            )
+            updated.timeline.append(pool_id)
+            try:
+                self.config_store.save_config(config_id, updated)
+            except Exception:
+                if created:
+                    try:
+                        target.rmdir()
+                    except OSError:
+                        pass
+                raise
+
+            marker["next_pool_number"] = number + 1
+            recent[request.client_request_id] = {
+                "pool_id": pool_id,
+                "created_at": _now(),
+            }
+            marker["recent_requests"] = dict(list(recent.items())[-100:])
+            warnings: list[str] = []
+            try:
+                _write_json_atomic(root / MARKER_PATH, marker)
+            except OSError:
+                warnings.append("视频库已创建，但编号计数器写入失败；下次将自动恢复")
+            result = self._pool_result(updated, root, pool_id, idempotent=False)
+            result["directory_preexisted"] = not created
+            result["warnings"] = warnings
+            return result
+
+    def update_pool(
+        self, config_id: str, pool_id: str, request: UpdatePoolRequest
+    ) -> dict[str, Any]:
+        with self._lock, self.config_store.lock:
+            config, root, _marker = self._generic_library(config_id)
+            self._check_hash(config_id, request.current_config_hash)
+            if pool_id not in config.sources or not is_pool_category(pool_id):
+                raise LibraryError(f"视频库不存在: {pool_id}")
+            updated = config.model_copy(deep=True)
+            group = updated.sources[pool_id]
+            if request.label is not None:
+                if not request.label.strip():
+                    raise LibraryError("视频库名称不能为空")
+                group.label = request.label.strip()
+            if request.description is not None:
+                group.description = request.description.strip()
+            if request.mode is not None:
+                group.mode = request.mode
+            if request.default_weight is not None:
+                group.default_weight = request.default_weight
+            self.config_store.save_config(config_id, updated)
+            return self._pool_result(updated, root, pool_id, idempotent=False)
+
+    def delete_pool(
+        self, config_id: str, pool_id: str, request: DeletePoolRequest
+    ) -> dict[str, Any]:
+        with self._lock, self.config_store.lock:
+            config, root, _marker = self._generic_library(config_id)
+            self._check_hash(config_id, request.current_config_hash)
+            if pool_id not in config.sources or not is_pool_category(pool_id):
+                raise LibraryError(f"视频库不存在: {pool_id}")
+            retained_directory = resolve_directory(
+                config, config.sources[pool_id].directory
+            ).resolve()
+            if not _within(root, retained_directory):
+                raise LibraryError("视频库目录越过项目库边界")
+            updated = config.model_copy(deep=True)
+            del updated.sources[pool_id]
+            updated.timeline = [item for item in updated.timeline if item != pool_id]
+            self.config_store.save_config(config_id, updated)
+            return {
+                "ok": True,
+                "pool_id": pool_id,
+                "retained_directory": str(retained_directory),
+                "config": updated.model_dump(mode="json"),
+                "content_hash": self.config_store.content_hash(config_id),
+            }
+
+    def reorder_timeline(
+        self, config_id: str, request: ReorderTimelineRequest
+    ) -> dict[str, Any]:
+        with self._lock, self.config_store.lock:
+            config, _root, _marker = self._generic_library(config_id)
+            self._check_hash(config_id, request.current_config_hash)
+            if len(request.timeline) != len(set(request.timeline)):
+                raise LibraryError("拼接顺序中不能包含重复视频库")
+            if set(request.timeline) != set(config.sources):
+                raise LibraryError("拼接顺序必须且只能包含当前全部视频库")
+            updated = config.model_copy(deep=True)
+            updated.timeline = list(request.timeline)
+            self.config_store.save_config(config_id, updated)
+            return {
+                "ok": True,
+                "timeline": updated.timeline,
+                "config": updated.model_dump(mode="json"),
+                "content_hash": self.config_store.content_hash(config_id),
+            }
+
     def slice_targets(self, config_id: str) -> list[dict[str, str]]:
         config = self.config_store.load(config_id)
         root = Path(config.source_root).expanduser().resolve()
         self._load_marker(root)
+        unclassified = (
+            root / "未归类"
+            if config.workflow_type == "generic"
+            else root / "切片素材/未归类"
+        )
         targets = [
             {
                 "category": "unclassified",
                 "label": "未归类",
-                "directory": str(root / "切片素材/未归类"),
+                "directory": str(unclassified),
             }
         ]
         labels = {"pre_roll": "前贴", "hook": "引子", "ending": "结尾", "end_card": "尾帧"}
@@ -346,10 +576,12 @@ class LibraryService:
                 continue
             target = self.resolve_slice_target(config_id, category)
             number = category.split("_", 1)[1] if is_benefit_category(category) else ""
+            group_label = config.sources[category].label.strip()
             targets.append(
                 {
                     "category": category,
-                    "label": f"利益点 {number}" if number else labels.get(category, category),
+                    "label": group_label
+                    or (f"利益点 {number}" if number else labels.get(category, category)),
                     "directory": str(target),
                 }
             )
@@ -360,9 +592,14 @@ class LibraryService:
         root = Path(config.source_root).expanduser().resolve()
         self._load_marker(root)
         if category == "unclassified":
-            unresolved_target = root / "切片素材/未归类"
+            unresolved_target = (
+                root / "未归类"
+                if config.workflow_type == "generic"
+                else root / "切片素材/未归类"
+            )
         elif category in config.sources and (
-            category in {"pre_roll", "hook", "ending", "end_card"}
+            (config.workflow_type == "generic" and is_pool_category(category))
+            or category in {"pre_roll", "hook", "ending", "end_card"}
             or is_benefit_category(category)
         ):
             unresolved_target = resolve_directory(
@@ -384,12 +621,18 @@ class LibraryService:
         if not marker_path.is_file():
             raise LibraryError("当前配置不是 SmartStitch 受管视频库")
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
-        if not isinstance(marker, dict) or marker.get("layout_version") != LAYOUT_VERSION:
+        if not isinstance(marker, dict) or marker.get("layout_version") not in {
+            LAYOUT_VERSION,
+            GENERIC_LAYOUT_VERSION,
+        }:
             raise LibraryError("视频库标记版本不受支持")
         if not isinstance(marker.get("library_id"), str):
             raise LibraryError("视频库标记缺少 library_id")
-        if not isinstance(marker.get("next_benefit_number"), int):
-            raise LibraryError("视频库标记缺少利益点编号")
+        if marker["layout_version"] == LAYOUT_VERSION:
+            if not isinstance(marker.get("next_benefit_number"), int):
+                raise LibraryError("视频库标记缺少利益点编号")
+        elif not isinstance(marker.get("next_pool_number"), int):
+            raise LibraryError("视频库标记缺少视频库编号")
         paths = marker.get("paths")
         if not isinstance(paths, dict):
             raise LibraryError("视频库标记缺少路径定义")
@@ -398,6 +641,44 @@ class LibraryService:
             if relative.is_absolute() or not _within(root, root / relative):
                 raise LibraryError("视频库标记包含越界路径")
         return marker
+
+    def _generic_library(
+        self, config_id: str
+    ) -> tuple[AppConfig, Path, dict[str, Any]]:
+        config = self.config_store.load(config_id)
+        if config.workflow_type != "generic":
+            raise LibraryError("仅通用项目支持自定义视频库")
+        root = Path(config.source_root).expanduser().resolve()
+        marker = self._load_marker(root)
+        if marker.get("layout_version") != GENERIC_LAYOUT_VERSION:
+            raise LibraryError("通用项目标记版本不正确")
+        return config, root, marker
+
+    def _check_hash(self, config_id: str, expected: str) -> None:
+        if self.config_store.content_hash(config_id) != expected:
+            raise LibraryConflictError("配置已被修改，请刷新后重试")
+
+    def _next_pool_number(
+        self, root: Path, config: AppConfig, marker: dict[str, Any]
+    ) -> int:
+        configured = [
+            int(category.split("_", 1)[1])
+            for category in config.sources
+            if is_pool_category(category)
+        ]
+        directory_numbers: list[int] = []
+        pools_root = root / "视频库"
+        if pools_root.is_dir():
+            directory_numbers = [
+                int(path.name.split("_", 1)[1])
+                for path in pools_root.iterdir()
+                if path.is_dir() and is_pool_category(path.name)
+            ]
+        return max(
+            int(marker.get("next_pool_number", 1)),
+            max(configured, default=0) + 1,
+            max(directory_numbers, default=0) + 1,
+        )
 
     def _next_benefit_number(
         self, root: Path, config: AppConfig, marker: dict[str, Any]
@@ -473,6 +754,25 @@ class LibraryService:
             "category": category,
             "directory": str(target),
             "library_id": marker["library_id"],
+            "config": config.model_dump(mode="json"),
+            "content_hash": self.config_store.content_hash(config.id),
+        }
+
+    def _pool_result(
+        self,
+        config: AppConfig,
+        root: Path,
+        pool_id: str,
+        *,
+        idempotent: bool,
+    ) -> dict[str, Any]:
+        group = config.sources[pool_id]
+        return {
+            "ok": True,
+            "idempotent": idempotent,
+            "pool_id": pool_id,
+            "directory": str(resolve_directory(config, group.directory).resolve()),
+            "library_id": self._load_marker(root)["library_id"],
             "config": config.model_dump(mode="json"),
             "content_hash": self.config_store.content_hash(config.id),
         }

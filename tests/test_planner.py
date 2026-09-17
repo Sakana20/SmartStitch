@@ -24,6 +24,35 @@ def make_config(tmp_path):
     )
 
 
+def make_generic_config(tmp_path, timeline=None):
+    timeline = ["pool_2", "pool_1"] if timeline is None else timeline
+    return AppConfig.model_validate(
+        {
+            "schema_version": 3,
+            "workflow_type": "generic",
+            "id": "generic-config",
+            "name": "通用配置",
+            "source_root": str(tmp_path),
+            "timeline": timeline,
+            "sources": {
+                category: {
+                    "label": label,
+                    "mode": "required",
+                    "directory": f"视频库/{category}",
+                }
+                for category, label in [("pool_1", "开场"), ("pool_2", "展示")]
+                if category in timeline
+            },
+            "benefit_overlays": {
+                "mode": "disabled",
+                "file": "",
+                "timing": {"scope": "full"},
+            },
+            "output": {"directory": str(tmp_path / "output")},
+        }
+    )
+
+
 def asset(category, name, weight=1):
     return Asset(
         id=f"{category}-{name}",
@@ -69,6 +98,47 @@ def test_every_item_contains_core_categories(tmp_path):
     plan = build_plan(config, scan, 4, seed=8)
     assert len(plan.items) == 4
     assert all(all(item.selections[category] for category in config.timeline) for item in plan.items)
+
+
+def test_generic_plan_uses_dynamic_timeline_order(tmp_path):
+    config = make_generic_config(tmp_path)
+    scan = ScanResult(
+        config_id=config.id,
+        assets={
+            "pool_1": [asset("pool_1", "opening")],
+            "pool_2": [asset("pool_2", "showcase")],
+            "benefit_overlay": [],
+        },
+    )
+
+    plan = build_plan(config, scan, 2, seed=5)
+
+    assert list(plan.items[0].selections) == ["pool_2", "pool_1"]
+    assert set(plan.distribution) == {"pool_1", "pool_2", "benefit_overlay"}
+
+
+def test_generic_empty_project_cannot_generate(tmp_path):
+    config = AppConfig.model_validate(
+        {
+            "schema_version": 3,
+            "workflow_type": "generic",
+            "id": "empty-generic",
+            "name": "空项目",
+            "source_root": str(tmp_path),
+            "timeline": [],
+            "sources": {},
+            "benefit_overlays": {
+                "mode": "disabled",
+                "file": "",
+                "timing": {"scope": "full"},
+            },
+            "output": {"directory": str(tmp_path / "output")},
+        }
+    )
+    scan = ScanResult(config_id=config.id, assets={"benefit_overlay": []})
+
+    with pytest.raises(PlanError, match="至少一个视频库"):
+        build_plan(config, scan, 1, seed=1)
 
 
 def core_signatures(plan):

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260917-14" />
+    <link rel="stylesheet" href="/styles.css?v=20260917-15" />
   </head>
   <body>
     <div class="noise"></div>
@@ -310,10 +310,17 @@
       <div class="modal-backdrop" data-close-new-config></div>
       <div class="modal-card compact-modal-card library-create-card">
         <div class="modal-heading">
-          <div><p class="eyebrow">NEW VIDEO LIBRARY</p><h2>新建标准视频库</h2></div>
+          <div><p class="eyebrow">NEW VIDEO LIBRARY</p><h2 id="newLibraryTitle">新建视频项目库</h2></div>
           <button class="drawer-close" data-close-new-config>×</button>
         </div>
-        <p>选择保存位置后，系统会一次建好原始视频、切片素材、利益点、成片和工作记录等全部文件夹。</p>
+        <p>淘宝闪购保留现有固定流程；通用模式可自行创建视频库并拖动编排顺序。</p>
+        <label class="field">
+          <span>项目类型</span>
+          <select id="newWorkflowType">
+            <option value="taobao_flash">淘宝闪购（现有流程）</option>
+            <option value="generic">通用视频拼接</option>
+          </select>
+        </label>
         <label class="field">
           <span>配置 ID <small>小写英文、数字和短横线</small></span>
           <input id="newConfigIdInput" type="text" placeholder="例如 product-video" autocomplete="off" />
@@ -336,14 +343,14 @@
         <div class="library-path-preview">
           <span>最终位置</span>
           <strong id="newLibraryFinalPath">请先选择保存位置</strong>
-          <small>将创建：原始视频 / 切片素材 / 前贴 / 引子 / 利益点 / 结尾 / 尾帧 / 未归类 / 风险提示语图片 / 成片输出 / 工作记录</small>
+          <small id="newLibraryDirectorySummary">将创建：原始视频 / 切片素材 / 前贴 / 引子 / 利益点 / 结尾 / 尾帧 / 未归类 / 风险提示语图片 / 成片输出 / 工作记录</small>
         </div>
         <div class="actions right"><button class="button secondary" data-close-new-config>取消</button><button id="createConfigBtn" class="button primary" disabled>创建视频库</button></div>
       </div>
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260917-14" defer></script>
-    <script src="/app.js?v=20260917-14" defer></script>
+    <script src="/timeline-math.js?v=20260917-15" defer></script>
+    <script src="/app.js?v=20260917-15" defer></script>
   </body>
 </html>

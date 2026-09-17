@@ -10,12 +10,19 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 BENEFIT_CATEGORY_PATTERN = re.compile(r"^benefit_[1-9][0-9]*$")
+POOL_CATEGORY_PATTERN = re.compile(r"^pool_[1-9][0-9]*$")
 MAX_BENEFIT_CATEGORIES = 20
+MAX_GENERIC_POOLS = 50
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 PATH_QUOTE_PAIRS = {"'": "'", '"': '"', "‘": "’", "“": "”"}
 
 
 def is_benefit_category(category: str) -> bool:
     return BENEFIT_CATEGORY_PATTERN.fullmatch(category) is not None
+
+
+def is_pool_category(category: str) -> bool:
+    return POOL_CATEGORY_PATTERN.fullmatch(category) is not None
 
 
 def normalize_path_input(value: Any) -> Any:
@@ -44,6 +51,8 @@ class AssetItemConfig(BaseModel):
 
 
 class SourceGroupConfig(BaseModel):
+    label: str = Field(default="", max_length=100)
+    description: str = Field(default="", max_length=500)
     mode: SourceMode = SourceMode.REQUIRED
     directory: str
     extensions: list[str] = Field(default_factory=lambda: [".mp4"])
@@ -177,7 +186,8 @@ class ScannerConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    schema_version: Literal[2] = 2
+    schema_version: Literal[2, 3] = 2
+    workflow_type: Literal["taobao_flash", "generic"] = "taobao_flash"
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
     name: str
     enabled: bool = True
@@ -205,7 +215,7 @@ class AppConfig(BaseModel):
             return value
         data = copy.deepcopy(value)
         version = data.get("schema_version", 1)
-        if version == 2:
+        if version in {2, 3}:
             return data
         if version != 1:
             raise ValueError(f"不支持的 schema_version: {version}")
@@ -235,6 +245,61 @@ class AppConfig(BaseModel):
 
     @model_validator(mode="after")
     def require_core_groups(self) -> AppConfig:
+        unknown = set(self.timeline) - set(self.sources)
+        if unknown:
+            raise ValueError(f"timeline 引用了未知素材组: {', '.join(sorted(unknown))}")
+
+        if len(self.timeline) != len(set(self.timeline)):
+            raise ValueError("timeline 中的素材组不得重复")
+
+        if self.workflow_type == "generic":
+            if self.schema_version != 3:
+                raise ValueError("通用视频库必须使用 schema_version 3")
+            malformed_pools = {
+                category
+                for category in set(self.sources) | set(self.timeline)
+                if not is_pool_category(category)
+            }
+            if malformed_pools:
+                raise ValueError(
+                    "通用视频库素材组必须命名为 pool_<正整数>: "
+                    + ", ".join(sorted(malformed_pools))
+                )
+            if len(self.sources) > MAX_GENERIC_POOLS:
+                raise ValueError(f"通用视频库最多 {MAX_GENERIC_POOLS} 个素材库")
+            unlabeled = sorted(
+                category
+                for category, group in self.sources.items()
+                if not group.label.strip()
+            )
+            if unlabeled:
+                raise ValueError(
+                    "通用视频库必须填写显示名称: " + ", ".join(unlabeled)
+                )
+            image_pools = sorted(
+                category
+                for category, group in self.sources.items()
+                if set(group.extensions) & IMAGE_EXTENSIONS
+            )
+            if image_pools:
+                raise ValueError(
+                    "通用视频库首期仅支持视频素材: " + ", ".join(image_pools)
+                )
+            if (
+                self.benefit_overlays.mode != SourceMode.DISABLED
+                and self.benefit_overlays.timing.scope not in {"full", "custom"}
+            ):
+                raise ValueError("通用视频库的贴图范围仅支持 full 或 custom")
+            unreferenced = sorted(set(self.sources) - set(self.timeline))
+            if unreferenced:
+                raise ValueError(
+                    "通用视频库的 timeline 必须包含全部素材组: "
+                    + ", ".join(unreferenced)
+                )
+            return self
+
+        if self.schema_version != 2:
+            raise ValueError("淘宝闪购配置必须使用 schema_version 2")
         core_groups = {"hook", "ending"}
         missing = core_groups - set(self.sources)
         if missing:
@@ -244,13 +309,6 @@ class AppConfig(BaseModel):
             raise ValueError(
                 "timeline 必须包含核心素材组: " + ", ".join(sorted(missing_from_timeline))
             )
-        unknown = set(self.timeline) - set(self.sources)
-        if unknown:
-            raise ValueError(f"timeline 引用了未知素材组: {', '.join(sorted(unknown))}")
-
-        if len(self.timeline) != len(set(self.timeline)):
-            raise ValueError("timeline 中的素材组不得重复")
-
         malformed_benefits = {
             category
             for category in set(self.sources) | set(self.timeline)
@@ -288,6 +346,7 @@ class AppConfig(BaseModel):
                 "sources 中的启用素材组未被 timeline 引用: "
                 + ", ".join(sorted(unreferenced_enabled))
             )
+
         return self
 
     def benefit_categories(self, *, active_only: bool = False) -> list[str]:
@@ -401,6 +460,7 @@ class CreateConfigRequest(BaseModel):
 class LibraryPreflightRequest(BaseModel):
     parent_directory: str = Field(min_length=1)
     folder_name: str = Field(min_length=1)
+    workflow_type: Literal["taobao_flash", "generic"] = "taobao_flash"
 
     _normalize_parent_directory = field_validator("parent_directory", mode="before")(
         normalize_path_input
@@ -415,6 +475,32 @@ class CreateLibraryRequest(LibraryPreflightRequest):
 
 class AddBenefitRequest(BaseModel):
     client_request_id: str = Field(min_length=8, max_length=128)
+    current_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class AddPoolRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=500)
+    mode: SourceMode = SourceMode.REQUIRED
+    default_weight: float = Field(default=1, ge=0)
+    client_request_id: str = Field(min_length=8, max_length=128)
+    current_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class UpdatePoolRequest(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=500)
+    mode: SourceMode | None = None
+    default_weight: float | None = Field(default=None, ge=0)
+    current_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ReorderTimelineRequest(BaseModel):
+    timeline: list[str] = Field(max_length=MAX_GENERIC_POOLS)
+    current_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class DeletePoolRequest(BaseModel):
     current_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 

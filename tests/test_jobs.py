@@ -84,3 +84,72 @@ def test_job_manager_writes_outputs_and_manifests(tmp_path):
     assert manager.list_jobs() == []
     assert len(list(output_directory.glob("*.mp4"))) == 2
     assert output_directory.exists()
+
+
+def test_generic_job_renders_dynamic_timeline_and_labelled_manifest(tmp_path):
+    source = tmp_path / "source"
+    generate_clip(source / "pool_1" / "opening.mp4", "red")
+    generate_clip(source / "pool_2" / "showcase.mp4", "blue")
+    config_directory = tmp_path / "config"
+    config_directory.mkdir()
+    config_data = {
+        "schema_version": 3,
+        "workflow_type": "generic",
+        "id": "generic-job",
+        "name": "通用任务",
+        "source_root": str(source),
+        "timeline": ["pool_2", "pool_1"],
+        "sources": {
+            "pool_1": {
+                "label": "开场",
+                "mode": "required",
+                "directory": "pool_1",
+            },
+            "pool_2": {
+                "label": "产品展示",
+                "mode": "required",
+                "directory": "pool_2",
+            },
+        },
+        "benefit_overlays": {
+            "mode": "disabled",
+            "file": "",
+            "timing": {"scope": "full"},
+        },
+        "output": {
+            "directory": str(tmp_path / "output"),
+            "width": 120,
+            "height": 200,
+            "fps": 20,
+            "video_preset": "ultrafast",
+            "crf": 30,
+        },
+        "batch": {"concurrency": 1, "retry_count": 0, "minimum_free_space_gb": 0},
+    }
+    (config_directory / "generic-job.yaml").write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    manager = JobManager(ConfigStore(config_directory), tmp_path / "data")
+
+    job = manager.create(
+        JobCreateRequest(config_id="generic-job", count=1, seed=9, auto_start=True)
+    )
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        job = manager.get_job(job["id"])
+        if job["status"] in {"completed", "partial_failed", "failed", "cancelled"}:
+            break
+        time.sleep(0.05)
+
+    assert job["status"] == "completed"
+    assert job["workflow_type"] == "generic"
+    assert job["timeline"] == ["pool_2", "pool_1"]
+    assert job["pool_labels"] == {"pool_2": "产品展示", "pool_1": "开场"}
+    output_directory = Path(job["output_directory"])
+    csv_header = (output_directory / "manifest.csv").read_text("utf-8-sig").splitlines()[0]
+    assert csv_header.split(",")[2:4] == [
+        "01_pool_2_产品展示",
+        "02_pool_1_开场",
+    ]
+    assert len(list(output_directory.glob("*.mp4"))) == 1

@@ -163,6 +163,74 @@ def test_create_managed_library_and_add_benefit(tmp_path):
     assert (storage / "商品 视频库" / "切片素材" / "利益点" / "2").is_dir()
 
 
+def test_generic_library_pool_api_supports_crud_and_reorder(tmp_path):
+    (tmp_path / "config").mkdir()
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    client = TestClient(create_app(tmp_path))
+    created = client.post(
+        "/api/v1/libraries",
+        json={
+            "new_id": "generic-library",
+            "new_name": "通用项目",
+            "parent_directory": str(storage),
+            "folder_name": "通用项目库",
+            "workflow_type": "generic",
+            "client_request_id": "generic-library-request",
+        },
+    ).json()
+
+    first = client.post(
+        "/api/v1/configs/generic-library/pools",
+        json={
+            "label": "开场",
+            "client_request_id": "pool-api-request-1",
+            "current_config_hash": created["content_hash"],
+        },
+    )
+    assert first.status_code == 200
+    second = client.post(
+        "/api/v1/configs/generic-library/pools",
+        json={
+            "label": "展示",
+            "client_request_id": "pool-api-request-2",
+            "current_config_hash": first.json()["content_hash"],
+        },
+    )
+    assert second.status_code == 200
+
+    renamed = client.patch(
+        "/api/v1/configs/generic-library/pools/pool_2",
+        json={
+            "label": "产品展示",
+            "description": "主体画面",
+            "mode": "optional",
+            "default_weight": 2,
+            "current_config_hash": second.json()["content_hash"],
+        },
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["config"]["sources"]["pool_2"]["label"] == "产品展示"
+
+    reordered = client.put(
+        "/api/v1/configs/generic-library/timeline",
+        json={
+            "timeline": ["pool_2", "pool_1"],
+            "current_config_hash": renamed.json()["content_hash"],
+        },
+    )
+    assert reordered.status_code == 200
+    assert reordered.json()["timeline"] == ["pool_2", "pool_1"]
+
+    deleted = client.request(
+        "DELETE",
+        "/api/v1/configs/generic-library/pools/pool_1",
+        json={"current_config_hash": reordered.json()["content_hash"]},
+    )
+    assert deleted.status_code == 200
+    assert (storage / "通用项目库" / "视频库" / "pool_1").is_dir()
+
+
 def test_directory_picker_api_returns_selected_path(tmp_path, monkeypatch):
     (tmp_path / "config").mkdir()
     monkeypatch.setattr(

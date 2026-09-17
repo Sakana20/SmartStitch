@@ -34,6 +34,42 @@ def config_data(tmp_path) -> dict[str, Any]:
     }
 
 
+def test_generic_schema_accepts_empty_project_and_dynamic_pool_names(tmp_path):
+    empty = AppConfig.model_validate(
+        {
+            "schema_version": 3,
+            "workflow_type": "generic",
+            "id": "generic-test",
+            "name": "通用配置",
+            "source_root": str(tmp_path),
+            "timeline": [],
+            "sources": {},
+            "benefit_overlays": {
+                "mode": "disabled",
+                "file": "",
+                "timing": {"scope": "full"},
+            },
+            "output": {"directory": str(tmp_path / "output")},
+        }
+    )
+    assert empty.workflow_type == "generic"
+
+    data = empty.model_dump(mode="json")
+    data["timeline"] = ["pool_2", "pool_1"]
+    data["sources"] = {
+        "pool_1": {"label": "开场", "directory": "视频库/pool_1"},
+        "pool_2": {"label": "展示", "directory": "视频库/pool_2"},
+    }
+    config = AppConfig.model_validate(data)
+    assert config.timeline == ["pool_2", "pool_1"]
+    assert config.sources["pool_1"].label == "开场"
+
+    data["sources"]["custom"] = {"directory": "bad"}
+    data["timeline"].append("custom")
+    with pytest.raises(ValidationError, match="pool_<正整数>"):
+        AppConfig.model_validate(data)
+
+
 def test_path_fields_remove_macos_copy_quotes_without_changing_filename(tmp_path):
     copied_path = (
         "'/Volumes/Elements SE/陈鼎琦/饿了么整理/素材/星广一口价二剪/原始视频/"

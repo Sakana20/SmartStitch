@@ -171,8 +171,9 @@ def scan_group(config: AppConfig, category: str, group: SourceGroupConfig) -> tu
         return [], []
     directory, discovered = _discover_paths(config, group)
     errors: list[str] = []
+    category_name = f"{group.label}（{category}）" if group.label else category
     if not directory.exists():
-        message = f"{category}: 目录不存在或外接磁盘未挂载: {directory}"
+        message = f"{category_name}: 目录不存在或外接磁盘未挂载: {directory}"
         if group.mode == SourceMode.REQUIRED:
             errors.append(message)
         return [], errors
@@ -218,7 +219,7 @@ def scan_group(config: AppConfig, category: str, group: SourceGroupConfig) -> tu
 
     selectable = [asset for asset in assets if asset.selectable]
     if group.mode == SourceMode.REQUIRED and not selectable:
-        errors.append(f"{category}: 必需素材组没有可用且权重大于 0 的素材")
+        errors.append(f"{category_name}: 必需素材组没有可用且权重大于 0 的素材")
     return assets, errors
 
 
@@ -326,7 +327,9 @@ def scan_config(config: AppConfig) -> ScanResult:
         errors.extend(group_errors)
         invalid = [asset.name for asset in group_assets if not asset.valid]
         if invalid:
-            warnings.append(f"{category}: {len(invalid)} 个文件不可用")
+            label = group.label.strip()
+            name = f"{label}（{category}）" if label else category
+            warnings.append(f"{name}: {len(invalid)} 个文件不可用")
 
     overlays, overlay_errors = scan_fixed_overlay(config)
     assets["benefit_overlay"] = overlays

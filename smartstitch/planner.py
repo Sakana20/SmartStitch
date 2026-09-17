@@ -20,6 +20,12 @@ EXACT_STRICT_COMBINATION_LIMIT = 250_000
 
 
 def _core_categories(config: AppConfig) -> tuple[str, ...]:
+    if config.workflow_type == "generic":
+        return tuple(
+            category
+            for category in config.timeline
+            if config.sources[category].mode != SourceMode.DISABLED
+        )
     return ("hook", *config.benefit_categories(active_only=True), "ending")
 
 
@@ -50,6 +56,11 @@ def _sequence(assets: list[Asset], count: int, mode: str, rng: random.Random) ->
 
 def _selectable(scan: ScanResult, category: str) -> list[Asset]:
     return [asset for asset in scan.assets.get(category, []) if asset.selectable]
+
+
+def _category_name(config: AppConfig, category: str) -> str:
+    label = config.sources[category].label.strip()
+    return f"{label}（{category}）" if label else category
 
 
 def _core_signature(
@@ -257,19 +268,21 @@ def build_plan(
         candidates = _selectable(scan, category)
         if not candidates:
             if group.mode == SourceMode.REQUIRED:
-                raise PlanError(f"{category} 没有可用素材")
+                raise PlanError(f"{_category_name(config, category)} 没有可用素材")
             sequences[category] = [None] * count
             continue
         sequences[category] = list(_sequence(candidates, count, config.randomization.mode, rng))
 
     core_categories = _core_categories(config)
+    if config.workflow_type == "generic" and not core_categories:
+        raise PlanError("请先创建并启用至少一个视频库")
     core_candidates: dict[str, list[Asset | None]] = {}
     for category in core_categories:
         candidates = _selectable(scan, category)
         if candidates:
             core_candidates[category] = list(candidates)
         elif config.sources[category].mode == SourceMode.REQUIRED:
-            raise PlanError(f"{category} 没有可用素材")
+            raise PlanError(f"{_category_name(config, category)} 没有可用素材")
         else:
             core_candidates[category] = [None]
     if config.randomization.duplicate_policy == "strict":
