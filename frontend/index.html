@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260916-13" />
+    <link rel="stylesheet" href="/styles.css?v=20260917-14" />
   </head>
   <body>
     <div class="noise"></div>
@@ -135,9 +135,22 @@
           </div>
           <div class="timeline-source-navigation" aria-label="源视频切换">
             <button id="previousVideoBtn" class="button secondary small" type="button" disabled>← 上一个视频</button>
-            <div class="timeline-current-source">
-              <strong id="timelineCurrentSource">尚未载入源视频文件夹</strong>
-              <small id="timelineSourcePosition">选择文件夹后可依次审核其中的视频</small>
+            <div id="timelineSourceSelector" class="timeline-source-selector">
+              <button id="timelineCurrentSourceButton" class="timeline-current-source" type="button" aria-haspopup="listbox" aria-expanded="false" disabled>
+                <span>
+                  <strong id="timelineCurrentSource">尚未载入源视频文件夹</strong>
+                  <small id="timelineSourcePosition">选择文件夹后可依次审核其中的视频</small>
+                </span>
+                <i aria-hidden="true">⌄</i>
+              </button>
+              <div id="timelineSourcePicker" class="timeline-source-picker hidden">
+                <label class="timeline-source-search">
+                  <span>搜索视频</span>
+                  <input id="timelineSourceSearchInput" type="search" placeholder="输入文件名快速查找…" autocomplete="off" />
+                </label>
+                <div class="timeline-source-picker-summary"><span id="timelineSourceMatchCount"></span><small>点击视频即可切换并分析</small></div>
+                <div id="timelineSourceList" class="timeline-source-list" role="listbox" aria-label="源视频列表"></div>
+              </div>
             </div>
             <button id="nextVideoBtn" class="button secondary small" type="button" disabled>下一个视频 →</button>
           </div>
@@ -330,7 +343,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260916-13" defer></script>
-    <script src="/app.js?v=20260916-13" defer></script>
+    <script src="/timeline-math.js?v=20260917-14" defer></script>
+    <script src="/app.js?v=20260917-14" defer></script>
   </body>
 </html>

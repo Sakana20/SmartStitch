@@ -19,6 +19,8 @@ const state = {
     sourceVideos: [],
     sourceIndex: -1,
     sourceLoading: false,
+    sourcePickerOpen: false,
+    sourceFilter: "",
     analysis: null,
     breakpoints: [],
     machineBreakpoints: [],
@@ -203,12 +205,29 @@ function bindTimelineEvents() {
   $("#chooseTimelineDirectoryBtn").addEventListener("click", chooseTimelineSourceDirectory);
   $("#previousVideoBtn").addEventListener("click", () => navigateTimelineSource(-1));
   $("#nextVideoBtn").addEventListener("click", () => navigateTimelineSource(1));
+  $("#timelineCurrentSourceButton").addEventListener("click", toggleTimelineSourcePicker);
+  $("#timelineSourceSearchInput").addEventListener("input", event => {
+    state.timeline.sourceFilter = event.target.value;
+    renderTimelineSourcePickerList();
+  });
+  $("#timelineSourceSearchInput").addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    const [firstIndex] = filteredTimelineSourceIndexes();
+    if (firstIndex === undefined) return;
+    event.preventDefault();
+    selectTimelineSource(firstIndex);
+  });
+  document.addEventListener("click", event => {
+    if (!state.timeline.sourcePickerOpen || event.target.closest?.("#timelineSourceSelector")) return;
+    setTimelineSourcePickerOpen(false);
+  });
   $("#timelinePathInput").addEventListener("input", event => {
     const directory = normalizePathInput(event.target.value);
     if (directory === state.timeline.sourceDirectory) return;
     state.timeline.sourceDirectory = "";
     state.timeline.sourceVideos = [];
     state.timeline.sourceIndex = -1;
+    setTimelineSourcePickerOpen(false);
     clearTimelineAnalysisView();
     renderTimelineSourceNavigation();
   });
@@ -267,6 +286,12 @@ function bindTimelineEvents() {
       scheduleTimelineDragFrame();
     }
     if (!$("#timelineView").classList.contains("active")) return;
+    if (event.key === "Escape" && state.timeline.sourcePickerOpen) {
+      event.preventDefault();
+      setTimelineSourcePickerOpen(false);
+      $("#timelineCurrentSourceButton").focus();
+      return;
+    }
     const activeElement = document.activeElement;
     const isEditing = ["INPUT", "TEXTAREA", "SELECT"].includes(activeElement?.tagName)
       || Boolean(activeElement?.isContentEditable);
@@ -350,6 +375,7 @@ async function loadTimelineSourceDirectory(sourceDirectory, preferredPath = null
   }
   state.timeline.sourceDirectory = result.source_directory;
   state.timeline.sourceVideos = result.videos;
+  setTimelineSourcePickerOpen(false);
   const preferredIndex = preferredPath
     ? result.videos.findIndex(video => video.path === preferredPath)
     : -1;
@@ -390,7 +416,17 @@ function clearTimelineAnalysisView() {
 async function navigateTimelineSource(delta) {
   if (state.timeline.sourceLoading) return;
   const targetIndex = state.timeline.sourceIndex + delta;
+  await selectTimelineSource(targetIndex);
+}
+
+async function selectTimelineSource(targetIndex) {
+  setTimelineSourcePickerOpen(false);
+  if (state.timeline.sourceLoading) return;
   if (targetIndex < 0 || targetIndex >= state.timeline.sourceVideos.length) return;
+  const target = state.timeline.sourceVideos[targetIndex];
+  if (targetIndex === state.timeline.sourceIndex && state.timeline.analysis?.source_path === target.path) {
+    return;
+  }
   const previousIndex = state.timeline.sourceIndex;
   state.timeline.sourceIndex = targetIndex;
   state.timeline.sourceLoading = true;
@@ -407,6 +443,55 @@ async function navigateTimelineSource(delta) {
   }
 }
 
+function toggleTimelineSourcePicker() {
+  if (state.timeline.sourceLoading || !state.timeline.sourceVideos.length) return;
+  setTimelineSourcePickerOpen(!state.timeline.sourcePickerOpen);
+}
+
+function setTimelineSourcePickerOpen(open) {
+  state.timeline.sourcePickerOpen = Boolean(
+    open && !state.timeline.sourceLoading && state.timeline.sourceVideos.length,
+  );
+  const picker = $("#timelineSourcePicker");
+  const button = $("#timelineCurrentSourceButton");
+  if (!picker || !button) return;
+  picker.classList.toggle("hidden", !state.timeline.sourcePickerOpen);
+  button.setAttribute("aria-expanded", String(state.timeline.sourcePickerOpen));
+  if (!state.timeline.sourcePickerOpen) return;
+  state.timeline.sourceFilter = "";
+  $("#timelineSourceSearchInput").value = "";
+  renderTimelineSourcePickerList();
+  requestAnimationFrame(() => {
+    $("#timelineSourceSearchInput").focus();
+    $(".timeline-source-option[aria-selected=\"true\"]")?.scrollIntoView({ block: "center" });
+  });
+}
+
+function filteredTimelineSourceIndexes() {
+  const query = state.timeline.sourceFilter.trim().toLocaleLowerCase("zh-CN");
+  return state.timeline.sourceVideos
+    .map((video, index) => ({ video, index }))
+    .filter(({ video }) => !query || video.name.toLocaleLowerCase("zh-CN").includes(query))
+    .map(({ index }) => index);
+}
+
+function renderTimelineSourcePickerList() {
+  const indexes = filteredTimelineSourceIndexes();
+  $("#timelineSourceMatchCount").textContent = state.timeline.sourceFilter
+    ? `找到 ${indexes.length} / ${state.timeline.sourceVideos.length} 个视频`
+    : `共 ${state.timeline.sourceVideos.length} 个视频`;
+  $("#timelineSourceList").innerHTML = indexes.length
+    ? indexes.map(index => {
+      const video = state.timeline.sourceVideos[index];
+      const selected = index === state.timeline.sourceIndex;
+      return `<button class="timeline-source-option" type="button" role="option" aria-selected="${selected}" data-source-index="${index}" title="${escapeHtml(video.name)}"><small>${index + 1} / ${state.timeline.sourceVideos.length}</small><span>${escapeHtml(video.name)}</span></button>`;
+    }).join("")
+    : '<div class="timeline-source-no-results">没有匹配的视频，换个文件名试试</div>';
+  $$('[data-source-index]').forEach(option => {
+    option.addEventListener("click", () => selectTimelineSource(Number(option.dataset.sourceIndex)));
+  });
+}
+
 function renderTimelineSourceNavigation(loadingText = "") {
   const { sourceVideos, sourceIndex, sourceLoading } = state.timeline;
   const current = sourceVideos[sourceIndex] || null;
@@ -417,6 +502,10 @@ function renderTimelineSourceNavigation(loadingText = "") {
     : (loadingText || "选择文件夹后可依次审核其中的视频");
   $("#previousVideoBtn").disabled = sourceLoading || sourceIndex <= 0;
   $("#nextVideoBtn").disabled = sourceLoading || sourceIndex < 0 || sourceIndex >= sourceVideos.length - 1;
+  const sourceButton = $("#timelineCurrentSourceButton");
+  sourceButton.disabled = sourceLoading || !current;
+  sourceButton.title = current ? "点击搜索或选择其他视频" : "请先载入源视频文件夹";
+  if (sourceLoading || !current) setTimelineSourcePickerOpen(false);
   const analyzeButton = $("#analyzeTimelineBtn");
   analyzeButton.disabled = sourceLoading;
   analyzeButton.textContent = sourceLoading
