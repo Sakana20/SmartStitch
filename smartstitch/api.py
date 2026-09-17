@@ -16,6 +16,7 @@ from .audio_preview import AudioPreviewError, create_audio_preview
 from .config import ConfigError, ConfigStore
 from .jobs import JobManager, TERMINAL_STATES
 from .library import LibraryConflictError, LibraryError, LibraryService, pick_directory
+from .media import DisconnectSafeFileResponse
 from .models import (
     AddBenefitRequest,
     AddPoolRequest,
@@ -417,9 +418,9 @@ def create_app(
             raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/v1/timeline/media/{media_token}")
-    def timeline_media(media_token: str) -> FileResponse:
+    def timeline_media(media_token: str) -> DisconnectSafeFileResponse:
         try:
-            return FileResponse(timeline_analyzer.media_path(media_token))
+            return DisconnectSafeFileResponse(timeline_analyzer.media_path(media_token))
         except TimelineError as exc:
             raise HTTPException(404, str(exc)) from exc
 
