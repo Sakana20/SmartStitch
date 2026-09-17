@@ -9,7 +9,7 @@ const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260917-15"/,
+  /href="\/styles\.css\?v=20260917-16"/,
   "源视频切换样式更新后必须刷新 CSS 缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]

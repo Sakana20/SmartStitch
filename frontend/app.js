@@ -1773,6 +1773,12 @@ async function selectConfig(id) {
     } catch (_) {
       state.library = null;
     }
+    if (state.library?.config_updated) {
+      const migrated = await api(`/configs/${id}`);
+      state.config = migrated.config;
+      state.configHash = migrated.content_hash;
+      state.yaml = migrated.yaml_text;
+    }
     if (state.library?.managed && state.library.health === "healthy") {
       try {
         const targets = await api(`/libraries/by-config/${id}/slice-targets`);
@@ -2079,7 +2085,7 @@ function updateLibraryCreatePreview() {
     ? `${parent.replace(/\/+$/, "")}/${folder}`
     : "请先选择保存位置";
   $("#newLibraryDirectorySummary").textContent = workflowType === "generic"
-    ? "将创建：原始视频 / 视频库 / 未归类 / 成片输出 / 工作记录；具体视频库由你随后添加"
+    ? "将创建：原始视频 / 视频库 / 未归类 / 风险提示语图片 / 成片输出 / 工作记录；具体视频库由你随后添加"
     : "将创建：原始视频 / 切片素材 / 前贴 / 引子 / 利益点 / 结尾 / 尾帧 / 未归类 / 风险提示语图片 / 成片输出 / 工作记录";
 }
 
@@ -2351,18 +2357,21 @@ function renderVisualConfig() {
   const sourceToolbar = generic
     ? `<div class="benefit-config-toolbar"><div><strong>自定义视频库</strong><small>每个库抽取一个视频；拖动卡片决定最终拼接顺序</small></div><button id="addPoolBtn" class="button secondary small" type="button" ${config.timeline.length >= 50 ? "disabled" : ""}>+添加视频库</button></div>${config.timeline.length ? "" : '<div class="empty-pool-state">还没有视频库。添加第一个视频库后即可放入素材并生成。</div>'}`
     : `<div class="benefit-config-toolbar"><div><strong>多人利益点</strong><small>每段从自己的素材池中抽取 1 个片段</small></div><button id="addBenefitBtn" class="button secondary small" type="button" ${benefitCategories.length >= 20 ? "disabled" : ""}>+添加利益点</button></div>`;
-  const overlaySection = generic ? "" : `
+  const overlayTimingChoices = generic
+    ? [["full", "整条成片"], ["custom", "自定义时段"]]
+    : [["full", "整条成片"], ["main", "主片段"], ["benefits", "全部利益点段"], ["custom", "自定义时段"]];
+  const overlaySection = `
     <details class="config-section" data-config-section="benefit-overlay" open>
       <summary>风险提示语图片 <small>最高图层叠加设置</small></summary>
       <div class="config-section-body config-form-grid three">
         ${configSelect("使用方式", "benefit_overlays.mode", overlay.mode, modeChoices)}
-        ${configInput("唯一图片文件", "benefit_overlays.file", overlay.file, { wide: true, pathInput: true, hint: "标准库可留空自动识别 · 固定且不参与随机", placeholder: "/路径/风险提示语图片.png" })}
+        ${configInput("唯一图片文件", "benefit_overlays.file", overlay.file, { wide: true, pathInput: true, hint: "受管项目库可留空自动识别 · 固定且不参与随机", placeholder: "/路径/风险提示语图片.png" })}
         ${configSelect("缩放方式", "benefit_overlays.placement.scale_mode", overlay.placement.scale_mode, [["original", "保持原尺寸"], ["fit", "等比适配画布"], ["stretch", "拉伸铺满"]])}
         ${configInput("整体透明度", "benefit_overlays.placement.opacity", overlay.placement.opacity, { type: "number", hint: "0～1" })}
         ${configSwitch("超出画布时自动缩小", "benefit_overlays.placement.shrink_if_oversized", overlay.placement.shrink_if_oversized)}
         ${configInput("横向位置 X", "benefit_overlays.placement.x", overlay.placement.x, { placeholder: "0 或 (W-w)/2" })}
         ${configInput("纵向位置 Y", "benefit_overlays.placement.y", overlay.placement.y, { placeholder: "0 或 (H-h)/2" })}
-        ${configSelect("显示时段", "benefit_overlays.timing.scope", overlay.timing.scope, [["full", "整条成片"], ["main", "主片段"], ["benefits", "全部利益点段"], ["custom", "自定义时段"]])}
+        ${configSelect("显示时段", "benefit_overlays.timing.scope", overlay.timing.scope, overlayTimingChoices)}
         ${configInput("自定义开始", "benefit_overlays.timing.start_seconds", overlay.timing.start_seconds, { type: "number", hint: "秒" })}
         ${configInput("自定义结束", "benefit_overlays.timing.end_seconds", overlay.timing.end_seconds, { type: "nullable-number", hint: "留空到片尾" })}
       </div>

@@ -52,6 +52,7 @@ GENERIC_DIRECTORIES = (
     Path("原始视频"),
     Path("视频库"),
     Path("未归类"),
+    Path("风险提示语图片"),
     Path("成片输出"),
     Path("工作记录/切片清单"),
     Path("工作记录/生成清单"),
@@ -113,6 +114,7 @@ def _marker_payload(request: CreateLibraryRequest) -> dict[str, Any]:
                 "originals": "原始视频",
                 "pools": "视频库",
                 "unclassified": "未归类",
+                "overlays": "风险提示语图片",
                 "outputs": "成片输出",
                 "records": "工作记录",
             },
@@ -185,7 +187,7 @@ def _generic_config(request: CreateLibraryRequest, root: Path) -> AppConfig:
             "timeline": [],
             "sources": {},
             "benefit_overlays": {
-                "mode": "disabled",
+                "mode": "optional",
                 "file": "",
                 "timing": {"scope": "full"},
             },
@@ -296,6 +298,19 @@ class LibraryService:
             }
         try:
             marker = self._load_marker(root)
+            overlay_layout_upgraded = False
+            if config.workflow_type == "generic":
+                overlay_layout_upgraded = self._ensure_generic_overlay_layout(
+                    root, marker
+                )
+                if (
+                    overlay_layout_upgraded
+                    and config.benefit_overlays.mode == SourceMode.DISABLED
+                ):
+                    config = config.model_copy(deep=True)
+                    config.benefit_overlays.mode = SourceMode.OPTIONAL
+                    config.benefit_overlays.timing.scope = "full"
+                    self.config_store.save_config(config_id, config)
         except (OSError, json.JSONDecodeError, LibraryError) as exc:
             return {
                 "managed": True,
@@ -323,6 +338,7 @@ class LibraryService:
             "workflow_type": config.workflow_type,
             "next_benefit_number": marker.get("next_benefit_number"),
             "next_pool_number": marker.get("next_pool_number"),
+            "config_updated": overlay_layout_upgraded,
             "missing_directories": missing,
         }
 
@@ -652,7 +668,28 @@ class LibraryService:
         marker = self._load_marker(root)
         if marker.get("layout_version") != GENERIC_LAYOUT_VERSION:
             raise LibraryError("通用项目标记版本不正确")
+        self._ensure_generic_overlay_layout(root, marker)
         return config, root, marker
+
+    def _ensure_generic_overlay_layout(
+        self, root: Path, marker: dict[str, Any]
+    ) -> bool:
+        """Add the overlay directory to generic libraries created before this feature."""
+        paths = marker.get("paths")
+        if not isinstance(paths, dict):
+            raise LibraryError("视频库标记缺少路径定义")
+        relative = Path(str(paths.get("overlays") or "风险提示语图片"))
+        target = root / relative
+        if relative.is_absolute() or not _within(root, target) or target.is_symlink():
+            raise LibraryError("风险提示语图片目录无效或越过项目库边界")
+        if target.exists() and not target.is_dir():
+            raise LibraryError(f"风险提示语图片目标不是文件夹: {target}")
+        target.mkdir(parents=True, exist_ok=True)
+        upgraded = paths.get("overlays") != str(relative)
+        if upgraded:
+            paths["overlays"] = str(relative)
+            _write_json_atomic(root / MARKER_PATH, marker)
+        return upgraded
 
     def _check_hash(self, config_id: str, expected: str) -> None:
         if self.config_store.content_hash(config_id) != expected:

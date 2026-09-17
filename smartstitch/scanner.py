@@ -231,7 +231,12 @@ def _discover_managed_overlay(config: AppConfig) -> tuple[Path | None, str | Non
         return None, None
     try:
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
-        relative = marker["paths"]["overlays"]
+        paths = marker["paths"]
+        relative = paths.get("overlays")
+        if not relative and marker.get("workflow_type") == "generic":
+            # Compatibility with generic layout v2 projects created before
+            # the risk-overlay directory was added.
+            relative = "风险提示语图片"
         if not isinstance(relative, str) or not relative.strip():
             raise ValueError("缺少 paths.overlays")
         directory = (root / relative).resolve()

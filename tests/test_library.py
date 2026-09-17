@@ -123,12 +123,39 @@ def test_create_generic_library_starts_empty_and_uses_independent_layout(tmp_pat
     marker = json.loads((root / MARKER_PATH).read_text(encoding="utf-8"))
     assert marker["layout_version"] == 2
     assert marker["next_pool_number"] == 1
+    assert marker["paths"]["overlays"] == "风险提示语图片"
+    assert (root / "风险提示语图片").is_dir()
     config = store.load("generic-video")
     assert config.schema_version == 3
     assert config.workflow_type == "generic"
     assert config.timeline == []
     assert config.sources == {}
-    assert config.benefit_overlays.mode == SourceMode.DISABLED
+    assert config.benefit_overlays.mode == SourceMode.OPTIONAL
+    assert config.benefit_overlays.timing.scope == "full"
+
+
+def test_inspect_upgrades_generic_library_with_overlay_directory(tmp_path):
+    store = ConfigStore(tmp_path / "config")
+    service = LibraryService(store)
+    created = service.create(create_generic_request(tmp_path))
+    root = Path(created["root_path"])
+    legacy_config = store.load("generic-video")
+    legacy_config.benefit_overlays.mode = SourceMode.DISABLED
+    store.save_config("generic-video", legacy_config)
+    marker_path = root / MARKER_PATH
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    del marker["paths"]["overlays"]
+    marker_path.write_text(json.dumps(marker, ensure_ascii=False), encoding="utf-8")
+    (root / "风险提示语图片").rmdir()
+
+    inspected = service.inspect_by_config("generic-video")
+
+    assert inspected["health"] == "healthy"
+    assert inspected["config_updated"] is True
+    assert (root / "风险提示语图片").is_dir()
+    upgraded = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert upgraded["paths"]["overlays"] == "风险提示语图片"
+    assert store.load("generic-video").benefit_overlays.mode == SourceMode.OPTIONAL
 
 
 def test_generic_pool_lifecycle_and_reorder_preserve_deleted_directory(tmp_path):
