@@ -5,6 +5,9 @@ import json
 import re
 import subprocess
 import threading
+import time
+import uuid
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -19,6 +22,10 @@ class SliceError(ValueError):
 
 
 class SliceConflictError(SliceError):
+    pass
+
+
+class SliceCancelled(SliceError):
     pass
 
 
@@ -38,6 +45,15 @@ def _safe_stem(value: str) -> str:
     return cleaned or "video"
 
 
+def slice_request_key(request: TimelineSliceRequest) -> str:
+    return hashlib.sha256(
+        (
+            f"{request.analysis_id}\0{request.config_id}\0"
+            f"{request.review_revision}\0{request.client_request_id}"
+        ).encode()
+    ).hexdigest()[:16]
+
+
 class TimelineSlicer:
     def __init__(
         self,
@@ -48,13 +64,43 @@ class TimelineSlicer:
         self.timeline_analyzer = timeline_analyzer
         self.library_service = library_service
         self.runner = runner
-        self._lock = threading.RLock()
+        self._prepare_lock = threading.RLock()
+        self._execution_lock = threading.RLock()
 
     def export(self, request: TimelineSliceRequest) -> dict[str, Any]:
-        with self._lock:
-            return self._export(request)
+        with self._execution_lock:
+            with self._prepare_lock:
+                batch = self._prepare(request, initial_status="running")
+            if batch.get("idempotent"):
+                return batch
+            return self._execute(batch)
 
-    def _export(self, request: TimelineSliceRequest) -> dict[str, Any]:
+    def prepare(
+        self,
+        request: TimelineSliceRequest,
+        *,
+        reserved_paths: set[str] | None = None,
+        job_id: str | None = None,
+        write_manifest: bool = True,
+    ) -> dict[str, Any]:
+        with self._prepare_lock:
+            return self._prepare(
+                request,
+                initial_status="queued",
+                reserved_paths=reserved_paths,
+                job_id=job_id,
+                write_manifest=write_manifest,
+            )
+
+    def _prepare(
+        self,
+        request: TimelineSliceRequest,
+        *,
+        initial_status: str,
+        reserved_paths: set[str] | None = None,
+        job_id: str | None = None,
+        write_manifest: bool = True,
+    ) -> dict[str, Any]:
         record = self.timeline_analyzer.load_record(request.analysis_id)
         review = record.get("review")
         if not isinstance(review, dict) or not isinstance(review.get("segments"), list):
@@ -128,12 +174,7 @@ class TimelineSlicer:
         if not inspected.get("managed") or inspected.get("health") != "healthy":
             raise LibraryError("批量切片只能写入布局健康的受管视频库")
 
-        manifest_key = hashlib.sha256(
-            (
-                f"{request.analysis_id}\0{request.config_id}\0"
-                f"{request.review_revision}\0{request.client_request_id}"
-            ).encode()
-        ).hexdigest()[:16]
+        manifest_key = slice_request_key(request)
         manifest_directory = root / "工作记录/切片清单"
         manifest_path = manifest_directory / f"slice-{manifest_key}.json"
         if manifest_path.is_file():
@@ -163,19 +204,30 @@ class TimelineSlicer:
                 request.config_id, category
             )
 
+        created_at = datetime.now(UTC).isoformat()
+        resolved_job_id = job_id or uuid.uuid4().hex
         batch = {
             "ok": True,
             "idempotent": False,
-            "status": "running",
+            "id": resolved_job_id,
+            "short_id": resolved_job_id[:8],
+            "job_type": "timeline_slice",
+            "request_key": manifest_key,
+            "client_request_id": request.client_request_id,
+            "status": initial_status,
+            "progress": 0.0,
             "slice_batch_id": manifest_key,
             "analysis_id": request.analysis_id,
             "review_revision": request.review_revision,
             "config_id": request.config_id,
             "config_hash": request.current_config_hash,
             "library_id": inspected.get("library_id"),
-            "created_at": datetime.now(UTC).isoformat(),
+            "created_at": created_at,
+            "started_at": created_at if initial_status == "running" else None,
+            "finished_at": None,
             "source": {
                 "path": str(source),
+                "name": source.name,
                 "size_bytes": stat.st_size,
                 "modified_at_ns": stat.st_mtime_ns,
                 "fps": fps,
@@ -187,8 +239,10 @@ class TimelineSlicer:
             ),
             "success_count": 0,
             "failure_count": 0,
+            "cancelled_count": 0,
             "skipped_count": 0,
             "manifest_path": str(manifest_path),
+            "manifest_sync_error": None,
         }
         source_stem = _safe_stem(source.stem)
         for assignment in normalized_assignments:
@@ -230,10 +284,21 @@ class TimelineSlicer:
                 "target_directory": None,
                 "output_path": None,
                 "status": "pending",
+                "phase": "waiting",
+                "progress": 0.0,
+                "started_at": None,
+                "finished_at": None,
+                "attempts": 0,
+                "temporary_path": None,
+                "ffmpeg_exit_code": None,
+                "ffprobe_result": None,
                 "error": None,
             }
             if category == "skip":
                 item["status"] = "skipped"
+                item["phase"] = "done"
+                item["progress"] = 1.0
+                item["finished_at"] = created_at
                 batch["items"].append(item)
                 batch["skipped_count"] += 1
                 continue
@@ -250,32 +315,105 @@ class TimelineSlicer:
                     f"{source_stem}__g{unit_index:03d}_{category_stem}"
                     f"_p{segment_indexes[0]:03d}-{segment_indexes[-1]:03d}.mp4"
                 )
-            output = self._unique_output(target_directory / filename)
+            output = self._unique_output(
+                target_directory / filename, reserved_paths or set()
+            )
             item["target_directory"] = str(target_directory)
             item["output_path"] = str(output)
             batch["items"].append(item)
 
-        _atomic_json(manifest_path, batch)
+        if write_manifest:
+            _atomic_json(manifest_path, batch)
+        return batch
+
+    def execute(
+        self,
+        batch: dict[str, Any],
+        *,
+        on_update: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+        process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+    ) -> dict[str, Any]:
+        with self._execution_lock:
+            return self._execute(
+                batch,
+                on_update=on_update,
+                cancel_event=cancel_event,
+                process_callback=process_callback,
+            )
+
+    def _execute(
+        self,
+        batch: dict[str, Any],
+        *,
+        on_update: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+        process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+    ) -> dict[str, Any]:
+        source = Path(str(batch["source"]["path"]))
+        fps = float(batch["source"]["fps"])
+        manifest_path = Path(str(batch["manifest_path"]))
+        manifest_key = str(batch["request_key"])
+        batch["status"] = "running"
+        batch["started_at"] = batch.get("started_at") or datetime.now(UTC).isoformat()
+        self._publish(batch, manifest_path, on_update)
         source_has_audio: bool | None = None
         for item in batch["items"]:
-            if item["status"] == "skipped":
+            if item["status"] in {"skipped", "succeeded"}:
+                continue
+            if cancel_event is not None and cancel_event.is_set():
+                item["status"] = "cancelled"
+                item["phase"] = "done"
+                item["progress"] = 1.0
+                item["finished_at"] = datetime.now(UTC).isoformat()
+                batch["cancelled_count"] += 1
                 continue
             temporary = Path(item["output_path"]).with_name(
                 f".{Path(item['output_path']).stem}.{manifest_key}.part.mp4"
             )
             item["status"] = "running"
-            _atomic_json(manifest_path, batch)
+            item["phase"] = "encoding"
+            item["started_at"] = datetime.now(UTC).isoformat()
+            item["attempts"] = int(item.get("attempts") or 0) + 1
+            item["temporary_path"] = str(temporary)
+            self._publish(batch, manifest_path, on_update)
+
+            last_persisted_progress = float(item.get("progress") or 0)
+            last_persisted_at = 0.0
+
+            def update_progress(progress: float) -> None:
+                nonlocal last_persisted_at, last_persisted_progress
+                progress = max(last_persisted_progress, min(progress, 0.99))
+                now = time.monotonic()
+                if progress - last_persisted_progress < 0.01 and now - last_persisted_at < 0.5:
+                    return
+                item["progress"] = progress
+                last_persisted_progress = progress
+                last_persisted_at = now
+                self._update_batch_progress(batch)
+                self._publish(batch, manifest_path, on_update)
+
             try:
                 if item["composite"]:
                     if source_has_audio is None:
+                        item["phase"] = "probing_audio"
+                        self._publish(batch, manifest_path, on_update)
                         source_has_audio = self._source_has_audio(source)
+                        item["phase"] = "encoding"
                     self._render_composite_slice(
                         source,
                         temporary,
                         parts=item["parts"],
                         fps=fps,
                         has_audio=source_has_audio,
+                        on_progress=update_progress,
+                        cancel_event=cancel_event,
+                        process_callback=process_callback,
                     )
+                    item["ffmpeg_exit_code"] = 0
+                    item["phase"] = "verifying"
+                    item["progress"] = 0.99
+                    self._publish(batch, manifest_path, on_update)
                     self._verify_slice(
                         temporary,
                         expected_duration=float(item["total_duration_seconds"]),
@@ -288,26 +426,57 @@ class TimelineSlicer:
                         temporary,
                         start_seconds=float(item["start_seconds"]),
                         duration_seconds=float(item["total_duration_seconds"]),
+                        on_progress=update_progress,
+                        cancel_event=cancel_event,
+                        process_callback=process_callback,
                     )
+                    item["ffmpeg_exit_code"] = 0
+                    item["phase"] = "verifying"
+                    item["progress"] = 0.99
+                    self._publish(batch, manifest_path, on_update)
                     self._verify_slice(temporary)
+                item["ffprobe_result"] = "passed"
+                if cancel_event is not None and cancel_event.is_set():
+                    raise SliceCancelled("任务已取消")
+                item["phase"] = "committing"
+                self._publish(batch, manifest_path, on_update)
                 temporary.replace(Path(item["output_path"]))
                 item["status"] = "succeeded"
+                item["phase"] = "done"
+                item["progress"] = 1.0
+                item["finished_at"] = datetime.now(UTC).isoformat()
                 batch["success_count"] += 1
+            except SliceCancelled as exc:
+                item["status"] = "cancelled"
+                item["phase"] = "done"
+                item["progress"] = 1.0
+                item["error"] = str(exc)
+                item["finished_at"] = datetime.now(UTC).isoformat()
+                batch["cancelled_count"] += 1
+                temporary.unlink(missing_ok=True)
             except (OSError, subprocess.SubprocessError, SliceError) as exc:
                 item["status"] = "failed"
+                item["phase"] = "done"
+                item["progress"] = 1.0
                 item["error"] = str(exc)
+                item["finished_at"] = datetime.now(UTC).isoformat()
                 batch["failure_count"] += 1
                 temporary.unlink(missing_ok=True)
-            _atomic_json(manifest_path, batch)
+            self._update_batch_progress(batch)
+            self._publish(batch, manifest_path, on_update)
 
-        batch["ok"] = batch["failure_count"] == 0
-        if batch["ok"]:
+        batch["ok"] = batch["failure_count"] == 0 and batch["cancelled_count"] == 0
+        if batch["cancelled_count"]:
+            batch["status"] = "cancelled"
+        elif batch["ok"]:
             batch["status"] = "completed"
         elif batch["success_count"]:
             batch["status"] = "partial_failed"
         else:
             batch["status"] = "failed"
-        _atomic_json(manifest_path, batch)
+        batch["progress"] = 1.0
+        batch["finished_at"] = datetime.now(UTC).isoformat()
+        self._publish(batch, manifest_path, on_update)
         return batch
 
     def _render_slice(
@@ -317,6 +486,9 @@ class TimelineSlicer:
         *,
         start_seconds: float,
         duration_seconds: float,
+        on_progress: Callable[[float], None] | None = None,
+        cancel_event: threading.Event | None = None,
+        process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
     ) -> None:
         command = [
             "ffmpeg",
@@ -345,9 +517,14 @@ class TimelineSlicer:
             "+faststart",
             str(output),
         ]
-        result = self.runner(command, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            raise SliceError(result.stderr.strip() or "FFmpeg 切片失败")
+        self._run_ffmpeg(
+            command,
+            duration_seconds,
+            on_progress=on_progress,
+            cancel_event=cancel_event,
+            process_callback=process_callback,
+            error_message="FFmpeg 切片失败",
+        )
 
     def _source_has_audio(self, source: Path) -> bool:
         result = self.runner(
@@ -383,6 +560,9 @@ class TimelineSlicer:
         parts: list[dict[str, Any]],
         fps: float,
         has_audio: bool,
+        on_progress: Callable[[float], None] | None = None,
+        cancel_event: threading.Event | None = None,
+        process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
     ) -> None:
         count = len(parts)
         if count < 2:
@@ -450,9 +630,85 @@ class TimelineSlicer:
         if has_audio:
             command.extend(["-c:a", "aac"])
         command.extend(["-movflags", "+faststart", str(output)])
-        result = self.runner(command, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            raise SliceError(result.stderr.strip() or "FFmpeg 组合片段失败")
+        self._run_ffmpeg(
+            command,
+            sum(float(part["duration_seconds"]) for part in parts),
+            on_progress=on_progress,
+            cancel_event=cancel_event,
+            process_callback=process_callback,
+            error_message="FFmpeg 组合片段失败",
+        )
+
+    def _run_ffmpeg(
+        self,
+        command: list[str],
+        expected_duration: float,
+        *,
+        on_progress: Callable[[float], None] | None,
+        cancel_event: threading.Event | None,
+        process_callback: Callable[[subprocess.Popen[str] | None], None] | None,
+        error_message: str,
+    ) -> None:
+        if self.runner is not subprocess.run:
+            result = self.runner(command, capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                raise SliceError(result.stderr.strip() or error_message)
+            if on_progress is not None:
+                on_progress(0.98)
+            return
+
+        progress_command = [*command[:-1], "-progress", "pipe:1", "-nostats", command[-1]]
+        process = subprocess.Popen(
+            progress_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        stderr_tail: deque[str] = deque(maxlen=30)
+        stderr_done = threading.Event()
+
+        def read_stderr() -> None:
+            if process.stderr is not None:
+                for line in process.stderr:
+                    stderr_tail.append(line.rstrip())
+            stderr_done.set()
+
+        threading.Thread(target=read_stderr, daemon=True).start()
+        if process_callback is not None:
+            process_callback(process)
+        try:
+            if process.stdout is not None:
+                for raw_line in process.stdout:
+                    if cancel_event is not None and cancel_event.is_set():
+                        process.terminate()
+                    key, separator, raw_value = raw_line.strip().partition("=")
+                    if not separator or key not in {"out_time_us", "out_time_ms"}:
+                        continue
+                    try:
+                        seconds = float(raw_value) / 1_000_000
+                    except ValueError:
+                        continue
+                    if on_progress is not None and expected_duration > 0:
+                        on_progress(min(seconds / expected_duration, 0.98))
+            return_code = process.wait()
+            stderr_done.wait(timeout=1)
+        except BaseException:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
+        finally:
+            if process_callback is not None:
+                process_callback(None)
+        if cancel_event is not None and cancel_event.is_set():
+            raise SliceCancelled("任务已取消")
+        if return_code != 0:
+            raise SliceError("\n".join(stderr_tail).strip() or error_message)
 
     def _verify_slice(
         self,
@@ -507,12 +763,37 @@ class TimelineSlicer:
                 )
 
     @staticmethod
-    def _unique_output(path: Path) -> Path:
-        if not path.exists():
+    def _unique_output(path: Path, reserved_paths: set[str] | None = None) -> Path:
+        reserved = reserved_paths or set()
+        if not path.exists() and str(path) not in reserved:
             return path
         version = 2
         while True:
             candidate = path.with_name(f"{path.stem}-v{version}{path.suffix}")
-            if not candidate.exists():
+            if not candidate.exists() and str(candidate) not in reserved:
                 return candidate
             version += 1
+
+    @staticmethod
+    def _update_batch_progress(batch: dict[str, Any]) -> None:
+        active = [item for item in batch["items"] if item["status"] != "skipped"]
+        total_duration = sum(float(item["total_duration_seconds"]) for item in active)
+        if total_duration <= 0:
+            batch["progress"] = 1.0 if not active else 0.0
+            return
+        completed = sum(
+            float(item["total_duration_seconds"]) * float(item.get("progress") or 0)
+            for item in active
+        )
+        batch["progress"] = min(completed / total_duration, 1.0)
+
+    @staticmethod
+    def _publish(
+        batch: dict[str, Any],
+        manifest_path: Path,
+        on_update: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        if on_update is not None:
+            on_update(batch)
+        else:
+            _atomic_json(manifest_path, batch)

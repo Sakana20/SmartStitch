@@ -9,10 +9,13 @@ const state = {
   assetCategory: "pre_roll",
   preview: null,
   jobs: [],
+  sliceJobs: [],
   activeJob: null,
   eventSource: null,
+  sliceEventSource: null,
   configMode: "simple",
   configDraft: null,
+  configRefreshPromise: null,
   previewAudioCleanup: null,
   timeline: {
     sourceDirectory: "",
@@ -43,6 +46,8 @@ const state = {
     reviewRevision: null,
     selectedSegmentId: null,
     sliceUnits: [],
+    sliceRequestId: null,
+    sliceRequestFingerprint: null,
     mergeSelection: [],
     sliceTargets: [],
     waveform: {
@@ -154,7 +159,8 @@ async function init() {
     $("#healthText").textContent = health.ffmpeg ? `FFmpeg 已就绪 · v${health.version}` : "FFmpeg 未找到";
   } catch (error) { $("#healthText").textContent = "后端连接失败"; }
   await loadConfigs();
-  await loadJobs();
+  await Promise.all([loadJobs(), loadSliceJobs()]);
+  connectSliceJobEvents();
 }
 
 function bindEvents() {
@@ -214,7 +220,9 @@ function bindEvents() {
 function switchView(view) {
   $$(".section-tab").forEach(button => button.classList.toggle("active", button.dataset.view === view));
   $$(".view").forEach(element => element.classList.toggle("active", element.id === `${view}View`));
+  $("#timelineSliceQueue").classList.toggle("hidden", view !== "timeline");
   if (view === "jobs") loadJobs();
+  if (view === "timeline") refreshTimelineConfig();
 }
 
 function bindTimelineEvents() {
@@ -340,6 +348,45 @@ function bindTimelineEvents() {
     state.timeline.shiftPressed = false;
     scheduleTimelineDragFrame();
   });
+  window.addEventListener("focus", () => {
+    if ($("#timelineView").classList.contains("active")) refreshTimelineConfig();
+  });
+}
+
+async function refreshTimelineConfig() {
+  if (!state.configId) return false;
+  if (state.configRefreshPromise) return state.configRefreshPromise;
+  const configId = state.configId;
+  state.configRefreshPromise = (async () => {
+    try {
+      const refreshed = await api(`/configs/${configId}`);
+      if (state.configId !== configId || refreshed.content_hash === state.configHash) return false;
+      state.config = refreshed.config;
+      state.configHash = refreshed.content_hash;
+      state.yaml = refreshed.yaml_text;
+      try {
+        state.library = await api(`/libraries/by-config/${configId}`);
+        const targets = await api(`/libraries/by-config/${configId}/slice-targets`);
+        state.timeline.sliceTargets = targets.targets;
+      } catch (_) {
+        state.library = null;
+        state.timeline.sliceTargets = [];
+      }
+      const validCategories = new Set(timelineCategoryOptions().map(option => option.category));
+      state.timeline.sliceUnits.forEach(unit => {
+        if (unit.category && !validCategories.has(unit.category)) unit.category = null;
+      });
+      if (state.timeline.analysis) renderTimeline();
+      toast("视频库配置已更新，切片类型已刷新");
+      return true;
+    } catch (error) {
+      toast(`刷新视频库配置失败：${error.message}`, true);
+      return false;
+    } finally {
+      state.configRefreshPromise = null;
+    }
+  })();
+  return state.configRefreshPromise;
 }
 
 async function analyzeTimeline() {
@@ -1754,12 +1801,23 @@ async function exportTimelineSlices() {
   const sourceSegmentCount = assignments.reduce((sum, item) => sum + item.segment_indexes.length, 0);
   const button = $("#sliceTimelineBtn");
   const resultElement = $("#timelineSliceResult");
+  const activeBreakpoints = timelineActiveBreakpoints();
+  const requestFingerprint = JSON.stringify({
+    analysisId: analysis.analysis_id,
+    configHash: state.configHash,
+    frames: activeBreakpoints.map(point => point.frame_index),
+    assignments,
+  });
+  const requestId = state.timeline.sliceRequestFingerprint === requestFingerprint
+    ? (state.timeline.sliceRequestId || clientRequestId())
+    : clientRequestId();
+  state.timeline.sliceRequestId = requestId;
+  state.timeline.sliceRequestFingerprint = requestFingerprint;
   button.disabled = true;
-  button.textContent = "正在保存断点…";
+  button.textContent = "正在保存并入队…";
   resultElement.textContent = `正在确认 ${cuttableCount} 个输出片段（${sourceSegmentCount} 个源区间）并保存断点…`;
   resultElement.className = "timeline-slice-result";
   try {
-    const activeBreakpoints = timelineActiveBreakpoints();
     const review = await api("/timeline/decisions", {
       method: "PUT",
       body: JSON.stringify({
@@ -1770,10 +1828,9 @@ async function exportTimelineSlices() {
     activeBreakpoints.forEach(point => { point.review_status = "human_confirmed"; });
     state.timeline.reviewSaved = true;
     state.timeline.reviewRevision = review.review_revision;
-    setTimelineStatus("正在切片", "running");
-    button.textContent = "正在批量切割…";
-    resultElement.textContent = `正在用 FFmpeg 生成 ${cuttableCount} 个输出片段，请稍候…`;
-    const result = await api("/timeline/slices", {
+    button.textContent = "正在加入队列…";
+    resultElement.textContent = `正在固化 ${cuttableCount} 个输出片段的任务快照…`;
+    const result = await api("/timeline/slice-jobs", {
       method: "POST",
       body: JSON.stringify({
         analysis_id: analysis.analysis_id,
@@ -1781,23 +1838,86 @@ async function exportTimelineSlices() {
         review_revision: state.timeline.reviewRevision,
         current_config_hash: state.configHash,
         assignments,
-        client_request_id: clientRequestId(),
+        client_request_id: requestId,
       }),
     });
-    resultElement.textContent = `入库完成：${result.success_count} 个成功，${result.failure_count} 个失败 · 清单 ${result.manifest_path}`;
-    resultElement.className = `timeline-slice-result ${result.failure_count ? "error" : "success"}`;
-    setTimelineStatus(result.failure_count ? "部分切片失败" : "切片完成", result.failure_count ? "danger" : "success");
-    toast(result.failure_count ? "切片部分完成，请查看清单" : "列表片段均已切割并入库", Boolean(result.failure_count));
-    await scanAssets(false);
+    state.timeline.sliceRequestId = null;
+    state.timeline.sliceRequestFingerprint = null;
+    state.timeline.sliceUnits = [];
+    state.timeline.mergeSelection = [];
+    resultElement.textContent = `已加入切片队列 #${result.short_id}，可继续审核下一条视频`;
+    resultElement.className = "timeline-slice-result success";
+    setTimelineStatus("已加入队列", "success");
+    toast(`已加入切片队列 #${result.short_id}`);
+    renderTimeline();
+    await loadSliceJobs();
   } catch (error) {
     resultElement.textContent = error.message;
     resultElement.className = "timeline-slice-result error";
-    setTimelineStatus("切片失败", "danger");
+    setTimelineStatus("入队失败", "danger");
     toast(error.message, true);
   } finally {
-    button.textContent = "切割并入库";
+    button.textContent = "加入切片队列";
     renderSliceControls();
   }
+}
+
+async function loadSliceJobs() {
+  try {
+    state.sliceJobs = await api("/timeline/slice-jobs?limit=50");
+    renderSliceQueue();
+    if ($("#jobsView")?.classList.contains("active")) renderJobs();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function connectSliceJobEvents() {
+  if (state.sliceEventSource) state.sliceEventSource.close();
+  state.sliceEventSource = new EventSource("/api/v1/timeline/slice-jobs/events");
+  state.sliceEventSource.addEventListener("slice_jobs_update", async event => {
+    state.sliceJobs = JSON.parse(event.data);
+    renderSliceQueue();
+    renderJobs();
+    if (state.activeJob?.job_type === "timeline_slice") {
+      const summary = state.sliceJobs.find(job => job.id === state.activeJob.id);
+      if (summary) {
+        try { renderSliceJobDetail(await api(`/timeline/slice-jobs/${summary.id}`)); } catch (_) {}
+      }
+    }
+  });
+}
+
+function sliceJobStatusInfo(job) {
+  if (job.status === "running") return ["切片中", "running"];
+  return statusInfo(job.status);
+}
+
+function renderSliceQueue() {
+  const container = $("#timelineSliceQueueList");
+  if (!container) return;
+  const activeCount = state.sliceJobs.filter(job => !terminalStates.has(job.status)).length;
+  $("#timelineSliceQueueCount").textContent = activeCount ? `${activeCount} 个处理中` : "暂无处理中任务";
+  const activeJobs = state.sliceJobs.filter(job => !terminalStates.has(job.status));
+  const terminalJobs = state.sliceJobs.filter(job => terminalStates.has(job.status));
+  const jobs = [...activeJobs, ...terminalJobs].slice(0, 20);
+  if (!jobs.length) {
+    container.innerHTML = '<div class="slice-queue-empty">提交后可在这里查看后台切片进度</div>';
+    return;
+  }
+  container.innerHTML = jobs.map(job => {
+    const [label, cls] = sliceJobStatusInfo(job);
+    const progress = Math.max(0, Math.min(100, Number(job.progress || 0) * 100));
+    const sourceName = job.source?.name || job.source?.path?.split(/[\\/]/).pop() || "未知视频";
+    const finished = Number(job.success_count || 0) + Number(job.failure_count || 0) + Number(job.cancelled_count || 0);
+    const terminalClass = terminalStates.has(job.status) ? " is-terminal" : "";
+    return `<button class="slice-queue-row${terminalClass}" type="button" data-slice-job-id="${job.id}">
+      <span class="slice-queue-source"><strong title="${escapeHtml(sourceName)}">${escapeHtml(sourceName)}</strong><small>#${escapeHtml(job.short_id)} · ${formatDate(job.created_at)}</small></span>
+      <span class="slice-queue-progress"><span class="mini-progress"><i style="width:${progress}%"></i></span><small>${finished}/${job.output_unit_count} 已处理 · ${progress.toFixed(0)}%</small></span>
+      <span class="status ${cls}">${label}</span><b>›</b>
+    </button>`;
+  }).join("");
+  $$('[data-slice-job-id]').forEach(row => row.addEventListener("click", () => openSliceJob(row.dataset.sliceJobId)));
 }
 
 function timelineReasonLabel(point) {
@@ -2048,15 +2168,29 @@ async function loadJobs() {
 
 function renderJobs() {
   const list = $("#jobsList");
+  const combinedJobs = [
+    ...state.jobs.map(job => ({ ...job, job_type: job.job_type || "render" })),
+    ...state.sliceJobs,
+  ].sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)));
   $("#deleteAllJobsBtn").disabled = state.jobs.length === 0;
   $("#deleteAllJobsCount").textContent = String(state.jobs.length);
   if (!state.jobs.length) hideDeleteAllJobsConfirm();
-  if (!state.jobs.length) { list.innerHTML = `<div class="empty-state"><h3>还没有生成任务</h3><p>预览组合后，点击“开始生成”即可在这里查看进度。</p></div>`; return; }
-  list.innerHTML = state.jobs.map(job => {
-    const [label, cls] = statusInfo(job.status); const done = job.success_count + job.failure_count; const pct = job.count ? done/job.count*100 : 0;
-    return `<div class="job-row" data-job-id="${job.id}"><div><strong>${escapeHtml(job.config_name)}</strong><small>${formatDate(job.created_at)} · #${job.short_id}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${done}/${job.count} 已处理</small></div><span class="status ${cls}">${label}</span><span class="job-count">成功 ${job.success_count} · 失败 ${job.failure_count}</span><b>›</b></div>`;
+  if (!combinedJobs.length) { list.innerHTML = `<div class="empty-state"><h3>还没有任务</h3><p>成片生成和时间线切片任务都会在这里显示。</p></div>`; return; }
+  list.innerHTML = combinedJobs.map(job => {
+    const isSlice = job.job_type === "timeline_slice";
+    const [label, cls] = isSlice ? sliceJobStatusInfo(job) : statusInfo(job.status);
+    const done = Number(job.success_count || 0) + Number(job.failure_count || 0) + Number(job.cancelled_count || 0);
+    const total = isSlice ? job.output_unit_count : job.count;
+    const pct = isSlice ? Number(job.progress || 0) * 100 : (total ? done / total * 100 : 0);
+    const sourceName = job.source?.name || job.source?.path?.split(/[\\/]/).pop();
+    const title = isSlice ? sourceName : job.config_name;
+    const typeLabel = isSlice ? "切片入库" : "成片渲染";
+    return `<div class="job-row" data-job-id="${job.id}" data-job-type="${isSlice ? "slice" : "render"}"><div><strong>${escapeHtml(title || "未命名任务")}</strong><small>${typeLabel} · ${formatDate(job.created_at)} · #${job.short_id}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${done}/${total} 已处理</small></div><span class="status ${cls}">${label}</span><span class="job-count">成功 ${job.success_count || 0} · 失败 ${job.failure_count || 0}</span><b>›</b></div>`;
   }).join("");
-  $$(".job-row").forEach(row => row.addEventListener("click", () => openJob(row.dataset.jobId)));
+  $$(".job-row").forEach(row => row.addEventListener("click", () => {
+    if (row.dataset.jobType === "slice") openSliceJob(row.dataset.jobId);
+    else openJob(row.dataset.jobId);
+  }));
 }
 
 async function openJob(jobId) {
@@ -2109,6 +2243,72 @@ function renderJobDetail(job) {
   $("#confirmDeleteJobBtn")?.addEventListener("click", () => deleteJobRecord(job.id));
 }
 
+async function openSliceJob(jobId) {
+  $("#jobDrawer").classList.add("open");
+  $("#jobDrawer").setAttribute("aria-hidden", "false");
+  if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+  try {
+    const job = await api(`/timeline/slice-jobs/${jobId}`);
+    state.activeJob = job;
+    renderSliceJobDetail(job);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function renderSliceJobDetail(job) {
+  state.activeJob = job;
+  const [label, cls] = sliceJobStatusInfo(job);
+  const progress = Math.max(0, Math.min(100, Number(job.progress || 0) * 100));
+  const sourceName = job.source?.name || job.source?.path?.split(/[\\/]/).pop() || "未知视频";
+  const phaseNames = { waiting: "等待", probing_audio: "检查音轨", encoding: "编码", verifying: "校验", committing: "入库", done: "完成" };
+  $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">SLICE #${escapeHtml(job.short_id)}</p><h2>${escapeHtml(sourceName)}</h2><span class="status ${cls}">${label}</span><p>${escapeHtml(job.source?.path || "")}</p></div>
+    <div class="big-progress"><div><span>总体进度</span><b>${progress.toFixed(1)}%</b></div><div class="bar"><i style="width:${progress}%"></i></div></div>
+    <div class="slice-job-stats"><span>输出 <b>${job.output_unit_count}</b></span><span>成功 <b>${job.success_count}</b></span><span>失败 <b>${job.failure_count}</b></span><span>取消 <b>${job.cancelled_count || 0}</b></span></div>
+    ${job.manifest_sync_error ? `<div class="warning-box">切片清单同步失败：${escapeHtml(job.manifest_sync_error)}</div>` : ""}
+    ${!terminalStates.has(job.status) ? `<button id="cancelSliceJobBtn" class="button secondary" style="width:100%">取消切片任务</button>` : ""}
+    ${["partial_failed", "failed", "cancelled", "interrupted"].includes(job.status) ? `<button id="retrySliceJobBtn" class="button primary" style="width:100%;margin-top:8px">${job.status === "interrupted" ? "继续未完成项" : "重试未完成项"}</button>` : ""}
+    ${terminalStates.has(job.status) ? `<div class="record-delete-zone"><button id="deleteSliceJobBtn" class="text-btn danger-text" type="button">删除切片任务记录</button></div>` : ""}
+    <div class="item-list">${job.items.map(item => {
+      const [itemLabel, itemCls] = statusInfo(item.status);
+      const parts = (item.parts || []).map(part => `#${part.segment_index} ${Number(part.start_seconds).toFixed(2)}–${Number(part.end_seconds).toFixed(2)}s`).join(" · ");
+      const itemProgress = Number(item.progress || 0) * 100;
+      return `<div class="item-row"><b>${String(item.unit_index).padStart(2, "0")}</b><div><strong>${escapeHtml(categoryLabelForTimeline(item.category))}</strong><small class="item-selections">${escapeHtml(parts)} · ${phaseNames[item.phase] || item.phase}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${itemProgress}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
+    }).join("")}</div>`;
+  $("#cancelSliceJobBtn")?.addEventListener("click", () => cancelSliceJob(job.id));
+  $("#retrySliceJobBtn")?.addEventListener("click", () => retrySliceJob(job));
+  $("#deleteSliceJobBtn")?.addEventListener("click", () => deleteSliceJobRecord(job.id));
+}
+
+async function cancelSliceJob(id) {
+  try {
+    const job = await api(`/timeline/slice-jobs/${id}/cancel`, { method: "POST" });
+    renderSliceJobDetail(job);
+    await loadSliceJobs();
+    toast(job.status === "cancelled" ? "切片任务已取消" : "正在取消切片任务");
+  } catch (error) { toast(error.message, true); }
+}
+
+async function deleteSliceJobRecord(id) {
+  try {
+    await api(`/timeline/slice-jobs/${id}`, { method: "DELETE" });
+    state.activeJob = null;
+    closeDrawer();
+    await loadSliceJobs();
+    toast("切片任务记录已删除，入库视频和清单已保留");
+  } catch (error) { toast(error.message, true); }
+}
+
+async function retrySliceJob(job) {
+  const endpoint = job.status === "interrupted" ? "resume" : "retry-failed";
+  try {
+    const updated = await api(`/timeline/slice-jobs/${job.id}/${endpoint}`, { method: "POST" });
+    await loadSliceJobs();
+    renderSliceJobDetail(await api(`/timeline/slice-jobs/${updated.id}`));
+    toast("已重新加入切片队列");
+  } catch (error) { toast(error.message, true); }
+}
+
 async function cancelJob(id) {
   try { await api(`/jobs/${id}/cancel`, { method: "POST" }); toast("正在取消任务"); } catch (error) { toast(error.message, true); }
 }
@@ -2155,7 +2355,11 @@ async function deleteAllJobRecords() {
     button.textContent = "确认全部删除";
   }
 }
-function closeDrawer() { $("#jobDrawer").classList.remove("open"); if (state.eventSource) state.eventSource.close(); }
+function closeDrawer() {
+  $("#jobDrawer").classList.remove("open");
+  state.activeJob = null;
+  if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+}
 
 function openNewConfig() {
   $("#newConfigIdInput").value = "";

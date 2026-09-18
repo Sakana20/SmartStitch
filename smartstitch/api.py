@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .audio_preview import AudioPreviewError, create_audio_preview
 from .config import ConfigError, ConfigStore
+from .database import SQLiteStore
 from .jobs import JobManager, TERMINAL_STATES
 from .library import LibraryConflictError, LibraryError, LibraryService, pick_directory
 from .media import DisconnectSafeFileResponse
@@ -41,6 +42,7 @@ from .models import (
 )
 from .planner import PlanError, build_plan
 from .scanner import probe_config_audio, scan_config
+from .slice_jobs import SliceJobManager
 from .slicer import SliceConflictError, SliceError, TimelineSlicer
 from .timeline import TimelineAnalyzer, TimelineError, list_source_videos
 
@@ -48,6 +50,10 @@ from .timeline import TimelineAnalyzer, TimelineError, list_source_videos
 DEFAULT_SHARED_CONFIG_DIRECTORY = Path("/Volumes/home/Smartstitch")
 DEFAULT_SHARED_CONFIG_ALTERNATE_PARENT = Path("/Volumes/homes")
 CONFIG_DIRECTORY_ENV = "SMARTSTITCH_CONFIG_DIRECTORY"
+
+
+class SharedConfigUnavailableError(RuntimeError):
+    pass
 
 
 def alternate_shared_config_directories(parent: Path) -> list[Path]:
@@ -81,6 +87,10 @@ def resolve_config_directory(
         )
         if len(alternatives) == 1:
             return alternatives[0].resolve()
+        raise SharedConfigUnavailableError(
+            "未连接 NAS：找不到 /Volumes/home/Smartstitch。"
+            "请先在 Finder 中连接 NAS 并确认共享目录已挂载，然后重新启动 SmartStitch。"
+        )
     return application_root / "config"
 
 
@@ -114,16 +124,20 @@ def create_app(
         ),
     )
     library_service = LibraryService(config_store)
-    job_manager = JobManager(config_store, root / "data")
+    database_store = SQLiteStore(root / "data" / "smartstitch.db")
+    job_manager = JobManager(config_store, root / "data", database_store)
     timeline_analyzer = TimelineAnalyzer(root / "data" / "timelines")
     timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
+    slice_job_manager = SliceJobManager(timeline_slicer, database_store)
     app = FastAPI(title="SmartStitch", version=__version__)
     app.state.root = root
     app.state.config_store = config_store
     app.state.library_service = library_service
     app.state.job_manager = job_manager
+    app.state.database_store = database_store
     app.state.timeline_analyzer = timeline_analyzer
     app.state.timeline_slicer = timeline_slicer
+    app.state.slice_job_manager = slice_job_manager
 
     @app.get("/api/v1/system/health")
     def health() -> dict[str, object]:
@@ -451,8 +465,107 @@ def create_app(
             return timeline_slicer.export(request)
         except SliceConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
-        except (SliceError, TimelineError, LibraryError, ConfigError, OSError) as exc:
+        except (
+            SliceError,
+            TimelineError,
+            LibraryError,
+            ConfigError,
+            ValueError,
+            OSError,
+        ) as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/timeline/slice-jobs", status_code=202)
+    def create_timeline_slice_job(
+        request: TimelineSliceRequest,
+    ) -> dict[str, object]:
+        try:
+            return slice_job_manager.create(request)
+        except SliceConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (
+            SliceError,
+            TimelineError,
+            LibraryError,
+            ConfigError,
+            ValueError,
+            OSError,
+        ) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/timeline/slice-jobs")
+    def list_timeline_slice_jobs(
+        limit: int = Query(default=20, ge=1, le=200),
+        status: str | None = None,
+    ) -> list[dict[str, object]]:
+        return slice_job_manager.list_jobs(status=status)[:limit]
+
+    @app.get("/api/v1/timeline/slice-jobs/events")
+    async def timeline_slice_job_events() -> StreamingResponse:
+        async def stream():
+            previous = ""
+            while True:
+                jobs = slice_job_manager.list_jobs()[:20]
+                payload = json.dumps(jobs, ensure_ascii=False)
+                if payload != previous:
+                    yield f"event: slice_jobs_update\ndata: {payload}\n\n"
+                    previous = payload
+                await asyncio.sleep(0.7)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.get("/api/v1/timeline/slice-jobs/{job_id}")
+    def get_timeline_slice_job(job_id: str) -> dict[str, object]:
+        try:
+            return slice_job_manager.get_job(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "切片任务不存在") from exc
+
+    @app.post("/api/v1/timeline/slice-jobs/{job_id}/cancel")
+    def cancel_timeline_slice_job(job_id: str) -> dict[str, object]:
+        try:
+            return slice_job_manager.cancel(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "切片任务不存在") from exc
+
+    @app.post("/api/v1/timeline/slice-jobs/{job_id}/retry-failed")
+    def retry_timeline_slice_job(job_id: str) -> dict[str, object]:
+        try:
+            return slice_job_manager.retry(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "切片任务不存在") from exc
+        except (ValueError, LibraryError, ConfigError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/v1/timeline/slice-jobs/{job_id}/resume")
+    def resume_timeline_slice_job(job_id: str) -> dict[str, object]:
+        try:
+            return slice_job_manager.retry(job_id, interrupted_only=True)
+        except KeyError as exc:
+            raise HTTPException(404, "切片任务不存在") from exc
+        except (ValueError, LibraryError, ConfigError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.delete("/api/v1/timeline/slice-jobs/{job_id}")
+    def delete_timeline_slice_job(job_id: str) -> dict[str, object]:
+        try:
+            slice_job_manager.delete(job_id)
+            return {"ok": True, "job_id": job_id}
+        except KeyError as exc:
+            raise HTTPException(404, "切片任务不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/v1/timeline/slice-jobs/{job_id}/manifest")
+    def timeline_slice_job_manifest(job_id: str) -> FileResponse:
+        try:
+            job = slice_job_manager.get_job(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "切片任务不存在") from exc
+        path = Path(str(job["manifest_path"]))
+        if not path.is_file():
+            raise HTTPException(404, "切片清单不存在")
+        return FileResponse(path)
 
     @app.post("/api/v1/jobs")
     def create_job(request: JobCreateRequest) -> dict[str, object]:

@@ -4,7 +4,6 @@ import copy
 import csv
 import json
 import shutil
-import sqlite3
 import subprocess
 import threading
 import uuid
@@ -16,6 +15,7 @@ from typing import Any
 import yaml
 
 from .config import ConfigStore
+from .database import SQLiteStore
 from .models import AppConfig, JobCreateRequest
 from .planner import build_plan
 from .renderer import render_item
@@ -29,65 +29,43 @@ def _now() -> str:
 
 
 class JobDatabase:
-    def __init__(self, path: Path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.path = path
-        self.lock = threading.RLock()
-        with self._connect() as connection:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)"
-            )
-            rows = connection.execute("SELECT id, payload FROM jobs").fetchall()
-            for job_id, payload in rows:
-                data = json.loads(payload)
-                if data.get("status") in {"queued", "running", "cancelling"}:
-                    data["status"] = "interrupted"
-                    data["finished_at"] = _now()
-                    connection.execute(
-                        "UPDATE jobs SET payload = ?, updated_at = ? WHERE id = ?",
-                        (json.dumps(data, ensure_ascii=False), _now(), job_id),
-                    )
-
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path, timeout=20)
+    def __init__(self, database: Path | SQLiteStore):
+        self.store = database if isinstance(database, SQLiteStore) else SQLiteStore(database)
+        self.path = self.store.path
+        self.lock = self.store.lock
+        self.store.ensure_job_table("jobs")
+        self.store.mark_active_interrupted("jobs")
 
     def save(self, job: dict[str, Any]) -> None:
-        payload = json.dumps(job, ensure_ascii=False)
-        with self.lock, self._connect() as connection:
-            connection.execute(
-                "INSERT INTO jobs(id, payload, updated_at) VALUES(?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
-                (job["id"], payload, _now()),
-            )
+        self.store.save("jobs", job)
 
     def get(self, job_id: str) -> dict[str, Any] | None:
-        with self.lock, self._connect() as connection:
-            row = connection.execute("SELECT payload FROM jobs WHERE id = ?", (job_id,)).fetchone()
-        return json.loads(row[0]) if row else None
+        return self.store.get("jobs", job_id)
 
     def list(self) -> list[dict[str, Any]]:
-        with self.lock, self._connect() as connection:
-            rows = connection.execute("SELECT payload FROM jobs ORDER BY updated_at DESC").fetchall()
-        return [json.loads(row[0]) for row in rows]
+        return self.store.list("jobs")
 
     def delete(self, job_id: str) -> bool:
-        with self.lock, self._connect() as connection:
-            cursor = connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
-        return cursor.rowcount > 0
+        return self.store.delete("jobs", job_id)
 
     def delete_all(self) -> int:
-        with self.lock, self._connect() as connection:
-            cursor = connection.execute("DELETE FROM jobs")
-        return cursor.rowcount
+        return self.store.delete_all("jobs")
 
 
 class JobManager:
-    def __init__(self, config_store: ConfigStore, data_directory: Path):
+    def __init__(
+        self,
+        config_store: ConfigStore,
+        data_directory: Path,
+        database_store: SQLiteStore | None = None,
+    ):
         self.config_store = config_store
         self.data_directory = data_directory
         self.jobs_directory = data_directory / "jobs"
         self.jobs_directory.mkdir(parents=True, exist_ok=True)
-        self.database = JobDatabase(data_directory / "smartstitch.db")
+        self.database = JobDatabase(
+            database_store or SQLiteStore(data_directory / "smartstitch.db")
+        )
         self.cancel_events: dict[str, threading.Event] = {}
         self.processes: dict[tuple[str, int], subprocess.Popen[str]] = {}
         self.lock = threading.RLock()

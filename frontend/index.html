@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260917-32" />
+    <link rel="stylesheet" href="/styles.css?v=20260918-40" />
   </head>
   <body>
     <div class="noise"></div>
@@ -141,7 +141,7 @@
                   <strong id="timelineCurrentSource">尚未载入源视频文件夹</strong>
                   <small id="timelineSourcePosition">选择文件夹后可依次审核其中的视频</small>
                 </span>
-                <i aria-hidden="true">⌄</i>
+                <i aria-hidden="true"></i>
               </button>
               <div id="timelineSourcePicker" class="timeline-source-picker hidden">
                 <label class="timeline-source-search">
@@ -221,7 +221,7 @@
 
             <div class="timeline-review-heading">
               <div><strong>片段列表</strong><small id="timelineBreakpointSummary"></small></div>
-              <button id="sliceTimelineBtn" class="button primary small" type="button" disabled>切割并入库</button>
+              <button id="sliceTimelineBtn" class="button primary small" type="button" disabled>加入切片队列</button>
             </div>
             <div class="segment-merge-toolbar">
               <div>
@@ -232,7 +232,7 @@
             </div>
             <div id="timelineSegmentList" class="segment-list"></div>
             <div class="timeline-list-footer">
-              <p class="timeline-export-help">点击时间轴可连续标记多个片段；需要合并时先勾选列表条目并点击“合并所选”。为每个输出片段选择类型后，点击右上角统一交给 FFmpeg 切割并入库。</p>
+              <p class="timeline-export-help">点击时间轴可连续标记多个片段；需要合并时先勾选列表条目并点击“合并所选”。为每个输出片段选择类型后加入队列，FFmpeg 将在后台切割并入库。</p>
               <small id="timelineSliceLibrary" class="timeline-slice-library">请先选择受管视频库</small>
               <div id="timelineSliceResult" class="timeline-slice-result"></div>
             </div>
@@ -280,6 +280,11 @@
         </article>
       </section>
     </main>
+
+    <section id="timelineSliceQueue" class="timeline-slice-queue hidden" aria-label="切片队列，移入展开" tabindex="0">
+      <header><div><strong>切片队列</strong><small>后台执行 · 移入查看全部记录</small></div><span><b id="timelineSliceQueueCount">暂无处理中任务</b><i aria-hidden="true"></i></span></header>
+      <div id="timelineSliceQueueList" class="slice-queue-list"><div class="slice-queue-empty">提交后可在这里查看后台切片进度</div></div>
+    </section>
 
     <div id="jobDrawer" class="drawer" aria-hidden="true">
       <div class="drawer-backdrop" data-close-drawer></div>
@@ -355,7 +360,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260917-32" defer></script>
-    <script src="/app.js?v=20260917-32" defer></script>
+    <script src="/timeline-math.js?v=20260918-40" defer></script>
+    <script src="/app.js?v=20260918-40" defer></script>
   </body>
 </html>

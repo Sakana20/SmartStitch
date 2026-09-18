@@ -13,6 +13,8 @@ timeline:
 - pool_5
 - pool_6
 - pool_7
+- pool_8
+- pool_9
 sources:
   pool_1:
     label: 数字人综述
@@ -91,6 +93,30 @@ sources:
     description: ''
     mode: required
     directory: 视频库/pool_7
+    extensions:
+    - .mp4
+    - .mov
+    - .mkv
+    default_weight: 1.0
+    image_duration_seconds: 1.5
+    items: []
+  pool_8:
+    label: 一口价剧情
+    description: ''
+    mode: required
+    directory: 视频库/pool_8
+    extensions:
+    - .mp4
+    - .mov
+    - .mkv
+    default_weight: 1.0
+    image_duration_seconds: 1.5
+    items: []
+  pool_9:
+    label: AI综述
+    description: ''
+    mode: required
+    directory: 视频库/pool_9
     extensions:
     - .mp4
     - .mov

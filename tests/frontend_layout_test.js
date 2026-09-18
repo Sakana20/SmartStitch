@@ -9,8 +9,8 @@ const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260917-32"/,
-  "断点框选功能更新后必须刷新静态资源缓存版本",
+  /href="\/styles\.css\?v=20260918-40"/,
+  "几何折叠箭头更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
@@ -138,6 +138,16 @@ assert.match(
 );
 assert.match(
   app,
+  /function switchView\(view\)[\s\S]*view === "timeline"[\s\S]*refreshTimelineConfig\(\)[\s\S]*async function refreshTimelineConfig\(\)[\s\S]*refreshed\.content_hash === state\.configHash[\s\S]*timelineCategoryOptions\(\)/,
+  "进入时间线时必须按配置哈希刷新切片类型，避免长期打开的页面遗漏新增视频库",
+);
+assert.match(
+  app,
+  /window\.addEventListener\("focus"[\s\S]*timelineView[\s\S]*refreshTimelineConfig\(\)/,
+  "时间线页面重新获得焦点时必须检查共享配置更新",
+);
+assert.match(
+  app,
   /previousVideoBtn[\s\S]*navigateTimelineSource\(-1\)[\s\S]*nextVideoBtn[\s\S]*navigateTimelineSource\(1\)/,
   "上一个和下一个视频按钮必须触发相邻视频切换",
 );
@@ -236,6 +246,76 @@ assert.match(
   app,
   /updateTimelineMediaLayout\(analysis\.width, analysis\.height\);/,
   "分析完成后必须立即应用视频方向布局",
+);
+assert.match(
+  html,
+  /id="sliceTimelineBtn"[^>]*>加入切片队列</,
+  "时间线页必须提供异步提交入口",
+);
+assert.match(
+  html,
+  /<\/main>[\s\S]*id="timelineSliceQueue" class="timeline-slice-queue hidden"[\s\S]*id="timelineSliceQueueList"/,
+  "切片队列必须挂载在主内容之外，避免跟随页面滚动",
+);
+assert.match(
+  app,
+  /api\("\/timeline\/slice-jobs"[\s\S]*client_request_id: requestId[\s\S]*connectSliceJobEvents/,
+  "切片提交必须使用稳定请求 ID 并订阅后台任务进度",
+);
+assert.match(
+  css,
+  /\.timeline-slice-queue\s*\{[^}]*position:\s*fixed;[^}]*right:[^}]*bottom:[^}]*max-height:/s,
+  "切片队列必须是固定在右下角的小抽屉",
+);
+assert.match(
+  css,
+  /\.slice-queue-row\.is-terminal\s*\{[^}]*display:\s*none;[^}]*\}[\s\S]*\.timeline-slice-queue:hover \.slice-queue-row\.is-terminal[^}]*display:\s*grid;/s,
+  "收起时必须隐藏终态任务，鼠标移入后再显示",
+);
+assert.doesNotMatch(
+  css,
+  /\.timeline-slice-queue:hover[^}]*\{[^}]*width:/s,
+  "切片抽屉悬停时必须锁定宽度，只向上展开",
+);
+assert.match(
+  css,
+  /\.slice-queue-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,1fr\) auto;[^}]*grid-template-areas:\s*"source source" "progress status";/s,
+  "窄抽屉中的任务信息必须改为上下两层排版",
+);
+assert.match(
+  css,
+  /\.slice-queue-list\s*\{[^}]*overflow-x:\s*hidden;[^}]*overflow-y:\s*auto;/s,
+  "切片队列只能纵向滚动，不能横向截断信息",
+);
+assert.match(
+  css,
+  /\.timeline-current-source > i\s*\{[^}]*width:\s*18px;[^}]*height:\s*18px;[^}]*display:\s*inline-grid;[^}]*place-items:\s*center;[^}]*transform-origin:\s*50% 50%;/s,
+  "视频选择箭头必须围绕固定图标盒的中心旋转",
+);
+assert.match(
+  css,
+  /\.timeline-slice-queue > header > span i\s*\{[^}]*width:\s*18px;[^}]*height:\s*18px;[^}]*display:\s*inline-grid;[^}]*place-items:\s*center;[^}]*transform-origin:\s*50% 50%;/s,
+  "切片抽屉箭头必须围绕固定图标盒的中心旋转",
+);
+assert.match(
+  css,
+  /\.timeline-current-source > i::before, \.timeline-slice-queue > header > span i::before\s*\{[^}]*clip-path:\s*polygon\(/s,
+  "两个展开箭头必须使用几何对称图形，不能继续使用字体字符",
+);
+assert.doesNotMatch(
+  html,
+  /[⌄⌃]/,
+  "展开箭头中不能残留上下留白不对称的字体字符",
+);
+assert.match(
+  app,
+  /const activeJobs = state\.sliceJobs\.filter[\s\S]*const terminalJobs = state\.sliceJobs\.filter[\s\S]*\[\.\.\.activeJobs, \.\.\.terminalJobs\]/,
+  "悬浮队列必须优先展示活动任务",
+);
+assert.match(
+  app,
+  /#timelineSliceQueue"\)\.classList\.toggle\("hidden", view !== "timeline"\)/,
+  "窗口级切片抽屉只能在时间线页面显示",
 );
 
 console.log("frontend timeline layout contract ok");

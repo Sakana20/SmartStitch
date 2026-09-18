@@ -6,10 +6,12 @@ import struct
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 from fastapi.testclient import TestClient
 
 from smartstitch.api import (
+    SharedConfigUnavailableError,
     canonical_config_directory,
     create_app,
     resolve_config_directory,
@@ -79,6 +81,15 @@ def test_config_directory_prefers_mounted_shared_root_and_supports_override(
     assert canonical_config_directory(
         Path("/Volumes/homes/yiranmobi/Smartstitch")
     ) == Path("/Volumes/home/Smartstitch")
+
+    alternate.rmdir()
+    with pytest.raises(SharedConfigUnavailableError, match="未连接 NAS"):
+        resolve_config_directory(
+            application_root,
+            allow_shared_default=True,
+            shared_directory=missing_canonical,
+            alternate_shared_parent=homes_root,
+        )
 
     override = tmp_path / "custom-configs"
     monkeypatch.setenv("SMARTSTITCH_CONFIG_DIRECTORY", str(override))

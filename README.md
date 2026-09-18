@@ -41,7 +41,7 @@ macOS 复制文件或文件夹路径时可能附带一对单引号或双引号�
 
 ### NAS 共享配置
 
-应用启动时会优先检测 `/Volumes/home/Smartstitch`，同时兼容 Synology 通过 `homes` 共享目录挂载产生的 `/Volumes/homes/<NAS 用户名>/Smartstitch`。后者会在运行时自动映射素材和输出路径，保存时仍写回统一的 `/Volumes/home/Smartstitch` 标准路径，避免不同电脑的挂载路径互相污染。这样其他 Mac 安装 SmartStitch 并挂载同一 NAS 后，无需复制本地配置即可看到并使用共享视频库；NAS 未挂载时自动回退到项目内的 `config` 目录。
+应用启动时会优先检测 `/Volumes/home/Smartstitch`，同时兼容 Synology 通过 `homes` 共享目录挂载产生的 `/Volumes/homes/<NAS 用户名>/Smartstitch`。后者会在运行时自动映射素材和输出路径，保存时仍写回统一的 `/Volumes/home/Smartstitch` 标准路径，避免不同电脑的挂载路径互相污染。这样其他 Mac 安装 SmartStitch 并挂载同一 NAS 后，无需复制本地配置即可看到并使用共享视频库。NAS 未挂载时应用会停止启动并提示先连接 NAS，不再回退读取项目内的 `config` 目录。
 
 非默认挂载位置可通过命令行或环境变量指定：
 
