@@ -16,7 +16,7 @@ def _now() -> str:
 class SQLiteStore:
     """Shared SQLite access and write coordination for all task tables."""
 
-    ALLOWED_TABLES = {"jobs", "slice_jobs"}
+    ALLOWED_TABLES = {"jobs", "slice_jobs", "output_sync_jobs"}
     MAX_RECORDS_PER_TABLE = 100
     ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 
@@ -131,7 +131,7 @@ class SQLiteStore:
             )
             return
         connection.execute(
-            "INSERT INTO jobs(id, payload, updated_at) VALUES(?, ?, ?) "
+            f"INSERT INTO {table}(id, payload, updated_at) VALUES(?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, "
             "updated_at=excluded.updated_at",
             (value["id"], payload, _now()),

@@ -63,7 +63,7 @@ def parse_asset_naming(config: AppConfig, asset: Asset) -> AssetNamingMetadata:
 
 
 def derive_plan_naming(
-    config: AppConfig, selections: dict[str, Asset | None]
+    config: AppConfig, selections: dict[str, Asset | None], sequence: int
 ) -> PlanNamingMetadata:
     records: list[NamingSourceRecord] = []
     talents: list[str] = []
@@ -100,6 +100,7 @@ def derive_plan_naming(
         benefit=config.output.naming.benefit,
         talents=talents,
         restriction_date=min(dates).isoformat(),
+        sequence=sequence,
         sources=records,
     )
 
@@ -125,6 +126,7 @@ def render_plan_filename(config: AppConfig, naming: PlanNamingMetadata) -> str:
         "benefit": naming.benefit,
         "talents": config.output.naming.talent.separator.join(naming.talents),
         "restriction_date": restriction_date,
+        "sequence": naming.sequence,
     }
     try:
         rendered = config.output.naming.template.format(**values)

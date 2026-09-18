@@ -210,15 +210,17 @@ def test_generic_job_uses_business_filename_and_exports_naming_metadata(tmp_path
         time.sleep(0.05)
 
     assert job["status"] == "completed"
-    assert job["items"][0]["output_name"] == "燕麦奶-第二件半价-张三-20261031.mp4"
+    assert job["items"][0]["output_name"] == "燕麦奶-第二件半价-张三-20261031-1.mp4"
     assert job["items"][0]["naming"]["talents"] == ["张三"]
+    assert job["items"][0]["naming"]["sequence"] == 1
     output_directory = Path(job["output_directory"])
-    assert (output_directory / "燕麦奶-第二件半价-张三-20261031.mp4").exists()
+    assert (output_directory / "燕麦奶-第二件半价-张三-20261031-1.mp4").exists()
     csv_lines = (output_directory / "manifest.csv").read_text("utf-8-sig").splitlines()
-    assert csv_lines[0].split(",")[2:6] == [
+    assert csv_lines[0].split(",")[2:7] == [
         "product",
         "benefit",
         "talents",
         "restriction_date",
+        "sequence",
     ]
-    assert "燕麦奶,第二件半价,张三,2026-10-31" in csv_lines[1]
+    assert "燕麦奶,第二件半价,张三,2026-10-31,1" in csv_lines[1]

@@ -24,6 +24,13 @@ from .collaboration import (
 )
 from .config import ConfigError, ConfigStore
 from .database import SQLiteStore
+from .feishu import (
+    FeishuBaseClient,
+    FeishuError,
+    FeishuSettingsStore,
+    FeishuSyncManager,
+    parse_base_url,
+)
 from .jobs import JobManager, TERMINAL_STATES
 from .library import LibraryConflictError, LibraryError, LibraryService, pick_directory
 from .media import DisconnectSafeFileResponse
@@ -37,6 +44,8 @@ from .models import (
     CreateConfigRequest,
     CreateLibraryRequest,
     DeletePoolRequest,
+    FeishuConnectionTestRequest,
+    FeishuSettingsUpdateRequest,
     JobCreateRequest,
     LibraryPreflightRequest,
     LoudnessPreviewRequest,
@@ -140,6 +149,12 @@ def create_app(
     library_service = LibraryService(config_store)
     database_store = SQLiteStore(root / "data" / "smartstitch.db")
     job_manager = JobManager(config_store, root / "data", database_store)
+    feishu_settings = FeishuSettingsStore(root / "data")
+    feishu_sync_manager = FeishuSyncManager(
+        database_store, feishu_settings, job_manager.get_job
+    )
+    job_manager.output_sync_manager = feishu_sync_manager
+    feishu_sync_manager.resume_interrupted()
     timeline_analyzer = TimelineAnalyzer(root / "data" / "timelines")
     timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
     slice_job_manager = SliceJobManager(timeline_slicer, database_store)
@@ -150,6 +165,9 @@ def create_app(
     app.state.config_leases = config_leases
     app.state.library_service = library_service
     app.state.job_manager = job_manager
+    app.state.feishu_settings = feishu_settings
+    app.state.feishu_sync_manager = feishu_sync_manager
+    app.state.feishu_client_factory = FeishuBaseClient
     app.state.database_store = database_store
     app.state.timeline_analyzer = timeline_analyzer
     app.state.timeline_slicer = timeline_slicer
@@ -200,6 +218,52 @@ def create_app(
             return pick_directory()
         except (LibraryError, OSError, subprocess.SubprocessError) as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/integrations/feishu/settings")
+    def get_feishu_settings() -> dict[str, object]:
+        try:
+            return feishu_settings.public()
+        except FeishuError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.put("/api/v1/integrations/feishu/settings")
+    def update_feishu_settings(
+        request: FeishuSettingsUpdateRequest,
+    ) -> dict[str, object]:
+        try:
+            return feishu_settings.update(request.app_id, request.app_secret)
+        except (FeishuError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/integrations/feishu/test")
+    def test_feishu_connection(
+        request: FeishuConnectionTestRequest,
+    ) -> dict[str, object]:
+        try:
+            app_id, app_secret = feishu_settings.credentials(
+                request.app_id, request.app_secret
+            )
+            base_token, linked_table_id = parse_base_url(request.base_url)
+            client = app.state.feishu_client_factory(app_id, app_secret)
+            tables = client.list_tables(base_token)
+            selected_table_id = linked_table_id
+            if selected_table_id and not any(
+                table["table_id"] == selected_table_id for table in tables
+            ):
+                selected_table_id = None
+            if not selected_table_id and len(tables) == 1:
+                selected_table_id = str(tables[0]["table_id"])
+            return {
+                "ok": True,
+                "base_token": base_token,
+                "linked_table_id": linked_table_id,
+                "selected_table_id": selected_table_id,
+                "tables": tables,
+            }
+        except FeishuError as exc:
+            raise HTTPException(
+                422, {"code": exc.code, "message": str(exc)}
+            ) from exc
 
     @app.get("/api/v1/users/me")
     def get_current_user() -> dict[str, object]:
@@ -843,6 +907,28 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(404, "任务不存在") from exc
         return FileResponse(Path(job["output_directory"]) / "manifest.json")
+
+    @app.get("/api/v1/jobs/{job_id}/sync/feishu")
+    def get_job_feishu_sync(job_id: str) -> dict[str, object]:
+        try:
+            job_manager.get_job(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "任务不存在") from exc
+        record = feishu_sync_manager.get(job_id)
+        return record or {
+            "job_id": job_id,
+            "provider": "feishu_base",
+            "status": "not_started",
+        }
+
+    @app.post("/api/v1/jobs/{job_id}/sync/feishu", status_code=202)
+    def start_job_feishu_sync(job_id: str) -> dict[str, object]:
+        try:
+            return feishu_sync_manager.start(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "任务不存在") from exc
+        except FeishuError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.get("/api/v1/jobs/{job_id}/events")
     async def events(job_id: str) -> StreamingResponse:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import re
+import urllib.parse
 from enum import StrEnum
 from pathlib import Path
 from string import Formatter
@@ -144,7 +145,13 @@ class LoudnessConfig(BaseModel):
     preview_duration_seconds: float = Field(default=12, ge=3, le=30)
 
 
-NAMING_TEMPLATE_FIELDS = {"product", "benefit", "talents", "restriction_date"}
+NAMING_TEMPLATE_FIELDS = {
+    "product",
+    "benefit",
+    "talents",
+    "restriction_date",
+    "sequence",
+}
 DUPLICATE_SUFFIX_FIELDS = {"serial"}
 
 
@@ -233,7 +240,8 @@ class OutputNamingConfig(BaseModel):
     enabled: bool = False
     product: str = Field(default="", max_length=100)
     benefit: str = Field(default="", max_length=100)
-    template: str = "{product}-{benefit}-{talents}-{restriction_date}.mp4"
+    sequence_start: int = Field(default=1, ge=1, le=999999)
+    template: str = "{product}-{benefit}-{talents}-{restriction_date}-{sequence}.mp4"
     source_metadata: NamingSourceMetadataConfig = Field(
         default_factory=NamingSourceMetadataConfig
     )
@@ -269,6 +277,34 @@ class OutputNamingConfig(BaseModel):
         return _validate_template_fields(value, DUPLICATE_SUFFIX_FIELDS, "重名后缀模板")
 
 
+class FeishuBaseSyncConfig(BaseModel):
+    enabled: bool = False
+    base_url: str = ""
+    table_id: str = Field(default="", max_length=128, pattern=r"^[A-Za-z0-9_-]*$")
+    trigger: Literal["job_terminal"] = "job_terminal"
+    row_scope: Literal["all_items", "succeeded_only"] = "all_items"
+    write_mode: Literal["upsert"] = "upsert"
+
+    @field_validator("base_url", "table_id")
+    @classmethod
+    def strip_feishu_target_fields(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def require_enabled_target(self) -> FeishuBaseSyncConfig:
+        if self.enabled and not self.base_url:
+            raise ValueError("启用飞书多维表格同步时必须填写多维表格链接")
+        if self.enabled:
+            parsed = urllib.parse.urlparse(self.base_url)
+            parts = [part for part in parsed.path.split("/") if part]
+            has_base_token = "base" in parts and parts.index("base") + 1 < len(parts)
+            if parsed.scheme not in {"http", "https"} or not has_base_token:
+                raise ValueError("请填写以 /base/ 开头的飞书多维表格直链")
+        if self.enabled and not self.table_id:
+            raise ValueError("启用飞书多维表格同步时必须选择数据表")
+        return self
+
+
 class OutputConfig(BaseModel):
     directory: str
     width: int = Field(default=720, gt=0)
@@ -291,6 +327,7 @@ class OutputConfig(BaseModel):
     collision_policy: Literal["increment", "error", "overwrite"] = "increment"
     faststart: bool = True
     naming: OutputNamingConfig = Field(default_factory=OutputNamingConfig)
+    feishu_base_sync: FeishuBaseSyncConfig = Field(default_factory=FeishuBaseSyncConfig)
 
     _normalize_directory = field_validator("directory", mode="before")(
         normalize_path_input
@@ -541,6 +578,7 @@ class PlanNamingMetadata(BaseModel):
     benefit: str
     talents: list[str]
     restriction_date: str
+    sequence: int = Field(ge=1)
     sources: list[NamingSourceRecord]
 
 
@@ -619,6 +657,27 @@ class ConfigUpdateRequest(BaseModel):
 
 class StructuredConfigUpdateRequest(BaseModel):
     config: AppConfig
+
+
+class FeishuSettingsUpdateRequest(BaseModel):
+    app_id: str = Field(default="", max_length=128)
+    app_secret: str | None = Field(default=None, max_length=512)
+
+    @field_validator("app_id", "app_secret")
+    @classmethod
+    def strip_feishu_credentials(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+
+class FeishuConnectionTestRequest(BaseModel):
+    base_url: str = Field(min_length=1, max_length=2048)
+    app_id: str | None = Field(default=None, max_length=128)
+    app_secret: str | None = Field(default=None, max_length=512)
+
+    @field_validator("base_url", "app_id", "app_secret")
+    @classmethod
+    def strip_feishu_test_fields(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
 
 
 class UserProfileUpdateRequest(BaseModel):

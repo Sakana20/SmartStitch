@@ -69,6 +69,7 @@ class JobManager:
         self.cancel_events: dict[str, threading.Event] = {}
         self.processes: dict[tuple[str, int], subprocess.Popen[str]] = {}
         self.lock = threading.RLock()
+        self.output_sync_manager: Any | None = None
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return [self._summary(job) for job in self.database.list()]
@@ -146,6 +147,7 @@ class JobManager:
             "warnings": plan.warnings,
             "output_directory": str(batch_directory),
             "config_snapshot_path": str(snapshot_path),
+            "feishu_base_sync": config.output.feishu_base_sync.model_dump(mode="json"),
             "concurrency": request.concurrency or config.batch.concurrency,
             "retry_count": config.batch.retry_count,
             "success_count": 0,
@@ -248,6 +250,8 @@ class JobManager:
         self.database.save(job)
         self._write_manifest(job)
         self._write_csv(job)
+        if self.output_sync_manager is not None:
+            self.output_sync_manager.enqueue_if_enabled(job)
         with self.lock:
             self.cancel_events.pop(job_id, None)
 
@@ -347,7 +351,7 @@ class JobManager:
         path = Path(job["output_directory"]) / "manifest.csv"
         has_naming = any(item.get("naming") for item in job["items"])
         naming_columns = (
-            ["product", "benefit", "talents", "restriction_date"]
+            ["product", "benefit", "talents", "restriction_date", "sequence"]
             if has_naming
             else []
         )
@@ -393,6 +397,7 @@ class JobManager:
                             "benefit": naming["benefit"],
                             "talents": "+".join(naming["talents"]),
                             "restriction_date": naming["restriction_date"],
+                            "sequence": naming["sequence"],
                         }
                     )
                 for category in categories:

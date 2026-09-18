@@ -50,7 +50,7 @@ def naming_asset(category: str, filename: str) -> Asset:
     )
 
 
-def test_generic_dynamic_naming_uses_timeline_order_earliest_date_and_suffix(tmp_path):
+def test_generic_dynamic_naming_uses_timeline_order_earliest_date_and_sequence(tmp_path):
     config = naming_config(tmp_path)
     scan = ScanResult(
         config_id=config.id,
@@ -73,11 +73,13 @@ def test_generic_dynamic_naming_uses_timeline_order_earliest_date_and_suffix(tmp
 
     plan = build_plan(config, scan, 2, seed=7)
 
-    assert plan.items[0].output_name == "燕麦奶-第二件半价-李四+张三-20261020.mp4"
-    assert plan.items[1].output_name == "燕麦奶-第二件半价-李四+张三-20261020-02.mp4"
+    assert plan.items[0].output_name == "燕麦奶-第二件半价-李四+张三-20261020-1.mp4"
+    assert plan.items[1].output_name == "燕麦奶-第二件半价-李四+张三-20261020-2.mp4"
     assert plan.items[0].naming is not None
     assert plan.items[0].naming.talents == ["李四", "张三"]
     assert plan.items[0].naming.restriction_date == "2026-10-20"
+    assert plan.items[0].naming.sequence == 1
+    assert plan.items[1].naming.sequence == 2
     assert [source.category for source in plan.items[0].naming.sources] == [
         "pool_2",
         "pool_1",
@@ -97,9 +99,28 @@ def test_explicit_naming_pools_exclude_other_stitched_pools(tmp_path):
 
     item = build_plan(config, scan, 1, seed=3).items[0]
 
-    assert item.output_name == "燕麦奶-第二件半价-张三-20261031.mp4"
+    assert item.output_name == "燕麦奶-第二件半价-张三-20261031-1.mp4"
     assert item.naming is not None
     assert [source.category for source in item.naming.sources] == ["pool_1"]
+
+
+def test_sequence_can_start_from_configured_number(tmp_path):
+    config = naming_config(tmp_path)
+    config.output.naming.sequence_start = 50
+    scan = ScanResult(
+        config_id=config.id,
+        assets={
+            "pool_1": [naming_asset("pool_1", "00016_张三-中间文案-2026-10-31.mp4")],
+            "pool_2": [naming_asset("pool_2", "00018_李四-中间文案-2026-10-20.mp4")],
+            "benefit_overlay": [],
+        },
+    )
+
+    plan = build_plan(config, scan, 2, seed=3)
+
+    assert [item.naming.sequence for item in plan.items] == [50, 51]
+    assert plan.items[0].output_name.endswith("-50.mp4")
+    assert plan.items[1].output_name.endswith("-51.mp4")
 
 
 def test_naming_rejects_invalid_date_and_non_generic_enablement(tmp_path):

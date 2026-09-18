@@ -136,7 +136,9 @@ output:
     # 简单模式可直接修改的两个字段。
     product: ""
     benefit: ""
-    template: "{product}-{benefit}-{talents}-{restriction_date}.mp4"
+    # 成片序号起点。设为 50 时，本配置从 50、51、52……开始编号。
+    sequence_start: 1
+    template: "{product}-{benefit}-{talents}-{restriction_date}-{sequence}.mp4"
     source_metadata:
       # pool_* 表示通用时间线上的所有视频库，也可明确列出 pool_1、pool_2。
       categories: ["pool_*"]
@@ -153,6 +155,17 @@ output:
       merge: earliest
       output_format: "%Y%m%d"
     duplicate_suffix: "-{serial:02d}"
+  # 成片任务结束后将清单记录同步到飞书多维表格。
+  # App ID/App Secret 保存在本机 data/integrations.yaml，不进入项目快照。
+  feishu_base_sync:
+    enabled: false
+    # 粘贴包含 /base/ 的多维表格直链，前端测试连接后会写入稳定 table_id。
+    base_url: ""
+    table_id: ""
+    trigger: job_terminal
+    # all_items=成功与失败条目都保留；succeeded_only=只同步成功成片。
+    row_scope: all_items
+    write_mode: upsert
 
 batch:
   default_count: 10

@@ -339,7 +339,11 @@ def build_plan(
         naming = None
         if config.workflow_type == "generic" and config.output.naming.enabled:
             try:
-                naming = derive_plan_naming(config, selections)
+                naming = derive_plan_naming(
+                    config,
+                    selections,
+                    sequence=config.output.naming.sequence_start + index,
+                )
                 output_name = _reserve_business_name(
                     config, render_plan_filename(config, naming), reserved_output_names
                 )

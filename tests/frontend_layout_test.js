@@ -15,8 +15,8 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260918-56"/,
-  "后台切片编码展示更新后必须刷新静态资源缓存版本",
+  /href="\/styles\.css\?v=20260918-61"/,
+  "飞书多维表格同步卡片更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
@@ -150,13 +150,38 @@ assert.match(
 );
 assert.match(
   app,
+  /sequence_start: 1[\s\S]*template: "\{product\}-\{benefit\}-\{talents\}-\{restriction_date\}-\{sequence\}\.mp4"[\s\S]*sequence: String\(naming\.sequence_start \|\| 1\)/,
+  "动态命名预览必须使用配置的序号起点并默认从 1 开始",
+);
+assert.match(
+  app,
+  /id="simpleNamingSequenceStart"[^>]*min="1"[^>]*max="999999"[\s\S]*sequence_start = value/,
+  "04 命名设置必须允许用户填写成片序号起点",
+);
+assert.match(
+  app,
+  /simple-card-number">04<\/span><div><h3>命名设置<\/h3>[\s\S]*\$\{namingCard\}[\s\S]*simple-card-number">\$\{generic \? "05" : "04"\}<\/span><div><h3>输出设置<\/h3>/,
+  "通用项目必须将命名设置独立为 04 卡片，并把输出设置顺延为 05",
+);
+assert.match(
+  app,
+  /id="simpleFeishuEnabled"[\s\S]*id="simpleFeishuAppId"[\s\S]*id="simpleFeishuAppSecret"[\s\S]*id="simpleFeishuUrl"[\s\S]*id="simpleFeishuTable"[\s\S]*id="simpleTestFeishuBtn"/,
+  "简单模式必须提供飞书同步开关、全局凭证、多维表格链接、数据表选择和连接测试",
+);
+assert.match(
+  app,
+  /function renderFeishuSyncPanel\(job\)[\s\S]*立即同步 \/ 重试[\s\S]*function loadJobFeishuSync\(job\)/,
+  "成片任务详情必须显示飞书同步状态并支持失败后重试",
+);
+assert.match(
+  app,
   /data-config-section="output-naming"[\s\S]*output\.naming\.source_metadata\.pattern[\s\S]*testNamingPatternBtn/,
   "高级模式必须提供素材文件名解析规则和测试入口",
 );
 assert.match(
   css,
-  /\.simple-naming-group\s*\{[^}]*grid-column:\s*1 \/ -1/,
-  "简单模式命名设置应沿用输出卡片并占据完整宽度",
+  /\.simple-naming-card-body\s*\{[^}]*display:\s*grid;[^}]*gap:\s*12px/,
+  "独立命名卡片的内容区必须沿用简单模式的网格间距",
 );
 assert.match(
   app,

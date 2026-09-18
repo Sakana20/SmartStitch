@@ -177,7 +177,8 @@ output:
     enabled: true
     product: 红果短剧
     benefit: 功能综述
-    template: '{product}-{benefit}-{talents}-{restriction_date}.mp4'
+    sequence_start: 1
+    template: '{product}-{benefit}-{talents}-{restriction_date}-{sequence}.mp4'
     source_metadata:
       categories:
       - pool_8

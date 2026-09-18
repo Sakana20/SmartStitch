@@ -17,6 +17,12 @@ const state = {
   configDraft: null,
   configRefreshPromise: null,
   previewAudioCleanup: null,
+  feishuSettings: { app_id: "", app_secret_configured: false },
+  feishuSettingsDraft: { app_id: "", app_secret_configured: false },
+  feishuSecretDraft: "",
+  feishuConnection: null,
+  feishuSync: null,
+  feishuSyncTimer: null,
   user: null,
   device: null,
   configLease: null,
@@ -2553,14 +2559,82 @@ function renderJobs() {
 async function openJob(jobId) {
   $("#jobDrawer").classList.add("open"); $("#jobDrawer").setAttribute("aria-hidden", "false");
   if (state.eventSource) state.eventSource.close();
+  if (state.feishuSyncTimer) clearTimeout(state.feishuSyncTimer);
+  state.feishuSyncTimer = null;
+  state.feishuSync = null;
   const update = job => { state.activeJob = job; renderJobDetail(job); };
   try { update(await api(`/jobs/${jobId}`)); } catch (error) { toast(error.message, true); return; }
+  if (terminalStates.has(state.activeJob.status) && state.activeJob.feishu_base_sync?.enabled) {
+    loadJobFeishuSync(state.activeJob);
+  }
   if (!terminalStates.has(state.activeJob.status)) {
     state.eventSource = new EventSource(`/api/v1/jobs/${jobId}/events`);
     state.eventSource.addEventListener("job_update", event => {
       const job = JSON.parse(event.data); update(job); loadJobs();
-      if (terminalStates.has(job.status)) state.eventSource.close();
+      if (terminalStates.has(job.status)) {
+        state.eventSource.close();
+        if (job.feishu_base_sync?.enabled) loadJobFeishuSync(job);
+      }
     });
+  }
+}
+
+function renderFeishuSyncPanel(job) {
+  if (!job.feishu_base_sync?.enabled) return "";
+  const sync = state.feishuSync;
+  const status = sync?.status || "not_started";
+  const statusMap = {
+    not_started: ["等待同步", "neutral"],
+    pending: ["等待同步", "running"],
+    running: ["同步中", "running"],
+    succeeded: ["同步成功", "success"],
+    failed: ["同步失败", "danger"],
+    interrupted: ["同步中断", "danger"],
+  };
+  const [label, cls] = statusMap[status] || [status, "neutral"];
+  const inProgress = status === "pending" || status === "running";
+  const canRetry = terminalStates.has(job.status) && !inProgress && status !== "succeeded";
+  const counts = status === "succeeded"
+    ? `<p>已校验 ${Number(sync.verified_count || 0)} 条 · 新增 ${Number(sync.inserted_count || 0)} 条 · 更新 ${Number(sync.updated_count || 0)} 条</p>`
+    : "";
+  const error = sync?.error ? `<div class="error-text">${escapeHtml(sync.error)}</div>` : "";
+  return `<section class="feishu-sync-panel">
+    <div><span class="feishu-sync-icon">飞</span><div><strong>飞书多维表格同步</strong><small>${escapeHtml(sync?.table_name || "任务结束后自动写入目标数据表")}</small></div><span class="status ${cls}">${label}</span></div>
+    ${counts}${error}
+    <div class="feishu-sync-actions">
+      <a class="button secondary small" href="${escapeHtml(job.feishu_base_sync.base_url)}" target="_blank" rel="noopener noreferrer">打开多维表格</a>
+      ${canRetry ? '<button id="retryFeishuSyncBtn" class="button secondary small" type="button">立即同步 / 重试</button>' : ""}
+    </div>
+  </section>`;
+}
+
+async function loadJobFeishuSync(job) {
+  if (!job?.feishu_base_sync?.enabled || state.activeJob?.id !== job.id) return;
+  if (state.feishuSyncTimer) clearTimeout(state.feishuSyncTimer);
+  state.feishuSyncTimer = null;
+  try {
+    state.feishuSync = await api(`/jobs/${job.id}/sync/feishu`);
+    if (state.activeJob?.id !== job.id) return;
+    renderJobDetail(state.activeJob);
+    if (["pending", "running"].includes(state.feishuSync.status)) {
+      state.feishuSyncTimer = setTimeout(() => loadJobFeishuSync(job), 1200);
+    }
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function retryJobFeishuSync(job) {
+  const button = $("#retryFeishuSyncBtn");
+  if (button) { button.disabled = true; button.textContent = "正在提交…"; }
+  try {
+    state.feishuSync = await api(`/jobs/${job.id}/sync/feishu`, { method: "POST" });
+    renderJobDetail(job);
+    state.feishuSyncTimer = setTimeout(() => loadJobFeishuSync(job), 300);
+    toast("飞书表格同步已提交");
+  } catch (error) {
+    toast(error.message, true);
+    if (button) { button.disabled = false; button.textContent = "立即同步 / 重试"; }
   }
 }
 
@@ -2569,6 +2643,7 @@ function renderJobDetail(job) {
   $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">BATCH #${job.short_id}</p><h2>${escapeHtml(job.config_name)}</h2><span class="status ${cls}">${label}</span><p>${escapeHtml(job.output_directory)}</p></div>
     <div class="big-progress"><div><span>总体进度</span><b>${totalProgress.toFixed(1)}%</b></div><div class="bar"><i style="width:${totalProgress}%"></i></div></div>
     <div class="seed-card"><span>随机种子</span><strong>${job.seed}</strong></div>
+    ${renderFeishuSyncPanel(job)}
     ${!terminalStates.has(job.status) ? `<button id="cancelJobBtn" class="button secondary" style="width:100%">取消剩余任务</button>` : ""}
     ${terminalStates.has(job.status) ? `<div class="record-delete-zone">
       <button id="showDeleteJobBtn" class="text-btn danger-text" type="button">删除任务记录</button>
@@ -2589,6 +2664,7 @@ function renderJobDetail(job) {
       return `<div class="item-row"><b>${String(item.index).padStart(2,"0")}</b><div><strong>${escapeHtml(item.output_name)}</strong><small class="item-selections">${escapeHtml(selections)}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${item.progress*100}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
     }).join("")}</div>`;
   $("#cancelJobBtn")?.addEventListener("click", () => cancelJob(job.id));
+  $("#retryFeishuSyncBtn")?.addEventListener("click", () => retryJobFeishuSync(job));
   $("#showDeleteJobBtn")?.addEventListener("click", () => {
     $("#showDeleteJobBtn").classList.add("hidden");
     $("#deleteJobConfirm").classList.remove("hidden");
@@ -2723,6 +2799,9 @@ function closeDrawer() {
   $("#jobDrawer").classList.remove("open");
   state.activeJob = null;
   if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+  if (state.feishuSyncTimer) clearTimeout(state.feishuSyncTimer);
+  state.feishuSyncTimer = null;
+  state.feishuSync = null;
 }
 
 function openNewConfig() {
@@ -2871,6 +2950,10 @@ async function openConfig() {
     state.configDraft = structuredClone(acquired.config);
     state.configHash = acquired.content_hash;
     state.yaml = acquired.yaml_text;
+    state.feishuSettings = await api("/integrations/feishu/settings");
+    state.feishuSettingsDraft = structuredClone(state.feishuSettings);
+    state.feishuSecretDraft = "";
+    state.feishuConnection = null;
     $("#yamlEditor").value = state.yaml;
     restoreConfigUiPreferences();
     document.body.classList.add("config-modal-open");
@@ -2885,6 +2968,7 @@ async function openConfig() {
 }
 function configEditorIsDirty() {
   if (!state.configDraft || !state.config) return false;
+  if (feishuCredentialsDirty()) return true;
   if (state.configMode === "yaml") return $("#yamlEditor").value !== state.yaml;
   try { return JSON.stringify(currentStructuredDraft()) !== JSON.stringify(state.config); }
   catch (_) { return true; }
@@ -2896,6 +2980,8 @@ async function closeConfig({ skipConfirm = false } = {}) {
   if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
   state.previewAudioCleanup?.();
   state.previewAudioCleanup = null;
+  state.feishuSecretDraft = "";
+  state.feishuConnection = null;
   $("#configModal").classList.remove("open");
   $("#configModal").setAttribute("aria-hidden","true");
   document.body.classList.remove("config-modal-open");
@@ -3002,7 +3088,8 @@ function ensureOutputNaming(config) {
       enabled: false,
       product: "",
       benefit: "",
-      template: "{product}-{benefit}-{talents}-{restriction_date}.mp4",
+      sequence_start: 1,
+      template: "{product}-{benefit}-{talents}-{restriction_date}-{sequence}.mp4",
       source_metadata: {
         categories: ["pool_*"],
         strip_smartstitch_suffix: true,
@@ -3016,6 +3103,114 @@ function ensureOutputNaming(config) {
     };
   }
   return config.output.naming;
+}
+
+function ensureFeishuBaseSync(config) {
+  if (!config.output.feishu_base_sync) {
+    config.output.feishu_base_sync = {
+      enabled: false,
+      base_url: "",
+      table_id: "",
+      trigger: "job_terminal",
+      row_scope: "all_items",
+      write_mode: "upsert",
+    };
+  }
+  return config.output.feishu_base_sync;
+}
+
+function feishuCredentialsDirty() {
+  return Boolean(state.feishuSecretDraft)
+    || state.feishuSettingsDraft.app_id !== state.feishuSettings.app_id;
+}
+
+function feishuTableOptions(selectedId) {
+  const tables = state.feishuConnection?.tables || [];
+  if (!tables.length) {
+    return selectedId
+      ? `<option value="${escapeHtml(selectedId)}" selected>已选择 ${escapeHtml(selectedId)}</option>`
+      : '<option value="">请先测试连接</option>';
+  }
+  return ['<option value="">请选择数据表</option>', ...tables.map(table =>
+    `<option value="${escapeHtml(table.table_id)}" ${table.table_id === selectedId ? "selected" : ""}>${escapeHtml(table.name)} · ${escapeHtml(table.table_id)}</option>`
+  )].join("");
+}
+
+function feishuConnectionStatus() {
+  if (!state.feishuConnection) return "填写后点击测试连接";
+  return `已连接，识别到 ${state.feishuConnection.tables.length} 个数据表`;
+}
+
+async function testFeishuConnection(prefix) {
+  if (state.configMode === "advanced") state.configDraft = collectVisualConfig();
+  const appId = $(`#${prefix}FeishuAppId`)?.value.trim() || state.feishuSettingsDraft.app_id;
+  const secret = $(`#${prefix}FeishuAppSecret`)?.value.trim() || state.feishuSecretDraft;
+  const url = $(`#${prefix}FeishuUrl`)?.value.trim() || ensureFeishuBaseSync(state.configDraft).base_url;
+  if (!appId || (!secret && !state.feishuSettings.app_secret_configured)) {
+    toast("请先填写 App ID 和 App Secret", true);
+    return;
+  }
+  if (!url) {
+    toast("请先填写飞书多维表格链接", true);
+    return;
+  }
+  const button = $(`#${prefix}TestFeishuBtn`);
+  if (button) { button.disabled = true; button.textContent = "正在连接…"; }
+  try {
+    state.feishuSettingsDraft.app_id = appId;
+    state.feishuSecretDraft = secret;
+    const sync = ensureFeishuBaseSync(state.configDraft);
+    sync.base_url = url;
+    const result = await api("/integrations/feishu/test", {
+      method: "POST",
+      body: JSON.stringify({
+        base_url: url,
+        app_id: appId,
+        app_secret: secret || null,
+      }),
+    });
+    state.feishuConnection = result;
+    if (!sync.table_id || !result.tables.some(table => table.table_id === sync.table_id)) {
+      sync.table_id = result.selected_table_id || "";
+    }
+    const scrollTop = configEditorScrollTop();
+    if (state.configMode === "advanced") renderVisualConfig();
+    else renderSimpleConfig();
+    restoreActiveConfigScroll(scrollTop);
+    toast("飞书多维表格连接成功");
+  } catch (error) {
+    state.feishuConnection = null;
+    toast(error.message, true);
+  } finally {
+    const current = $(`#${prefix}TestFeishuBtn`);
+    if (current) { current.disabled = false; current.textContent = "测试连接"; }
+  }
+}
+
+function bindFeishuControls(prefix) {
+  const sync = ensureFeishuBaseSync(state.configDraft);
+  $(`#${prefix}FeishuEnabled`)?.addEventListener("change", event => {
+    sync.enabled = event.target.checked;
+    const scrollTop = configEditorScrollTop();
+    if (state.configMode === "advanced") renderVisualConfig();
+    else renderSimpleConfig();
+    restoreActiveConfigScroll(scrollTop);
+  });
+  $(`#${prefix}FeishuAppId`)?.addEventListener("input", event => {
+    state.feishuSettingsDraft.app_id = event.target.value;
+  });
+  $(`#${prefix}FeishuAppSecret`)?.addEventListener("input", event => {
+    state.feishuSecretDraft = event.target.value;
+  });
+  $(`#${prefix}FeishuUrl`)?.addEventListener("input", event => {
+    sync.base_url = event.target.value.trim();
+    sync.table_id = "";
+    state.feishuConnection = null;
+  });
+  $(`#${prefix}FeishuTable`)?.addEventListener("change", event => {
+    sync.table_id = event.target.value;
+  });
+  $(`#${prefix}TestFeishuBtn`)?.addEventListener("click", () => testFeishuConnection(prefix));
 }
 
 function namingCategoryMatches(naming, category) {
@@ -3078,8 +3273,9 @@ function namingExample(config) {
     benefit: naming.benefit || "利益点",
     talents: talents.join(naming.talent.separator) || "达人名",
     restriction_date: dates.length ? dates.sort()[0] : "限制日期",
+    sequence: String(naming.sequence_start || 1),
   };
-  return naming.template.replace(/\{(product|benefit|talents|restriction_date)(?::[^}]*)?\}/g, (_, key) => values[key]);
+  return naming.template.replace(/\{(product|benefit|talents|restriction_date|sequence)(?::[^}]*)?\}/g, (_, key) => values[key]);
 }
 
 function renderSimpleConfig() {
@@ -3139,21 +3335,43 @@ function renderSimpleConfig() {
   const outputPreset = simpleOutputPreset(config.output);
   const qualityPreset = simpleQualityPreset(config.output);
   const naming = generic ? ensureOutputNaming(config) : null;
+  const feishu = ensureFeishuBaseSync(config);
   const namingErrors = generic
     ? (state.scan?.errors || []).filter(error => error.includes("命名") || error.includes("识别达人名"))
     : [];
-  const namingMarkup = generic ? `
-    <div class="simple-setting-group simple-naming-group">
-      <label class="simple-toggle-row compact"><span><b>按业务信息命名</b><small>使用产品-利益点-达人-限制日期生成文件名</small></span><input id="simpleNamingEnabled" class="switch-input" type="checkbox" ${naming.enabled ? "checked" : ""}></label>
-      <div id="simpleNamingFields" class="simple-naming-fields ${naming.enabled ? "" : "hidden"}">
-        <div class="simple-naming-inputs">
-          <label class="simple-large-field"><span>产品</span><input id="simpleNamingProduct" value="${escapeHtml(naming.product)}" placeholder="例如 燕麦奶"></label>
-          <label class="simple-large-field"><span>利益点</span><input id="simpleNamingBenefit" value="${escapeHtml(naming.benefit)}" placeholder="例如 第二件半价"></label>
+  const namingCard = generic ? `
+    <section class="simple-config-card simple-wide-card simple-naming-card">
+      <header><span class="simple-card-number">04</span><div><h3>命名设置</h3><p>填写产品和利益点，达人与限制日期由系统从剧情素材中提取。</p></div></header>
+      <div class="simple-card-body simple-naming-card-body">
+        <label class="simple-toggle-row compact"><span><b>按业务信息命名</b><small>使用产品-利益点-达人-限制日期生成文件名</small></span><input id="simpleNamingEnabled" class="switch-input" type="checkbox" ${naming.enabled ? "checked" : ""}></label>
+        <div id="simpleNamingFields" class="simple-naming-fields ${naming.enabled ? "" : "hidden"}">
+          <div class="simple-naming-inputs">
+            <label class="simple-large-field"><span>产品</span><input id="simpleNamingProduct" value="${escapeHtml(naming.product)}" placeholder="例如 红果短剧"></label>
+            <label class="simple-large-field"><span>利益点</span><input id="simpleNamingBenefit" value="${escapeHtml(naming.benefit)}" placeholder="例如 功能综述"></label>
+            <label class="simple-large-field"><span>序号起点</span><input id="simpleNamingSequenceStart" type="number" min="1" max="999999" step="1" value="${escapeHtml(naming.sequence_start || 1)}"></label>
+          </div>
+          <small class="simple-naming-help">达人和限制日期从抽中的剧情素材自动提取；序号从设定值开始逐条递增。</small>
+          <div class="simple-info-strip"><span class="${namingErrors.length ? "warning" : "ok"}">${namingErrors.length ? "命名预检异常" : "文件名预览"}</span><code id="simpleNamingPreview">${escapeHtml(naming.enabled ? namingExample(config) : "将继续使用原文件名模板")}</code>${namingErrors.length ? '<button class="text-btn" type="button" data-open-naming-advanced>查看高级规则 →</button>' : ""}</div>
         </div>
-        <small class="simple-naming-help">达人和限制日期会从本条成片抽中的视频素材中自动提取。</small>
-        <div class="simple-info-strip"><span class="${namingErrors.length ? "warning" : "ok"}">${namingErrors.length ? "命名预检异常" : "文件名预览"}</span><code id="simpleNamingPreview">${escapeHtml(naming.enabled ? namingExample(config) : "将继续使用原文件名模板")}</code>${namingErrors.length ? '<button class="text-btn" type="button" data-open-naming-advanced>查看高级规则 →</button>' : ""}</div>
       </div>
-    </div>` : "";
+    </section>` : "";
+  const feishuCardNumber = generic ? "06" : "05";
+  const feishuSecretHint = state.feishuSettings.app_secret_configured
+    ? "已配置，留空则不修改"
+    : "填写企业自建应用 App Secret";
+  const feishuCard = `
+    <section class="simple-config-card simple-wide-card simple-feishu-card ${feishu.enabled ? "is-accent" : ""}">
+      <header><span class="simple-card-number">${feishuCardNumber}</span><div><h3>飞书多维表格同步</h3><p>成片任务结束后，将每条成片作为一条记录写入指定数据表。</p></div><label class="simple-header-switch"><span>${feishu.enabled ? "已启用" : "未启用"}</span><input id="simpleFeishuEnabled" class="switch-input" type="checkbox" ${feishu.enabled ? "checked" : ""}></label></header>
+      <div class="simple-card-body simple-feishu-body ${feishu.enabled ? "" : "is-disabled"}">
+        <div class="simple-feishu-grid">
+          <label class="simple-large-field"><span>App ID <small>全局凭证，所有项目共用</small></span><input id="simpleFeishuAppId" value="${escapeHtml(state.feishuSettingsDraft.app_id)}" placeholder="cli_xxxxxxxxxxxxx" ${feishu.enabled ? "" : "disabled"}></label>
+          <label class="simple-large-field"><span>App Secret <small>只允许更换，不会读回原值</small></span><input id="simpleFeishuAppSecret" type="password" value="${escapeHtml(state.feishuSecretDraft)}" placeholder="${escapeHtml(feishuSecretHint)}" autocomplete="new-password" ${feishu.enabled ? "" : "disabled"}></label>
+          <label class="simple-large-field simple-feishu-url"><span>多维表格直链</span><input id="simpleFeishuUrl" value="${escapeHtml(feishu.base_url)}" placeholder="https://example.feishu.cn/base/..." ${feishu.enabled ? "" : "disabled"}></label>
+          <label class="simple-large-field"><span>数据表</span><select id="simpleFeishuTable" ${feishu.enabled ? "" : "disabled"}>${feishuTableOptions(feishu.table_id)}</select></label>
+        </div>
+        <div class="simple-feishu-actions"><button id="simpleTestFeishuBtn" class="button secondary small" type="button" ${feishu.enabled ? "" : "disabled"}>测试连接</button><span class="${state.feishuConnection ? "ok" : ""}">${escapeHtml(feishuConnectionStatus())}</span><small>Secret 仅保存在本机，不会进入成片任务快照。</small></div>
+      </div>
+    </section>`;
   const outputChoices = [
     ["portrait", "竖屏", "720 × 1280"],
     ["landscape", "横屏（未完成）", "1280 × 720", true],
@@ -3163,7 +3381,7 @@ function renderSimpleConfig() {
 
   $("#simpleConfigEditor").innerHTML = `
     <div class="simple-mode-banner">
-      <div><strong>简单模式</strong><p>按下面 4 步完成设置；没有显示的高级参数会原样保留。</p></div>
+      <div><strong>简单模式</strong><p>按下面 ${generic ? "6" : "5"} 步完成设置；没有显示的高级参数会原样保留。</p></div>
       <span class="simple-safe-badge">高级参数已保护</span>
       <button class="text-btn" type="button" data-open-advanced>进入高级模式 →</button>
     </div>
@@ -3205,16 +3423,19 @@ function renderSimpleConfig() {
       </div>
     </section>
 
+    ${namingCard}
+
     <section class="simple-config-card simple-wide-card">
-      <header><span class="simple-card-number">04</span><div><h3>输出设置</h3><p>选择常用方案即可，编码和码率由系统自动处理。</p></div></header>
+      <header><span class="simple-card-number">${generic ? "05" : "04"}</span><div><h3>输出设置</h3><p>选择常用方案即可，编码和码率由系统自动处理。</p></div></header>
       <div class="simple-card-body simple-finish-settings">
         <div class="simple-setting-group"><div class="simple-setting-label">画面方向</div>${simpleChoiceButtons("output", outputChoices, outputPreset)}</div>
         <div class="simple-setting-group"><div class="simple-setting-label">生成速度与画质</div>${simpleChoiceButtons("quality", [["fast", "快速生成", "速度优先"], ["recommended", "清晰画质", "推荐"], ["high", "高清优先", "耗时更长"]], qualityPreset)}</div>
         <div class="simple-setting-group"><div class="simple-setting-label">组合重复规则</div>${simpleChoiceButtons("duplicate", [["allow", "允许重复", "保持素材权重"], ["best_effort", "尽量不重复", "推荐"], ["strict", "完全不重复", "不足时停止"]], config.randomization.duplicate_policy)}</div>
         <label class="simple-toggle-row compact"><span><b>自动均衡音量</b><small>减少不同素材之间忽大忽小的音量差</small></span><input id="simpleLoudnessEnabled" class="switch-input" type="checkbox" ${config.output.loudness?.enabled ? "checked" : ""}></label>
-        ${namingMarkup}
       </div>
-    </section>`;
+    </section>
+
+    ${feishuCard}`;
   bindSimpleConfigControls();
 }
 
@@ -3238,6 +3459,7 @@ function moveSimpleSource(category, action) {
 }
 
 function bindSimpleConfigControls() {
+  bindFeishuControls("simple");
   $$('[data-open-advanced]').forEach(button => button.addEventListener("click", () => setConfigMode("advanced")));
   $$('[data-open-naming-advanced]').forEach(button => button.addEventListener("click", () => {
     setConfigMode("advanced");
@@ -3260,6 +3482,22 @@ function bindSimpleConfigControls() {
   });
   $("#simpleNamingBenefit")?.addEventListener("input", event => {
     ensureOutputNaming(state.configDraft).benefit = event.target.value;
+    const preview = $("#simpleNamingPreview");
+    if (preview) preview.textContent = namingExample(state.configDraft);
+  });
+  $("#simpleNamingSequenceStart")?.addEventListener("input", event => {
+    const value = Number(event.target.value);
+    if (Number.isInteger(value) && value >= 1 && value <= 999999) {
+      ensureOutputNaming(state.configDraft).sequence_start = value;
+    }
+    const preview = $("#simpleNamingPreview");
+    if (preview) preview.textContent = namingExample(state.configDraft);
+  });
+  $("#simpleNamingSequenceStart")?.addEventListener("change", event => {
+    const value = Number(event.target.value);
+    const normalized = Number.isInteger(value) && value >= 1 && value <= 999999 ? value : 1;
+    ensureOutputNaming(state.configDraft).sequence_start = normalized;
+    event.target.value = String(normalized);
     const preview = $("#simpleNamingPreview");
     if (preview) preview.textContent = namingExample(state.configDraft);
   });
@@ -3531,6 +3769,7 @@ function renderVisualConfig() {
     preview_duration_seconds: 12,
   };
   const naming = generic ? ensureOutputNaming(config) : null;
+  const feishu = ensureFeishuBaseSync(config);
   const namingSection = generic ? `
     <details class="config-section" data-config-section="output-naming">
       <summary>成片命名 <small>产品、利益点与素材文件名解析</small></summary>
@@ -3538,7 +3777,7 @@ function renderVisualConfig() {
         ${configSwitch("启用业务动态命名", "output.naming.enabled", naming.enabled, "命名方式")}
         ${configInput("产品", "output.naming.product", naming.product, { className: "naming-option", placeholder: "例如 燕麦奶" })}
         ${configInput("利益点", "output.naming.benefit", naming.benefit, { className: "naming-option", placeholder: "例如 第二件半价" })}
-        ${configInput("命名模板", "output.naming.template", naming.template, { wide: true, className: "naming-option", hint: "可用 product、benefit、talents、restriction_date" })}
+        ${configInput("命名模板", "output.naming.template", naming.template, { wide: true, className: "naming-option", hint: "可用 product、benefit、talents、restriction_date、sequence" })}
         ${configInput("参与解析的视频库", "output.naming.source_metadata.categories", naming.source_metadata.categories, { type: "list", wide: true, className: "naming-option", hint: "pool_* 表示所有通用视频库" })}
         <div class="naming-option">${configSwitch("移除 SmartStitch 切片后缀", "output.naming.source_metadata.strip_smartstitch_suffix", naming.source_metadata.strip_smartstitch_suffix)}</div>
         ${configInput("文件名解析正则", "output.naming.source_metadata.pattern", naming.source_metadata.pattern, { wide: true, className: "naming-option", hint: "必须包含 talent 和 restriction_date 命名分组" })}
@@ -3553,6 +3792,23 @@ function renderVisualConfig() {
         <div class="config-field wide naming-option naming-test-row"><button id="testNamingPatternBtn" class="button secondary small" type="button">用已扫描素材测试解析</button><div id="namingTestResult" class="naming-test-result"></div></div>
       </div>
     </details>` : "";
+  const feishuSecretHint = state.feishuSettings.app_secret_configured
+    ? "已配置，留空则不修改"
+    : "填写 App Secret";
+  const feishuSection = `
+    <details class="config-section" data-config-section="feishu-sync">
+      <summary>飞书多维表格同步 <small>凭证、目标 Base 与数据表</small></summary>
+      <div class="config-section-body config-form-grid three">
+        <div class="config-field"><label>同步状态</label><div class="config-switch"><span>任务结束后自动同步</span><input id="advancedFeishuEnabled" class="switch-input" type="checkbox" data-config-path="output.feishu_base_sync.enabled" data-config-type="boolean" ${feishu.enabled ? "checked" : ""}></div></div>
+        <div class="config-field"><label>App ID <small>全局凭证</small></label><input id="advancedFeishuAppId" value="${escapeHtml(state.feishuSettingsDraft.app_id)}" placeholder="cli_xxxxxxxxxxxxx"></div>
+        <div class="config-field"><label>App Secret <small>不会读回</small></label><input id="advancedFeishuAppSecret" type="password" value="${escapeHtml(state.feishuSecretDraft)}" placeholder="${escapeHtml(feishuSecretHint)}" autocomplete="new-password"></div>
+        <div class="config-field wide"><label>多维表格直链</label><input id="advancedFeishuUrl" data-config-path="output.feishu_base_sync.base_url" data-config-type="string" value="${escapeHtml(feishu.base_url)}" placeholder="https://example.feishu.cn/base/..."></div>
+        <div class="config-field"><label>数据表</label><select id="advancedFeishuTable" data-config-path="output.feishu_base_sync.table_id" data-config-type="string">${feishuTableOptions(feishu.table_id)}</select></div>
+        ${configSelect("同步条目", "output.feishu_base_sync.row_scope", feishu.row_scope, [["all_items", "成功与失败都同步"], ["succeeded_only", "只同步成功成片"]])}
+        <div class="config-field"><label>写入方式</label><code class="managed-pool-path">upsert · 稳定键去重</code></div>
+        <div class="config-field wide simple-feishu-actions"><button id="advancedTestFeishuBtn" class="button secondary small" type="button">测试连接</button><span class="${state.feishuConnection ? "ok" : ""}">${escapeHtml(feishuConnectionStatus())}</span><small>Secret 仅保存在本机 data/integrations.yaml。</small></div>
+      </div>
+    </details>`;
   const batch = config.batch;
   const timelineEditor = generic
     ? `<div class="config-field wide"><label>拼接顺序 <small>在下方拖动视频库卡片调整</small></label><div class="managed-pool-path">${config.timeline.map(category => escapeHtml(config.sources[category]?.label || category)).join(" → ") || "尚未添加视频库"}</div></div>`
@@ -3680,6 +3936,8 @@ function renderVisualConfig() {
 
     ${namingSection}
 
+    ${feishuSection}
+
     <details class="config-section" data-config-section="batch-scanner">
       <summary>批处理与扫描 <small>默认数量、并发和文件过滤</small></summary>
       <div class="config-section-body config-form-grid three">
@@ -3700,6 +3958,7 @@ function renderVisualConfig() {
   if (generic) bindPoolConfigControls();
   else bindBenefitConfigControls();
   bindOutputControls();
+  bindFeishuControls("advanced");
 }
 
 function mutateBenefitConfig(mutator) {
@@ -4124,6 +4383,25 @@ async function cloneConfig() {
 async function saveConfig() {
   const button = $("#saveConfigBtn"); button.disabled = true; button.textContent = "校验中…";
   try {
+    if (state.configMode !== "yaml") {
+      const sync = ensureFeishuBaseSync(currentStructuredDraft());
+      if (sync.enabled) {
+        if (!state.feishuSettingsDraft.app_id.trim()) throw new Error("启用飞书同步时必须填写 App ID");
+        if (!state.feishuSecretDraft && !state.feishuSettings.app_secret_configured) throw new Error("启用飞书同步时必须填写 App Secret");
+      }
+    }
+    if (feishuCredentialsDirty()) {
+      const settings = await api("/integrations/feishu/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          app_id: state.feishuSettingsDraft.app_id.trim(),
+          app_secret: state.feishuSecretDraft || null,
+        }),
+      });
+      state.feishuSettings = settings;
+      state.feishuSettingsDraft = structuredClone(settings);
+      state.feishuSecretDraft = "";
+    }
     let saved;
     if (state.configMode !== "yaml") {
       const config = currentStructuredDraft();
