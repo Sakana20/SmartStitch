@@ -5,6 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from .naming import NamingError, category_is_naming_source, parse_asset_naming
 from .models import (
     AppConfig,
     Asset,
@@ -335,6 +336,33 @@ def scan_config(config: AppConfig) -> ScanResult:
             label = group.label.strip()
             name = f"{label}（{category}）" if label else category
             warnings.append(f"{name}: {len(invalid)} 个文件不可用")
+
+    if config.workflow_type == "generic" and config.output.naming.enabled:
+        naming_categories = [
+            category
+            for category in config.timeline
+            if config.sources[category].mode != SourceMode.DISABLED
+            and category_is_naming_source(config, category)
+        ]
+        if not naming_categories:
+            errors.append("成片命名规则没有匹配任何已启用的视频库")
+        selectable_count = 0
+        for category in naming_categories:
+            group = config.sources[category]
+            label = group.label.strip() or category
+            for asset in assets.get(category, []):
+                if not asset.selectable:
+                    continue
+                selectable_count += 1
+                try:
+                    asset.naming_metadata = parse_asset_naming(config, asset)
+                except NamingError as exc:
+                    errors.append(
+                        f"{label}（{category}）: 无法从“{asset.name}”"
+                        f"识别达人名和限制日期: {exc}"
+                    )
+        if naming_categories and selectable_count == 0:
+            errors.append("参与成片命名的视频库中没有可用素材")
 
     overlays, overlay_errors = scan_fixed_overlay(config)
     assets["benefit_overlay"] = overlays

@@ -234,6 +234,13 @@ def test_generic_pool_lifecycle_and_reorder_preserve_deleted_directory(tmp_path)
     )
     assert reordered["timeline"] == ["pool_2", "pool_1"]
 
+    naming_config = store.load("generic-video")
+    naming_config.output.naming.enabled = True
+    naming_config.output.naming.product = "燕麦奶"
+    naming_config.output.naming.benefit = "第二件半价"
+    naming_config.output.naming.source_metadata.categories = ["pool_1", "pool_2"]
+    store.save_config("generic-video", naming_config)
+
     deleted = service.delete_pool(
         "generic-video",
         "pool_1",
@@ -242,6 +249,9 @@ def test_generic_pool_lifecycle_and_reorder_preserve_deleted_directory(tmp_path)
     assert deleted["retained_directory"] == str(first_directory)
     assert first_directory.is_dir()
     assert store.load("generic-video").timeline == ["pool_2"]
+    assert store.load(
+        "generic-video"
+    ).output.naming.source_metadata.categories == ["pool_2"]
 
     third = add_pool(service, store, "补充", "pool-request-0003")
     assert third["pool_id"] == "pool_3"

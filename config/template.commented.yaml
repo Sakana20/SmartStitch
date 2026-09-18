@@ -130,6 +130,29 @@ output:
   filename_template: "{config}_{date}_{batch}_{index:04d}.mp4"
   collision_policy: increment
   faststart: true
+  # 通用视频项目可开启业务动态命名。非通用项目保持关闭。
+  naming:
+    enabled: false
+    # 简单模式可直接修改的两个字段。
+    product: ""
+    benefit: ""
+    template: "{product}-{benefit}-{talents}-{restriction_date}.mp4"
+    source_metadata:
+      # pool_* 表示通用时间线上的所有视频库，也可明确列出 pool_1、pool_2。
+      categories: ["pool_*"]
+      # SmartStitch 切片会保留原文件名并添加 __片段信息，开启后只解析前缀。
+      strip_smartstitch_suffix: true
+      # 必须包含 talent 和 restriction_date 命名分组。
+      pattern: '^(?P<source_index>\d+)_(?P<talent>[^-]+)-(?P<source_title>.+)-(?P<restriction_date>\d{4}-\d{2}-\d{2})$'
+      restriction_date_formats: ["%Y-%m-%d"]
+      on_unmatched: error
+    talent:
+      merge: ordered_unique
+      separator: "+"
+    restriction_date:
+      merge: earliest
+      output_format: "%Y%m%d"
+    duplicate_suffix: "-{serial:02d}"
 
 batch:
   default_count: 10

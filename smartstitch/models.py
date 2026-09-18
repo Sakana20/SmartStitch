@@ -4,6 +4,7 @@ import copy
 import re
 from enum import StrEnum
 from pathlib import Path
+from string import Formatter
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -143,6 +144,131 @@ class LoudnessConfig(BaseModel):
     preview_duration_seconds: float = Field(default=12, ge=3, le=30)
 
 
+NAMING_TEMPLATE_FIELDS = {"product", "benefit", "talents", "restriction_date"}
+DUPLICATE_SUFFIX_FIELDS = {"serial"}
+
+
+def _validate_template_fields(value: str, allowed: set[str], label: str) -> str:
+    try:
+        parsed = list(Formatter().parse(value))
+    except ValueError as exc:
+        raise ValueError(f"{label}无效: {exc}") from exc
+    fields = {field for _, field, _, _ in parsed if field is not None}
+    unknown = fields - allowed
+    if unknown:
+        raise ValueError(f"{label}包含未知变量: {', '.join(sorted(unknown))}")
+    if not fields:
+        raise ValueError(f"{label}至少需要一个变量")
+    return value
+
+
+class NamingSourceMetadataConfig(BaseModel):
+    categories: list[str] = Field(default_factory=lambda: ["pool_*"])
+    strip_smartstitch_suffix: bool = True
+    pattern: str = (
+        r"^(?P<source_index>\d+)_(?P<talent>[^-]+)-"
+        r"(?P<source_title>.+)-(?P<restriction_date>\d{4}-\d{2}-\d{2})$"
+    )
+    restriction_date_formats: list[str] = Field(
+        default_factory=lambda: ["%Y-%m-%d"]
+    )
+    on_unmatched: Literal["error"] = "error"
+
+    @field_validator("categories")
+    @classmethod
+    def validate_categories(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values if value.strip()]
+        if not normalized:
+            raise ValueError("参与命名的视频库不能为空")
+        invalid = [
+            value for value in normalized if value != "pool_*" and not is_pool_category(value)
+        ]
+        if invalid:
+            raise ValueError(
+                "命名视频库必须是 pool_<正整数> 或 pool_*: "
+                + ", ".join(invalid)
+            )
+        return list(dict.fromkeys(normalized))
+
+    @field_validator("pattern")
+    @classmethod
+    def validate_pattern(cls, value: str) -> str:
+        try:
+            compiled = re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"文件名解析正则无效: {exc}") from exc
+        missing = {"talent", "restriction_date"} - set(compiled.groupindex)
+        if missing:
+            raise ValueError(
+                "文件名解析正则缺少命名分组: "
+                + ", ".join(sorted(missing))
+            )
+        return value
+
+    @field_validator("restriction_date_formats")
+    @classmethod
+    def validate_date_formats(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values if value.strip()]
+        supported = {"%Y-%m-%d", "%Y%m%d", "%y%m%d"}
+        invalid = [value for value in normalized if value not in supported]
+        if not normalized or invalid:
+            detail = ", ".join(invalid) if invalid else "空列表"
+            raise ValueError(
+                f"限制日期格式仅支持 %Y-%m-%d、%Y%m%d 和 %y%m%d: {detail}"
+            )
+        return list(dict.fromkeys(normalized))
+
+
+class NamingTalentConfig(BaseModel):
+    merge: Literal["ordered_unique"] = "ordered_unique"
+    separator: str = Field(default="+", min_length=1, max_length=10)
+
+
+class NamingRestrictionDateConfig(BaseModel):
+    merge: Literal["earliest"] = "earliest"
+    output_format: Literal["%Y%m%d"] = "%Y%m%d"
+
+
+class OutputNamingConfig(BaseModel):
+    enabled: bool = False
+    product: str = Field(default="", max_length=100)
+    benefit: str = Field(default="", max_length=100)
+    template: str = "{product}-{benefit}-{talents}-{restriction_date}.mp4"
+    source_metadata: NamingSourceMetadataConfig = Field(
+        default_factory=NamingSourceMetadataConfig
+    )
+    talent: NamingTalentConfig = Field(default_factory=NamingTalentConfig)
+    restriction_date: NamingRestrictionDateConfig = Field(
+        default_factory=NamingRestrictionDateConfig
+    )
+    duplicate_suffix: str = "-{serial:02d}"
+
+    @field_validator("product", "benefit")
+    @classmethod
+    def strip_business_fields(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("template")
+    @classmethod
+    def validate_template(cls, value: str) -> str:
+        validated = _validate_template_fields(
+            value, NAMING_TEMPLATE_FIELDS, "成片命名模板"
+        )
+        fields = {field for _, field, _, _ in Formatter().parse(validated) if field}
+        missing = NAMING_TEMPLATE_FIELDS - fields
+        if missing:
+            raise ValueError(
+                "成片命名模板缺少必需变量: "
+                + ", ".join(sorted(missing))
+            )
+        return validated
+
+    @field_validator("duplicate_suffix")
+    @classmethod
+    def validate_duplicate_suffix(cls, value: str) -> str:
+        return _validate_template_fields(value, DUPLICATE_SUFFIX_FIELDS, "重名后缀模板")
+
+
 class OutputConfig(BaseModel):
     directory: str
     width: int = Field(default=720, gt=0)
@@ -164,6 +290,7 @@ class OutputConfig(BaseModel):
     filename_template: str = "{config}_{date}_{batch}_{index:04d}.mp4"
     collision_policy: Literal["increment", "error", "overwrite"] = "increment"
     faststart: bool = True
+    naming: OutputNamingConfig = Field(default_factory=OutputNamingConfig)
 
     _normalize_directory = field_validator("directory", mode="before")(
         normalize_path_input
@@ -296,8 +423,34 @@ class AppConfig(BaseModel):
                     "通用视频库的 timeline 必须包含全部素材组: "
                     + ", ".join(unreferenced)
                 )
+            naming = self.output.naming
+            if naming.enabled:
+                missing_fields = [
+                    label
+                    for label, value in (
+                        ("产品", naming.product),
+                        ("利益点", naming.benefit),
+                    )
+                    if not value
+                ]
+                if missing_fields:
+                    raise ValueError(
+                        "启用业务命名时必须填写: " + ", ".join(missing_fields)
+                    )
+                missing_pools = sorted(
+                    category
+                    for category in naming.source_metadata.categories
+                    if category != "pool_*" and category not in self.sources
+                )
+                if missing_pools:
+                    raise ValueError(
+                        "命名规则引用了不存在的视频库: "
+                        + ", ".join(missing_pools)
+                    )
             return self
 
+        if self.output.naming.enabled:
+            raise ValueError("业务动态命名目前仅支持通用视频项目")
         if self.schema_version != 2:
             raise ValueError("淘宝闪购配置必须使用 schema_version 2")
         core_groups = {"hook", "ending"}
@@ -372,6 +525,25 @@ class MediaProbe(BaseModel):
     channels: int | None = None
 
 
+class AssetNamingMetadata(BaseModel):
+    source_stem: str
+    talent: str
+    restriction_date: str
+
+
+class NamingSourceRecord(AssetNamingMetadata):
+    category: str
+    asset: str
+
+
+class PlanNamingMetadata(BaseModel):
+    product: str
+    benefit: str
+    talents: list[str]
+    restriction_date: str
+    sources: list[NamingSourceRecord]
+
+
 class Asset(BaseModel):
     id: str
     category: str
@@ -387,6 +559,7 @@ class Asset(BaseModel):
     size_bytes: int | None = None
     modified_at: float | None = None
     probe: MediaProbe | None = None
+    naming_metadata: AssetNamingMetadata | None = None
 
     @property
     def selectable(self) -> bool:
@@ -410,6 +583,7 @@ class PlanItem(BaseModel):
     overlay: Asset | None = None
     output_name: str
     estimated_duration: float
+    naming: PlanNamingMetadata | None = None
 
 
 class BatchPlan(BaseModel):

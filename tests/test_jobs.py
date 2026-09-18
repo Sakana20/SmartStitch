@@ -153,3 +153,72 @@ def test_generic_job_renders_dynamic_timeline_and_labelled_manifest(tmp_path):
         "02_pool_1_开场",
     ]
     assert len(list(output_directory.glob("*.mp4"))) == 1
+
+
+def test_generic_job_uses_business_filename_and_exports_naming_metadata(tmp_path):
+    source = tmp_path / "source"
+    generate_clip(
+        source / "pool_1" / "00016_张三-红果拿下了我全家-2026-10-31.mp4",
+        "red",
+    )
+    config_directory = tmp_path / "config"
+    config_directory.mkdir()
+    config_data = {
+        "schema_version": 3,
+        "workflow_type": "generic",
+        "id": "generic-naming-job",
+        "name": "通用命名任务",
+        "source_root": str(source),
+        "timeline": ["pool_1"],
+        "sources": {
+            "pool_1": {
+                "label": "主素材",
+                "mode": "required",
+                "directory": "pool_1",
+            }
+        },
+        "benefit_overlays": {"mode": "disabled", "file": ""},
+        "output": {
+            "directory": str(tmp_path / "output"),
+            "width": 120,
+            "height": 200,
+            "fps": 20,
+            "video_preset": "ultrafast",
+            "crf": 30,
+            "naming": {
+                "enabled": True,
+                "product": "燕麦奶",
+                "benefit": "第二件半价",
+            },
+        },
+        "batch": {"concurrency": 1, "retry_count": 0, "minimum_free_space_gb": 0},
+    }
+    (config_directory / "generic-naming-job.yaml").write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    manager = JobManager(ConfigStore(config_directory), tmp_path / "data")
+
+    job = manager.create(
+        JobCreateRequest(config_id="generic-naming-job", count=1, seed=5, auto_start=True)
+    )
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        job = manager.get_job(job["id"])
+        if job["status"] in {"completed", "partial_failed", "failed", "cancelled"}:
+            break
+        time.sleep(0.05)
+
+    assert job["status"] == "completed"
+    assert job["items"][0]["output_name"] == "燕麦奶-第二件半价-张三-20261031.mp4"
+    assert job["items"][0]["naming"]["talents"] == ["张三"]
+    output_directory = Path(job["output_directory"])
+    assert (output_directory / "燕麦奶-第二件半价-张三-20261031.mp4").exists()
+    csv_lines = (output_directory / "manifest.csv").read_text("utf-8-sig").splitlines()
+    assert csv_lines[0].split(",")[2:6] == [
+        "product",
+        "benefit",
+        "talents",
+        "restriction_date",
+    ]
+    assert "燕麦奶,第二件半价,张三,2026-10-31" in csv_lines[1]

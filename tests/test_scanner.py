@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import subprocess
 
-from smartstitch.models import AppConfig
+from smartstitch.models import AppConfig, MediaProbe
+import smartstitch.scanner as scanner_module
 from smartstitch.scanner import scan_config
 
 
@@ -119,3 +120,45 @@ def test_managed_library_rejects_multiple_auto_overlays(tmp_path):
     assert result.assets["benefit_overlay"] == []
     assert len(result.errors) == 1
     assert "只能放置一张图片" in result.errors[0]
+
+
+def test_generic_scan_parses_naming_metadata_and_reports_bad_filename(tmp_path, monkeypatch):
+    pool = tmp_path / "pool_1"
+    pool.mkdir()
+    valid = pool / "00016_张三-红果拿下了我全家-2026-10-31.mp4"
+    invalid = pool / "无法解析.mp4"
+    valid.write_bytes(b"video")
+    invalid.write_bytes(b"video")
+    monkeypatch.setattr(
+        scanner_module,
+        "probe_media",
+        lambda *_args, **_kwargs: MediaProbe(duration=1, width=720, height=1280),
+    )
+    config = AppConfig.model_validate(
+        {
+            "schema_version": 3,
+            "workflow_type": "generic",
+            "id": "scan-naming",
+            "name": "扫描命名",
+            "source_root": str(tmp_path),
+            "timeline": ["pool_1"],
+            "sources": {"pool_1": {"label": "主素材", "directory": "pool_1"}},
+            "benefit_overlays": {"mode": "disabled", "file": ""},
+            "output": {
+                "directory": str(tmp_path / "out"),
+                "naming": {
+                    "enabled": True,
+                    "product": "燕麦奶",
+                    "benefit": "第二件半价",
+                },
+            },
+        }
+    )
+
+    result = scan_config(config)
+
+    parsed = next(asset for asset in result.assets["pool_1"] if asset.name == valid.name)
+    assert parsed.naming_metadata is not None
+    assert parsed.naming_metadata.talent == "张三"
+    assert parsed.naming_metadata.restriction_date == "2026-10-31"
+    assert any(invalid.name in error and "识别达人名和限制日期" in error for error in result.errors)

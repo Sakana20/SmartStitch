@@ -173,6 +173,26 @@ output:
   filename_template: '{config}_{date}_{batch}_{index:04d}.mp4'
   collision_policy: increment
   faststart: true
+  naming:
+    enabled: true
+    product: 红果短剧
+    benefit: 功能综述
+    template: '{product}-{benefit}-{talents}-{restriction_date}.mp4'
+    source_metadata:
+      categories:
+      - pool_8
+      strip_smartstitch_suffix: true
+      pattern: ^(?P<source_index>\d+)_(?P<talent>[^-]+)-(?P<source_title>.+)-(?P<restriction_date>\d{4}-\d{2}-\d{2})$
+      restriction_date_formats:
+      - '%Y-%m-%d'
+      on_unmatched: error
+    talent:
+      merge: ordered_unique
+      separator: +
+    restriction_date:
+      merge: earliest
+      output_format: '%Y%m%d'
+    duplicate_suffix: '-{serial:02d}'
 batch:
   default_count: 10
   max_count: 1000

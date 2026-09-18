@@ -121,6 +121,7 @@ class JobManager:
                         for category, asset in planned.selections.items()
                     },
                     "overlay": planned.overlay.model_dump(mode="json") if planned.overlay else None,
+                    "naming": planned.naming.model_dump(mode="json") if planned.naming else None,
                 }
             )
         job = {
@@ -344,6 +345,12 @@ class JobManager:
 
     def _write_csv(self, job: dict[str, Any]) -> None:
         path = Path(job["output_directory"]) / "manifest.csv"
+        has_naming = any(item.get("naming") for item in job["items"])
+        naming_columns = (
+            ["product", "benefit", "talents", "restriction_date"]
+            if has_naming
+            else []
+        )
         available = {key for item in job["items"] for key in item["selections"]}
         categories = [category for category in job.get("timeline", []) if category in available]
         categories.extend(sorted(available - set(categories)))
@@ -362,6 +369,7 @@ class JobManager:
                 fieldnames=[
                     "index",
                     "status",
+                    *naming_columns,
                     *category_columns.values(),
                     "benefit_overlay",
                     "output_path",
@@ -377,6 +385,16 @@ class JobManager:
                     "output_path": item["output_path"],
                     "error": item["error"] or "",
                 }
+                naming = item.get("naming")
+                if naming:
+                    row.update(
+                        {
+                            "product": naming["product"],
+                            "benefit": naming["benefit"],
+                            "talents": "+".join(naming["talents"]),
+                            "restriction_date": naming["restriction_date"],
+                        }
+                    )
                 for category in categories:
                     asset = item["selections"].get(category)
                     row[category_columns[category]] = asset["path"] if asset else ""

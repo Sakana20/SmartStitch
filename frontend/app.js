@@ -1914,8 +1914,6 @@ function selectTimelineSegment(segmentId, { scrollIntoView = false, toggleMember
   }
   setSelectedBreakpointFrames([]);
   state.timeline.selectedSegmentId = segment.id;
-  $("#timelineVideo").pause();
-  seekTimelineFrame(segment.startFrame, "segment_select");
   renderTimeline();
   if (scrollIntoView) {
     requestAnimationFrame(() => {
@@ -2030,7 +2028,7 @@ function renderSegmentList() {
     const checked = state.timeline.mergeSelection.includes(unit.id);
     const memberMarkup = composite
       ? `<div class="segment-unit-parts">${memberSegments.map(segment => (
-        `<button type="button" data-seek-member="${segment.id}"><b>${String(segment.index).padStart(2, "0")}</b><span>${frameTimecode(segment.startFrame, analysis.fps)} → ${frameTimecode(segment.endFrame, analysis.fps)}</span></button>`
+        `<button type="button" data-select-member="${segment.id}"><b>${String(segment.index).padStart(2, "0")}</b><span>${frameTimecode(segment.startFrame, analysis.fps)} → ${frameTimecode(segment.endFrame, analysis.fps)}</span></button>`
       )).join("")}</div>`
       : `<div class="segment-row-time"><strong>${frameTimecode(memberSegments[0].startFrame, analysis.fps)}</strong><b>→</b><strong>${frameTimecode(memberSegments[0].endFrame, analysis.fps)}</strong></div>`;
     const numberLabel = composite ? `G${compositeNumber}` : String(memberSegments[0].index).padStart(2, "0");
@@ -2064,10 +2062,10 @@ function renderSegmentList() {
       }
     });
   });
-  $$('[data-seek-member]').forEach(button => {
+  $$('[data-select-member]').forEach(button => {
     button.addEventListener("click", event => {
       event.stopPropagation();
-      selectTimelineSegment(event.currentTarget.dataset.seekMember);
+      selectTimelineSegment(event.currentTarget.dataset.selectMember);
     });
   });
   $$('[data-merge-unit]').forEach(checkbox => {
@@ -2620,10 +2618,16 @@ function renderSliceJobDetail(job) {
   const [label, cls] = sliceJobStatusInfo(job);
   const progress = Math.max(0, Math.min(100, Number(job.progress || 0) * 100));
   const sourceName = job.source?.name || job.source?.path?.split(/[\\/]/).pop() || "未知视频";
-  const phaseNames = { waiting: "等待", probing_audio: "检查音轨", encoding: "编码", verifying: "校验", committing: "入库", done: "完成" };
+  const phaseNames = { waiting: "等待", probing_audio: "检查音轨", encoding: "编码", encoding_fallback: "软件编码回退", verifying: "校验", committing: "入库", done: "完成" };
+  const encoderLabel = encoder => encoder === "h264_videotoolbox" ? "VideoToolbox" : (encoder === "libx264" ? "libx264" : encoder || "待确定");
+  const actualEncoders = (job.encoding?.actual_video_encoders || []).map(encoderLabel);
+  const plannedEncoder = encoderLabel(job.encoding?.planned_video_encoder);
+  const encoderSummary = actualEncoders.length ? actualEncoders.join(" + ") : plannedEncoder;
+  const fallbackCount = Number(job.encoding?.fallback_count || 0);
   $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">SLICE #${escapeHtml(job.short_id)}</p><h2>${escapeHtml(sourceName)}</h2><span class="status ${cls}">${label}</span><p>${escapeHtml(job.source?.path || "")}</p></div>
     <div class="big-progress"><div><span>总体进度</span><b>${progress.toFixed(1)}%</b></div><div class="bar"><i style="width:${progress}%"></i></div></div>
     <div class="slice-job-stats"><span>输出 <b>${job.output_unit_count}</b></span><span>成功 <b>${job.success_count}</b></span><span>失败 <b>${job.failure_count}</b></span><span>取消 <b>${job.cancelled_count || 0}</b></span></div>
+    <div class="slice-encoder-summary"><span>视频编码</span><b>${escapeHtml(encoderSummary)}</b>${fallbackCount ? `<small>${fallbackCount} 个条目已自动回退到 libx264</small>` : ""}</div>
     ${job.manifest_sync_error ? `<div class="warning-box">切片清单同步失败：${escapeHtml(job.manifest_sync_error)}</div>` : ""}
     ${!terminalStates.has(job.status) ? `<button id="cancelSliceJobBtn" class="button secondary" style="width:100%">取消切片任务</button>` : ""}
     ${["partial_failed", "failed", "cancelled", "interrupted"].includes(job.status) ? `<button id="retrySliceJobBtn" class="button primary" style="width:100%;margin-top:8px">${job.status === "interrupted" ? "继续未完成项" : "重试未完成项"}</button>` : ""}
@@ -2632,7 +2636,8 @@ function renderSliceJobDetail(job) {
       const [itemLabel, itemCls] = statusInfo(item.status);
       const parts = (item.parts || []).map(part => `#${part.segment_index} ${Number(part.start_seconds).toFixed(2)}–${Number(part.end_seconds).toFixed(2)}s`).join(" · ");
       const itemProgress = Number(item.progress || 0) * 100;
-      return `<div class="item-row"><b>${String(item.unit_index).padStart(2, "0")}</b><div><strong>${escapeHtml(categoryLabelForTimeline(item.category))}</strong><small class="item-selections">${escapeHtml(parts)} · ${phaseNames[item.phase] || item.phase}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${itemProgress}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
+      const itemEncoder = encoderLabel(item.actual_video_encoder || item.planned_video_encoder);
+      return `<div class="item-row"><b>${String(item.unit_index).padStart(2, "0")}</b><div><strong>${escapeHtml(categoryLabelForTimeline(item.category))}</strong><small class="item-selections">${escapeHtml(parts)} · ${phaseNames[item.phase] || item.phase} · ${escapeHtml(itemEncoder)}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${itemProgress}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
     }).join("")}</div>`;
   $("#cancelSliceJobBtn")?.addEventListener("click", () => cancelSliceJob(job.id));
   $("#retrySliceJobBtn")?.addEventListener("click", () => retrySliceJob(job));
@@ -2991,6 +2996,92 @@ function simpleChoiceButtons(name, choices, selected) {
     </button>`).join("")}</div>`;
 }
 
+function ensureOutputNaming(config) {
+  if (!config.output.naming) {
+    config.output.naming = {
+      enabled: false,
+      product: "",
+      benefit: "",
+      template: "{product}-{benefit}-{talents}-{restriction_date}.mp4",
+      source_metadata: {
+        categories: ["pool_*"],
+        strip_smartstitch_suffix: true,
+        pattern: "^(?P<source_index>\\d+)_(?P<talent>[^-]+)-(?P<source_title>.+)-(?P<restriction_date>\\d{4}-\\d{2}-\\d{2})$",
+        restriction_date_formats: ["%Y-%m-%d"],
+        on_unmatched: "error",
+      },
+      talent: { merge: "ordered_unique", separator: "+" },
+      restriction_date: { merge: "earliest", output_format: "%Y%m%d" },
+      duplicate_suffix: "-{serial:02d}",
+    };
+  }
+  return config.output.naming;
+}
+
+function namingCategoryMatches(naming, category) {
+  return naming.source_metadata.categories.some(pattern => pattern === "pool_*" || pattern === category);
+}
+
+function parseNamingDate(value, formats) {
+  for (const format of formats) {
+    if (format === "%Y-%m-%d" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      const compact = value.replaceAll("-", "");
+      const parsed = parseNamingDate(compact, ["%Y%m%d"]);
+      if (parsed) return parsed;
+    }
+    if (format === "%Y%m%d" && /^\d{8}$/.test(value)) {
+      const year = Number(value.slice(0, 4));
+      const month = Number(value.slice(4, 6));
+      const day = Number(value.slice(6, 8));
+      const date = new Date(Date.UTC(year, month - 1, day));
+      if (date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day) return value;
+    }
+    if (format === "%y%m%d" && /^\d{6}$/.test(value)) {
+      const expanded = `20${value}`;
+      const parsed = parseNamingDate(expanded, ["%Y%m%d"]);
+      if (parsed) return parsed;
+    }
+  }
+  return null;
+}
+
+function parseNamingAsset(config, asset) {
+  const naming = ensureOutputNaming(config);
+  let stem = asset.name.replace(/\.[^.]+$/, "");
+  if (naming.source_metadata.strip_smartstitch_suffix) stem = stem.split("__", 1)[0];
+  const browserPattern = naming.source_metadata.pattern.replaceAll("(?P<", "(?<");
+  const match = stem.match(new RegExp(browserPattern));
+  const talent = match?.groups?.talent?.trim();
+  const restrictionDate = match?.groups?.restriction_date
+    ? parseNamingDate(match.groups.restriction_date, naming.source_metadata.restriction_date_formats)
+    : null;
+  if (!talent || !restrictionDate) throw new Error("无法识别达人名和限制日期");
+  return { talent, restrictionDate };
+}
+
+function namingExample(config) {
+  const naming = ensureOutputNaming(config);
+  const talents = [];
+  const dates = [];
+  for (const category of config.timeline) {
+    if (!namingCategoryMatches(naming, category)) continue;
+    const asset = (state.scan?.assets?.[category] || []).find(item => item.enabled && item.valid && Number(item.weight) > 0);
+    if (!asset) continue;
+    try {
+      const parsed = parseNamingAsset(config, asset);
+      if (!talents.includes(parsed.talent)) talents.push(parsed.talent);
+      dates.push(parsed.restrictionDate);
+    } catch (_) {}
+  }
+  const values = {
+    product: naming.product || "产品",
+    benefit: naming.benefit || "利益点",
+    talents: talents.join(naming.talent.separator) || "达人名",
+    restriction_date: dates.length ? dates.sort()[0] : "限制日期",
+  };
+  return naming.template.replace(/\{(product|benefit|talents|restriction_date)(?::[^}]*)?\}/g, (_, key) => values[key]);
+}
+
 function renderSimpleConfig() {
   const config = state.configDraft;
   if (!config) return;
@@ -3047,6 +3138,22 @@ function renderSimpleConfig() {
     : state.library.health === "healthy" ? "项目目录正常" : "请检查项目目录";
   const outputPreset = simpleOutputPreset(config.output);
   const qualityPreset = simpleQualityPreset(config.output);
+  const naming = generic ? ensureOutputNaming(config) : null;
+  const namingErrors = generic
+    ? (state.scan?.errors || []).filter(error => error.includes("命名") || error.includes("识别达人名"))
+    : [];
+  const namingMarkup = generic ? `
+    <div class="simple-setting-group simple-naming-group">
+      <label class="simple-toggle-row compact"><span><b>按业务信息命名</b><small>使用产品-利益点-达人-限制日期生成文件名</small></span><input id="simpleNamingEnabled" class="switch-input" type="checkbox" ${naming.enabled ? "checked" : ""}></label>
+      <div id="simpleNamingFields" class="simple-naming-fields ${naming.enabled ? "" : "hidden"}">
+        <div class="simple-naming-inputs">
+          <label class="simple-large-field"><span>产品</span><input id="simpleNamingProduct" value="${escapeHtml(naming.product)}" placeholder="例如 燕麦奶"></label>
+          <label class="simple-large-field"><span>利益点</span><input id="simpleNamingBenefit" value="${escapeHtml(naming.benefit)}" placeholder="例如 第二件半价"></label>
+        </div>
+        <small class="simple-naming-help">达人和限制日期会从本条成片抽中的视频素材中自动提取。</small>
+        <div class="simple-info-strip"><span class="${namingErrors.length ? "warning" : "ok"}">${namingErrors.length ? "命名预检异常" : "文件名预览"}</span><code id="simpleNamingPreview">${escapeHtml(naming.enabled ? namingExample(config) : "将继续使用原文件名模板")}</code>${namingErrors.length ? '<button class="text-btn" type="button" data-open-naming-advanced>查看高级规则 →</button>' : ""}</div>
+      </div>
+    </div>` : "";
   const outputChoices = [
     ["portrait", "竖屏", "720 × 1280"],
     ["landscape", "横屏（未完成）", "1280 × 720", true],
@@ -3105,6 +3212,7 @@ function renderSimpleConfig() {
         <div class="simple-setting-group"><div class="simple-setting-label">生成速度与画质</div>${simpleChoiceButtons("quality", [["fast", "快速生成", "速度优先"], ["recommended", "清晰画质", "推荐"], ["high", "高清优先", "耗时更长"]], qualityPreset)}</div>
         <div class="simple-setting-group"><div class="simple-setting-label">组合重复规则</div>${simpleChoiceButtons("duplicate", [["allow", "允许重复", "保持素材权重"], ["best_effort", "尽量不重复", "推荐"], ["strict", "完全不重复", "不足时停止"]], config.randomization.duplicate_policy)}</div>
         <label class="simple-toggle-row compact"><span><b>自动均衡音量</b><small>减少不同素材之间忽大忽小的音量差</small></span><input id="simpleLoudnessEnabled" class="switch-input" type="checkbox" ${config.output.loudness?.enabled ? "checked" : ""}></label>
+        ${namingMarkup}
       </div>
     </section>`;
   bindSimpleConfigControls();
@@ -3131,7 +3239,30 @@ function moveSimpleSource(category, action) {
 
 function bindSimpleConfigControls() {
   $$('[data-open-advanced]').forEach(button => button.addEventListener("click", () => setConfigMode("advanced")));
+  $$('[data-open-naming-advanced]').forEach(button => button.addEventListener("click", () => {
+    setConfigMode("advanced");
+    requestAnimationFrame(() => {
+      const section = $('[data-config-section="output-naming"]');
+      if (!section) return;
+      section.open = true;
+      section.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }));
   $("#simpleConfigName")?.addEventListener("input", event => { state.configDraft.name = event.target.value; });
+  $("#simpleNamingEnabled")?.addEventListener("change", event => {
+    ensureOutputNaming(state.configDraft).enabled = event.target.checked;
+    renderSimpleConfig();
+  });
+  $("#simpleNamingProduct")?.addEventListener("input", event => {
+    ensureOutputNaming(state.configDraft).product = event.target.value;
+    const preview = $("#simpleNamingPreview");
+    if (preview) preview.textContent = namingExample(state.configDraft);
+  });
+  $("#simpleNamingBenefit")?.addEventListener("input", event => {
+    ensureOutputNaming(state.configDraft).benefit = event.target.value;
+    const preview = $("#simpleNamingPreview");
+    if (preview) preview.textContent = namingExample(state.configDraft);
+  });
   $$('[data-simple-source-name]').forEach(input => input.addEventListener("input", () => {
     state.configDraft.sources[input.dataset.simpleSourceName].label = input.value;
   }));
@@ -3399,6 +3530,29 @@ function renderVisualConfig() {
     true_peak_dbtp: -1.5,
     preview_duration_seconds: 12,
   };
+  const naming = generic ? ensureOutputNaming(config) : null;
+  const namingSection = generic ? `
+    <details class="config-section" data-config-section="output-naming">
+      <summary>成片命名 <small>产品、利益点与素材文件名解析</small></summary>
+      <div class="config-section-body config-form-grid three">
+        ${configSwitch("启用业务动态命名", "output.naming.enabled", naming.enabled, "命名方式")}
+        ${configInput("产品", "output.naming.product", naming.product, { className: "naming-option", placeholder: "例如 燕麦奶" })}
+        ${configInput("利益点", "output.naming.benefit", naming.benefit, { className: "naming-option", placeholder: "例如 第二件半价" })}
+        ${configInput("命名模板", "output.naming.template", naming.template, { wide: true, className: "naming-option", hint: "可用 product、benefit、talents、restriction_date" })}
+        ${configInput("参与解析的视频库", "output.naming.source_metadata.categories", naming.source_metadata.categories, { type: "list", wide: true, className: "naming-option", hint: "pool_* 表示所有通用视频库" })}
+        <div class="naming-option">${configSwitch("移除 SmartStitch 切片后缀", "output.naming.source_metadata.strip_smartstitch_suffix", naming.source_metadata.strip_smartstitch_suffix)}</div>
+        ${configInput("文件名解析正则", "output.naming.source_metadata.pattern", naming.source_metadata.pattern, { wide: true, className: "naming-option", hint: "必须包含 talent 和 restriction_date 命名分组" })}
+        ${configInput("允许的日期格式", "output.naming.source_metadata.restriction_date_formats", naming.source_metadata.restriction_date_formats, { type: "list", className: "naming-option", hint: "默认 %Y-%m-%d，逗号分隔" })}
+        <div class="naming-option">${configSelect("解析失败", "output.naming.source_metadata.on_unmatched", naming.source_metadata.on_unmatched, [["error", "报错并停止"]])}</div>
+        <div class="naming-option">${configSelect("达人合并", "output.naming.talent.merge", naming.talent.merge, [["ordered_unique", "按时间线去重"]])}</div>
+        ${configInput("达人连接符", "output.naming.talent.separator", naming.talent.separator, { className: "naming-option" })}
+        <div class="naming-option">${configSelect("限制日期合并", "output.naming.restriction_date.merge", naming.restriction_date.merge, [["earliest", "取最早日期"]])}</div>
+        ${configInput("日期输出格式", "output.naming.restriction_date.output_format", naming.restriction_date.output_format, { className: "naming-option" })}
+        ${configInput("重名后缀", "output.naming.duplicate_suffix", naming.duplicate_suffix, { className: "naming-option", hint: "例如 -{serial:02d}" })}
+        <div class="config-field wide naming-option"><label>文件名示例 <small>使用当前扫描素材</small></label><code id="advancedNamingPreview" class="managed-pool-path">${escapeHtml(namingExample(config))}</code></div>
+        <div class="config-field wide naming-option naming-test-row"><button id="testNamingPatternBtn" class="button secondary small" type="button">用已扫描素材测试解析</button><div id="namingTestResult" class="naming-test-result"></div></div>
+      </div>
+    </details>` : "";
   const batch = config.batch;
   const timelineEditor = generic
     ? `<div class="config-field wide"><label>拼接顺序 <small>在下方拖动视频库卡片调整</small></label><div class="managed-pool-path">${config.timeline.map(category => escapeHtml(config.sources[category]?.label || category)).join(" → ") || "尚未添加视频库"}</div></div>`
@@ -3518,11 +3672,13 @@ function renderVisualConfig() {
             <audio id="loudnessPreviewAudio" controls preload="none"></audio>
           </div>
         </div>
-        ${configInput("文件名模板", "output.filename_template", output.filename_template, { wide: true })}
-        ${configSelect("重名处理", "output.collision_policy", output.collision_policy, [["increment", "自动递增"], ["error", "报错"], ["overwrite", "覆盖"]])}
+        ${configInput(naming?.enabled ? "备用文件名模板" : "文件名模板", "output.filename_template", output.filename_template, { wide: true, hint: naming?.enabled ? "业务动态命名已启用，当前不生效" : "" })}
+        ${configSelect(naming?.enabled ? "备用重名处理" : "重名处理", "output.collision_policy", output.collision_policy, [["increment", "自动递增"], ["error", "报错"], ["overwrite", "覆盖"]], naming?.enabled ? "业务动态命名已启用" : "")}
         ${configSwitch("启用 Faststart", "output.faststart", output.faststart)}
       </div>
     </details>
+
+    ${namingSection}
 
     <details class="config-section" data-config-section="batch-scanner">
       <summary>批处理与扫描 <small>默认数量、并发和文件过滤</small></summary>
@@ -3789,6 +3945,50 @@ async function addBenefitFromEditor(button) {
   }
 }
 
+function refreshAdvancedNamingPreview() {
+  const preview = $("#advancedNamingPreview");
+  if (!preview) return;
+  try {
+    preview.textContent = namingExample(collectVisualConfig());
+  } catch (error) {
+    preview.textContent = `无法预览：${error.message}`;
+  }
+}
+
+function testAdvancedNamingPattern() {
+  const result = $("#namingTestResult");
+  if (!result) return;
+  let config;
+  try {
+    config = collectVisualConfig();
+    const naming = ensureOutputNaming(config);
+    const browserPattern = naming.source_metadata.pattern.replaceAll("(?P<", "(?<");
+    new RegExp(browserPattern);
+  } catch (error) {
+    result.className = "naming-test-result invalid";
+    result.textContent = `解析规则无效：${error.message}`;
+    return;
+  }
+  const failures = [];
+  let matched = 0;
+  for (const category of config.timeline) {
+    if (!namingCategoryMatches(config.output.naming, category)) continue;
+    for (const asset of state.scan?.assets?.[category] || []) {
+      if (!asset.enabled || !asset.valid || Number(asset.weight) <= 0) continue;
+      try {
+        parseNamingAsset(config, asset);
+        matched += 1;
+      } catch (error) {
+        failures.push(`${config.sources[category]?.label || category}：${asset.name}`);
+      }
+    }
+  }
+  result.className = `naming-test-result ${failures.length ? "invalid" : "valid"}`;
+  result.innerHTML = failures.length
+    ? `成功 ${matched} 个，失败 ${failures.length} 个<br>${failures.slice(0, 10).map(escapeHtml).join("<br>")}`
+    : `全部通过，成功解析 ${matched} 个素材`;
+}
+
 function bindOutputControls() {
   const slider = $("#loudnessTargetSlider");
   const number = $("#loudnessTargetNumber");
@@ -3803,8 +4003,15 @@ function bindOutputControls() {
   $("#previewNormalizedAudioBtn")?.addEventListener("click", () => playLoudnessPreview(true));
   const loudnessSwitch = $('[data-config-path="output.loudness.enabled"]');
   const rateControl = $('[data-config-path="output.rate_control"]');
+  const namingSwitch = $('[data-config-path="output.naming.enabled"]');
   loudnessSwitch?.addEventListener("change", syncConditionalOutputFields);
   rateControl?.addEventListener("change", syncConditionalOutputFields);
+  namingSwitch?.addEventListener("change", syncConditionalOutputFields);
+  $$('.naming-option input, .naming-option select, .naming-option textarea').forEach(input => {
+    input.addEventListener("input", refreshAdvancedNamingPreview);
+    input.addEventListener("change", refreshAdvancedNamingPreview);
+  });
+  $("#testNamingPatternBtn")?.addEventListener("click", testAdvancedNamingPattern);
   syncConditionalOutputFields();
 }
 
@@ -3815,6 +4022,9 @@ function syncConditionalOutputFields() {
   const rateControl = $('[data-config-path="output.rate_control"]')?.value;
   $$(".rate-vbr").forEach(field => field.classList.toggle("hidden", rateControl !== "vbr"));
   $$(".rate-crf").forEach(field => field.classList.toggle("hidden", rateControl !== "crf"));
+
+  const namingEnabled = $('[data-config-path="output.naming.enabled"]')?.checked ?? false;
+  $$(".naming-option").forEach(field => field.classList.toggle("hidden", !namingEnabled));
 }
 
 async function playLoudnessPreview(normalized) {

@@ -109,6 +109,7 @@ class SliceJobManager:
                 reserved_paths=reserved_paths,
                 job_id=uuid.uuid4().hex,
                 write_manifest=False,
+                prefer_hardware=True,
             )
             self.database.save(job)
             try:
@@ -152,6 +153,20 @@ class SliceJobManager:
         imported.setdefault("cancelled_count", 0)
         imported.setdefault("manifest_sync_error", None)
         imported.setdefault("finished_at", None)
+        imported.setdefault(
+            "encoding",
+            {
+                "policy": "software_only",
+                "planned_video_encoder": "libx264",
+                "hardware_encoder": "h264_videotoolbox",
+                "hardware_acceleration_available": False,
+                "capability_error": "legacy_manifest",
+                "actual_video_encoders": [],
+                "hardware_acceleration_used": False,
+                "fallback_count": 0,
+                "fallback_reason": None,
+            },
+        )
         for item in imported.get("items", []):
             terminal_item = item.get("status") in {"succeeded", "failed", "skipped"}
             item.setdefault("phase", "done" if terminal_item else "waiting")
@@ -165,6 +180,11 @@ class SliceJobManager:
             item.setdefault("temporary_path", None)
             item.setdefault("ffmpeg_exit_code", None)
             item.setdefault("ffprobe_result", None)
+            item.setdefault("planned_video_encoder", "libx264")
+            item.setdefault("actual_video_encoder", None)
+            item.setdefault("hardware_acceleration_used", False)
+            item.setdefault("encoder_fallback_reason", None)
+            item.setdefault("encoder_attempts", [])
         return imported
 
     def list_jobs(self, status: str | None = None) -> list[dict[str, Any]]:
@@ -253,6 +273,10 @@ class SliceJobManager:
                     temporary_path=None,
                     ffmpeg_exit_code=None,
                     ffprobe_result=None,
+                    actual_video_encoder=None,
+                    hardware_acceleration_used=False,
+                    encoder_fallback_reason=None,
+                    encoder_attempts=[],
                     error=None,
                 )
                 reset_count += 1

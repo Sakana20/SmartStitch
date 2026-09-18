@@ -9,6 +9,12 @@ from datetime import datetime
 from itertools import product
 from pathlib import Path
 
+from .naming import (
+    NamingError,
+    append_duplicate_suffix,
+    derive_plan_naming,
+    render_plan_filename,
+)
 from .models import AppConfig, Asset, BatchPlan, PlanItem, ScanResult, SourceMode
 
 
@@ -246,6 +252,18 @@ def _format_name(config: AppConfig, seed: int, index: int, batch_id: str) -> str
     return name if Path(name).suffix else f"{name}.mp4"
 
 
+def _reserve_business_name(
+    config: AppConfig, base_name: str, reserved_names: set[str]
+) -> str:
+    candidate = base_name
+    serial = 1
+    while candidate.casefold() in reserved_names:
+        serial += 1
+        candidate = append_duplicate_suffix(config, base_name, serial)
+    reserved_names.add(candidate.casefold())
+    return candidate
+
+
 def build_plan(
     config: AppConfig,
     scan: ScanResult,
@@ -306,6 +324,7 @@ def build_plan(
     signatures: set[tuple[str | None, ...]] = set()
     duplicate_count = 0
     items: list[PlanItem] = []
+    reserved_output_names: set[str] = set()
     for index in range(count):
         selections = {category: sequence[index] for category, sequence in sequences.items()}
         signature = _core_signature(selections, core_categories)
@@ -317,13 +336,25 @@ def build_plan(
             for asset in selections.values()
             if asset is not None and asset.probe is not None
         )
+        naming = None
+        if config.workflow_type == "generic" and config.output.naming.enabled:
+            try:
+                naming = derive_plan_naming(config, selections)
+                output_name = _reserve_business_name(
+                    config, render_plan_filename(config, naming), reserved_output_names
+                )
+            except NamingError as exc:
+                raise PlanError(f"成片 {index + 1} 命名失败: {exc}") from exc
+        else:
+            output_name = _format_name(config, actual_seed, index + 1, batch_id)
         items.append(
             PlanItem(
                 index=index + 1,
                 selections=selections,
                 overlay=overlays[index],
-                output_name=_format_name(config, actual_seed, index + 1, batch_id),
+                output_name=output_name,
                 estimated_duration=round(duration, 3),
+                naming=naming,
             )
         )
 

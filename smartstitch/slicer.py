@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -32,8 +32,17 @@ class SliceCancelled(SliceError):
     pass
 
 
+class SliceProcessError(SliceError):
+    def __init__(self, message: str, return_code: int):
+        super().__init__(message)
+        self.return_code = return_code
+
+
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
-BACKGROUND_SLICE_NICE = 10
+BACKGROUND_SLICE_NICE = 5
+SOFTWARE_VIDEO_ENCODER = "libx264"
+VIDEOTOOLBOX_VIDEO_ENCODER = "h264_videotoolbox"
+VIDEOTOOLBOX_QUALITY = 65
 
 
 def _lower_background_process_priority(process: subprocess.Popen[str]) -> None:
@@ -43,18 +52,6 @@ def _lower_background_process_priority(process: subprocess.Popen[str]) -> None:
             os.setpriority(os.PRIO_PROCESS, process.pid, BACKGROUND_SLICE_NICE)
         except OSError:
             pass
-    if sys.platform == "darwin":
-        taskpolicy = shutil.which("taskpolicy")
-        if taskpolicy:
-            try:
-                subprocess.run(
-                    [taskpolicy, "-b", "-p", str(process.pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-            except OSError:
-                pass
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -91,6 +88,61 @@ class TimelineSlicer:
         self.runner = runner
         self._prepare_lock = threading.RLock()
         self._execution_lock = threading.RLock()
+        self._encoder_capability_lock = threading.Lock()
+        self._background_encoder_plan_cache: dict[str, Any] | None = None
+
+    def _background_encoder_plan(self) -> dict[str, Any]:
+        with self._encoder_capability_lock:
+            if self._background_encoder_plan_cache is not None:
+                return dict(self._background_encoder_plan_cache)
+
+            plan: dict[str, Any] = {
+                "policy": "videotoolbox_preferred",
+                "planned_video_encoder": SOFTWARE_VIDEO_ENCODER,
+                "hardware_encoder": VIDEOTOOLBOX_VIDEO_ENCODER,
+                "hardware_acceleration_available": False,
+                "capability_error": None,
+            }
+            machine = platform.machine().lower()
+            if sys.platform != "darwin" or machine not in {"arm64", "aarch64"}:
+                plan["capability_error"] = "not_apple_silicon"
+            elif self.runner is not subprocess.run:
+                plan["capability_error"] = "capability_check_unavailable"
+            else:
+                try:
+                    result = self.runner(
+                        ["ffmpeg", "-hide_banner", "-encoders"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=10,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    plan["capability_error"] = str(exc)
+                else:
+                    output = f"{result.stdout}\n{result.stderr}"
+                    if result.returncode == 0 and re.search(
+                        rf"\b{VIDEOTOOLBOX_VIDEO_ENCODER}\b", output
+                    ):
+                        plan["planned_video_encoder"] = VIDEOTOOLBOX_VIDEO_ENCODER
+                        plan["hardware_acceleration_available"] = True
+                    else:
+                        plan["capability_error"] = (
+                            result.stderr.strip()
+                            or f"FFmpeg 未提供 {VIDEOTOOLBOX_VIDEO_ENCODER}"
+                        )
+            self._background_encoder_plan_cache = dict(plan)
+            return plan
+
+    @staticmethod
+    def _software_encoder_plan() -> dict[str, Any]:
+        return {
+            "policy": "software_only",
+            "planned_video_encoder": SOFTWARE_VIDEO_ENCODER,
+            "hardware_encoder": VIDEOTOOLBOX_VIDEO_ENCODER,
+            "hardware_acceleration_available": False,
+            "capability_error": None,
+        }
 
     def export(self, request: TimelineSliceRequest) -> dict[str, Any]:
         with self._execution_lock:
@@ -107,6 +159,7 @@ class TimelineSlicer:
         reserved_paths: set[str] | None = None,
         job_id: str | None = None,
         write_manifest: bool = True,
+        prefer_hardware: bool = False,
     ) -> dict[str, Any]:
         with self._prepare_lock:
             return self._prepare(
@@ -115,6 +168,7 @@ class TimelineSlicer:
                 reserved_paths=reserved_paths,
                 job_id=job_id,
                 write_manifest=write_manifest,
+                prefer_hardware=prefer_hardware,
             )
 
     def _prepare(
@@ -125,6 +179,7 @@ class TimelineSlicer:
         reserved_paths: set[str] | None = None,
         job_id: str | None = None,
         write_manifest: bool = True,
+        prefer_hardware: bool = False,
     ) -> dict[str, Any]:
         record = self.timeline_analyzer.load_record(request.analysis_id)
         review = record.get("review")
@@ -231,6 +286,11 @@ class TimelineSlicer:
 
         created_at = datetime.now(UTC).isoformat()
         resolved_job_id = job_id or uuid.uuid4().hex
+        encoding_plan = (
+            self._background_encoder_plan()
+            if prefer_hardware
+            else self._software_encoder_plan()
+        )
         batch = {
             "ok": True,
             "idempotent": False,
@@ -268,6 +328,13 @@ class TimelineSlicer:
             "skipped_count": 0,
             "manifest_path": str(manifest_path),
             "manifest_sync_error": None,
+            "encoding": {
+                **encoding_plan,
+                "actual_video_encoders": [],
+                "hardware_acceleration_used": False,
+                "fallback_count": 0,
+                "fallback_reason": None,
+            },
         }
         source_stem = _safe_stem(source.stem)
         for assignment in normalized_assignments:
@@ -317,6 +384,11 @@ class TimelineSlicer:
                 "temporary_path": None,
                 "ffmpeg_exit_code": None,
                 "ffprobe_result": None,
+                "planned_video_encoder": encoding_plan["planned_video_encoder"],
+                "actual_video_encoder": None,
+                "hardware_acceleration_used": False,
+                "encoder_fallback_reason": None,
+                "encoder_attempts": [],
                 "error": None,
             }
             if category == "skip":
@@ -384,8 +456,10 @@ class TimelineSlicer:
         manifest_key = str(batch["request_key"])
         batch["status"] = "running"
         batch["started_at"] = batch.get("started_at") or datetime.now(UTC).isoformat()
+        batch.setdefault("encoding", self._software_encoder_plan())
         self._publish(batch, manifest_path, on_update)
         source_has_audio: bool | None = None
+        hardware_disabled_reason: str | None = None
         for item in batch["items"]:
             if item["status"] in {"skipped", "succeeded"}:
                 continue
@@ -404,6 +478,11 @@ class TimelineSlicer:
             item["started_at"] = datetime.now(UTC).isoformat()
             item["attempts"] = int(item.get("attempts") or 0) + 1
             item["temporary_path"] = str(temporary)
+            item.setdefault("planned_video_encoder", SOFTWARE_VIDEO_ENCODER)
+            item.setdefault("actual_video_encoder", None)
+            item.setdefault("hardware_acceleration_used", False)
+            item.setdefault("encoder_fallback_reason", None)
+            item.setdefault("encoder_attempts", [])
             self._publish(batch, manifest_path, on_update)
 
             last_persisted_progress = float(item.get("progress") or 0)
@@ -422,50 +501,101 @@ class TimelineSlicer:
                 self._publish(batch, manifest_path, on_update)
 
             try:
-                if item["composite"]:
-                    if source_has_audio is None:
-                        item["phase"] = "probing_audio"
-                        self._publish(batch, manifest_path, on_update)
-                        source_has_audio = self._source_has_audio(source)
-                        item["phase"] = "encoding"
-                    self._render_composite_slice(
-                        source,
-                        temporary,
-                        parts=item["parts"],
-                        fps=fps,
-                        has_audio=source_has_audio,
-                        on_progress=update_progress,
-                        cancel_event=cancel_event,
-                        process_callback=process_callback,
-                        low_priority=low_priority,
-                    )
-                    item["ffmpeg_exit_code"] = 0
-                    item["phase"] = "verifying"
-                    item["progress"] = 0.99
+                if item["composite"] and source_has_audio is None:
+                    item["phase"] = "probing_audio"
                     self._publish(batch, manifest_path, on_update)
-                    self._verify_slice(
-                        temporary,
-                        expected_duration=float(item["total_duration_seconds"]),
-                        expect_audio=source_has_audio,
-                        fps=fps,
+                    source_has_audio = self._source_has_audio(source)
+
+                planned_encoder = str(item["planned_video_encoder"])
+                encoders = [planned_encoder]
+                if planned_encoder == VIDEOTOOLBOX_VIDEO_ENCODER:
+                    if hardware_disabled_reason:
+                        encoders = [SOFTWARE_VIDEO_ENCODER]
+                        item["encoder_fallback_reason"] = hardware_disabled_reason
+                    else:
+                        encoders.append(SOFTWARE_VIDEO_ENCODER)
+
+                for encoder in encoders:
+                    item["phase"] = (
+                        "encoding_fallback"
+                        if encoder == SOFTWARE_VIDEO_ENCODER
+                        and planned_encoder != SOFTWARE_VIDEO_ENCODER
+                        else "encoding"
                     )
-                else:
-                    self._render_slice(
-                        source,
-                        temporary,
-                        start_seconds=float(item["start_seconds"]),
-                        duration_seconds=float(item["total_duration_seconds"]),
-                        on_progress=update_progress,
-                        cancel_event=cancel_event,
-                        process_callback=process_callback,
-                        low_priority=low_priority,
+                    item["actual_video_encoder"] = encoder
+                    item["hardware_acceleration_used"] = (
+                        encoder == VIDEOTOOLBOX_VIDEO_ENCODER
                     )
-                    item["ffmpeg_exit_code"] = 0
-                    item["phase"] = "verifying"
-                    item["progress"] = 0.99
+                    item["ffmpeg_exit_code"] = None
+                    item["ffprobe_result"] = None
+                    encoder_attempt = {
+                        "encoder": encoder,
+                        "started_at": datetime.now(UTC).isoformat(),
+                        "finished_at": None,
+                        "status": "running",
+                        "ffmpeg_exit_code": None,
+                        "ffprobe_result": None,
+                        "error": None,
+                    }
+                    item["encoder_attempts"].append(encoder_attempt)
+                    self._update_encoding_summary(batch)
                     self._publish(batch, manifest_path, on_update)
-                    self._verify_slice(temporary)
-                item["ffprobe_result"] = "passed"
+                    try:
+                        self._render_and_verify_item(
+                            item,
+                            source,
+                            temporary,
+                            fps=fps,
+                            source_has_audio=source_has_audio,
+                            encoder=encoder,
+                            on_progress=update_progress,
+                            cancel_event=cancel_event,
+                            process_callback=process_callback,
+                            low_priority=low_priority,
+                            on_update=lambda: self._publish(
+                                batch, manifest_path, on_update
+                            ),
+                        )
+                    except SliceCancelled:
+                        encoder_attempt.update(
+                            status="cancelled",
+                            finished_at=datetime.now(UTC).isoformat(),
+                            ffmpeg_exit_code=item.get("ffmpeg_exit_code"),
+                            ffprobe_result=item.get("ffprobe_result"),
+                            error="任务已取消",
+                        )
+                        raise
+                    except (subprocess.SubprocessError, SliceError) as exc:
+                        if isinstance(exc, SliceProcessError):
+                            item["ffmpeg_exit_code"] = exc.return_code
+                        elif item.get("ffmpeg_exit_code") == 0:
+                            item["ffprobe_result"] = "failed"
+                        encoder_attempt.update(
+                            status="failed",
+                            finished_at=datetime.now(UTC).isoformat(),
+                            ffmpeg_exit_code=item.get("ffmpeg_exit_code"),
+                            ffprobe_result=item.get("ffprobe_result"),
+                            error=str(exc),
+                        )
+                        temporary.unlink(missing_ok=True)
+                        if encoder == VIDEOTOOLBOX_VIDEO_ENCODER:
+                            hardware_disabled_reason = str(exc)
+                            item["encoder_fallback_reason"] = str(exc)
+                            encoding = batch.setdefault("encoding", {})
+                            encoding["fallback_reason"] = str(exc)
+                            self._update_encoding_summary(batch)
+                            self._publish(batch, manifest_path, on_update)
+                            continue
+                        raise
+                    else:
+                        encoder_attempt.update(
+                            status="succeeded",
+                            finished_at=datetime.now(UTC).isoformat(),
+                            ffmpeg_exit_code=0,
+                            ffprobe_result="passed",
+                        )
+                        break
+
                 if cancel_event is not None and cancel_event.is_set():
                     raise SliceCancelled("任务已取消")
                 item["phase"] = "committing"
@@ -492,6 +622,7 @@ class TimelineSlicer:
                 item["finished_at"] = datetime.now(UTC).isoformat()
                 batch["failure_count"] += 1
                 temporary.unlink(missing_ok=True)
+            self._update_encoding_summary(batch)
             self._update_batch_progress(batch)
             self._publish(batch, manifest_path, on_update)
 
@@ -509,6 +640,61 @@ class TimelineSlicer:
         self._publish(batch, manifest_path, on_update)
         return batch
 
+    def _render_and_verify_item(
+        self,
+        item: dict[str, Any],
+        source: Path,
+        temporary: Path,
+        *,
+        fps: float,
+        source_has_audio: bool | None,
+        encoder: str,
+        on_progress: Callable[[float], None] | None,
+        cancel_event: threading.Event | None,
+        process_callback: Callable[[subprocess.Popen[str] | None], None] | None,
+        low_priority: bool,
+        on_update: Callable[[], None],
+    ) -> None:
+        if item["composite"]:
+            self._render_composite_slice(
+                source,
+                temporary,
+                parts=item["parts"],
+                fps=fps,
+                has_audio=bool(source_has_audio),
+                encoder=encoder,
+                on_progress=on_progress,
+                cancel_event=cancel_event,
+                process_callback=process_callback,
+                low_priority=low_priority,
+            )
+        else:
+            self._render_slice(
+                source,
+                temporary,
+                start_seconds=float(item["start_seconds"]),
+                duration_seconds=float(item["total_duration_seconds"]),
+                encoder=encoder,
+                on_progress=on_progress,
+                cancel_event=cancel_event,
+                process_callback=process_callback,
+                low_priority=low_priority,
+            )
+        item["ffmpeg_exit_code"] = 0
+        item["phase"] = "verifying"
+        item["progress"] = 0.99
+        on_update()
+        if item["composite"]:
+            self._verify_slice(
+                temporary,
+                expected_duration=float(item["total_duration_seconds"]),
+                expect_audio=source_has_audio,
+                fps=fps,
+            )
+        else:
+            self._verify_slice(temporary)
+        item["ffprobe_result"] = "passed"
+
     def _render_slice(
         self,
         source: Path,
@@ -516,6 +702,7 @@ class TimelineSlicer:
         *,
         start_seconds: float,
         duration_seconds: float,
+        encoder: str = SOFTWARE_VIDEO_ENCODER,
         on_progress: Callable[[float], None] | None = None,
         cancel_event: threading.Event | None = None,
         process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
@@ -536,12 +723,7 @@ class TimelineSlicer:
             "0:v:0",
             "-map",
             "0:a:0?",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "18",
+            *self._video_encoder_arguments(encoder),
             "-c:a",
             "aac",
             "-movflags",
@@ -592,6 +774,7 @@ class TimelineSlicer:
         parts: list[dict[str, Any]],
         fps: float,
         has_audio: bool,
+        encoder: str = SOFTWARE_VIDEO_ENCODER,
         on_progress: Callable[[float], None] | None = None,
         cancel_event: threading.Event | None = None,
         process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
@@ -648,18 +831,7 @@ class TimelineSlicer:
         ]
         if has_audio:
             command.extend(["-map", "[aout]"])
-        command.extend(
-            [
-                "-c:v",
-                "libx264",
-                "-preset",
-                "fast",
-                "-crf",
-                "18",
-                "-pix_fmt",
-                "yuv420p",
-            ]
-        )
+        command.extend(self._video_encoder_arguments(encoder))
         if has_audio:
             command.extend(["-c:a", "aac"])
         command.extend(["-movflags", "+faststart", str(output)])
@@ -672,6 +844,30 @@ class TimelineSlicer:
             error_message="FFmpeg 组合片段失败",
             low_priority=low_priority,
         )
+
+    @staticmethod
+    def _video_encoder_arguments(encoder: str) -> list[str]:
+        if encoder == VIDEOTOOLBOX_VIDEO_ENCODER:
+            return [
+                "-c:v",
+                VIDEOTOOLBOX_VIDEO_ENCODER,
+                "-q:v",
+                str(VIDEOTOOLBOX_QUALITY),
+                "-profile:v",
+                "high",
+                "-pix_fmt",
+                "yuv420p",
+            ]
+        return [
+            "-c:v",
+            SOFTWARE_VIDEO_ENCODER,
+            "-preset",
+            "fast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+        ]
 
     def _run_ffmpeg(
         self,
@@ -687,7 +883,10 @@ class TimelineSlicer:
         if self.runner is not subprocess.run:
             result = self.runner(command, capture_output=True, text=True, check=False)
             if result.returncode != 0:
-                raise SliceError(result.stderr.strip() or error_message)
+                raise SliceProcessError(
+                    result.stderr.strip() or error_message,
+                    int(result.returncode),
+                )
             if on_progress is not None:
                 on_progress(0.98)
             return
@@ -745,7 +944,10 @@ class TimelineSlicer:
         if cancel_event is not None and cancel_event.is_set():
             raise SliceCancelled("任务已取消")
         if return_code != 0:
-            raise SliceError("\n".join(stderr_tail).strip() or error_message)
+            raise SliceProcessError(
+                "\n".join(stderr_tail).strip() or error_message,
+                return_code,
+            )
 
     def _verify_slice(
         self,
@@ -810,6 +1012,28 @@ class TimelineSlicer:
             if not candidate.exists() and str(candidate) not in reserved:
                 return candidate
             version += 1
+
+    @staticmethod
+    def _update_encoding_summary(batch: dict[str, Any]) -> None:
+        encoding = batch.setdefault("encoding", {})
+        actual_encoders = sorted(
+            {
+                str(item["actual_video_encoder"])
+                for item in batch.get("items", [])
+                if item.get("actual_video_encoder")
+            }
+        )
+        encoding["actual_video_encoders"] = actual_encoders
+        encoding["hardware_acceleration_used"] = any(
+            item.get("actual_video_encoder") == VIDEOTOOLBOX_VIDEO_ENCODER
+            and item.get("status") in {"running", "succeeded"}
+            for item in batch.get("items", [])
+        )
+        encoding["fallback_count"] = sum(
+            bool(item.get("encoder_fallback_reason"))
+            for item in batch.get("items", [])
+        )
+        encoding.setdefault("fallback_reason", None)
 
     @staticmethod
     def _update_batch_progress(batch: dict[str, Any]) -> None:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +13,8 @@ from smartstitch.library import LibraryService
 from smartstitch.models import CreateLibraryRequest, TimelineSliceRequest
 from smartstitch.slicer import (
     BACKGROUND_SLICE_NICE,
+    SOFTWARE_VIDEO_ENCODER,
+    VIDEOTOOLBOX_VIDEO_ENCODER,
     SliceConflictError,
     SliceError,
     TimelineSlicer,
@@ -75,18 +76,9 @@ def setup_slicer(tmp_path, runner):
 
 def test_background_slice_process_has_lower_os_priority(monkeypatch):
     priority_calls = []
-    policy_calls = []
     monkeypatch.setattr(
         "smartstitch.slicer.os.setpriority",
         lambda which, pid, priority: priority_calls.append((which, pid, priority)),
-    )
-    monkeypatch.setattr(
-        "smartstitch.slicer.shutil.which",
-        lambda name: "/usr/sbin/taskpolicy" if name == "taskpolicy" else None,
-    )
-    monkeypatch.setattr(
-        "smartstitch.slicer.subprocess.run",
-        lambda command, **kwargs: policy_calls.append((command, kwargs)),
     )
 
     _lower_background_process_priority(SimpleNamespace(pid=4321))
@@ -95,15 +87,6 @@ def test_background_slice_process_has_lower_os_priority(monkeypatch):
         assert priority_calls == [(os.PRIO_PROCESS, 4321, BACKGROUND_SLICE_NICE)]
     else:
         assert priority_calls == []
-    if sys.platform == "darwin":
-        assert policy_calls[0][0] == [
-            "/usr/sbin/taskpolicy",
-            "-b",
-            "-p",
-            "4321",
-        ]
-    else:
-        assert policy_calls == []
 
 
 def test_background_priority_failure_does_not_break_slicing(monkeypatch):
@@ -111,16 +94,110 @@ def test_background_priority_failure_does_not_break_slicing(monkeypatch):
         "smartstitch.slicer.os.setpriority",
         lambda *_args: (_ for _ in ()).throw(PermissionError("denied")),
     )
-    monkeypatch.setattr(
-        "smartstitch.slicer.shutil.which",
-        lambda name: "/usr/sbin/taskpolicy" if name == "taskpolicy" else None,
-    )
-    monkeypatch.setattr(
-        "smartstitch.slicer.subprocess.run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("denied")),
-    )
 
     _lower_background_process_priority(SimpleNamespace(pid=4321))
+
+
+def test_background_encoder_plan_detects_videotoolbox(tmp_path, monkeypatch):
+    slicer, _analysis_id, _review_revision, _config_hash = setup_slicer(
+        tmp_path,
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+    calls = []
+
+    def runner(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=" V....D h264_videotoolbox VideoToolbox H.264 Encoder\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("smartstitch.slicer.sys.platform", "darwin")
+    monkeypatch.setattr("smartstitch.slicer.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("smartstitch.slicer.subprocess.run", runner)
+    slicer.runner = runner
+
+    first = slicer._background_encoder_plan()
+    second = slicer._background_encoder_plan()
+
+    assert first["planned_video_encoder"] == VIDEOTOOLBOX_VIDEO_ENCODER
+    assert first["hardware_acceleration_available"] is True
+    assert second == first
+    assert calls == [["ffmpeg", "-hide_banner", "-encoders"]]
+
+
+@pytest.mark.parametrize("hardware_succeeds", [True, False])
+def test_background_slice_uses_videotoolbox_with_software_fallback(
+    tmp_path, hardware_succeeds
+):
+    commands = []
+
+    def runner(command, **_kwargs):
+        if command[0] == "ffmpeg":
+            commands.append(command)
+            encoder = command[command.index("-c:v") + 1]
+            if encoder == VIDEOTOOLBOX_VIDEO_ENCODER and not hardware_succeeds:
+                return SimpleNamespace(
+                    returncode=1,
+                    stdout="",
+                    stderr="cannot create compression session",
+                )
+            Path(command[-1]).write_bytes(b"rendered")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"streams": [{"codec_type": "video"}]}),
+            stderr="",
+        )
+
+    slicer, analysis_id, review_revision, config_hash = setup_slicer(tmp_path, runner)
+    slicer._background_encoder_plan_cache = {
+        "policy": "videotoolbox_preferred",
+        "planned_video_encoder": VIDEOTOOLBOX_VIDEO_ENCODER,
+        "hardware_encoder": VIDEOTOOLBOX_VIDEO_ENCODER,
+        "hardware_acceleration_available": True,
+        "capability_error": None,
+    }
+    batch = slicer.prepare(
+        TimelineSliceRequest(
+            analysis_id=analysis_id,
+            config_id="slice-library",
+            review_revision=review_revision,
+            current_config_hash=config_hash,
+            client_request_id=f"hardware-slice-{hardware_succeeds}",
+            assignments=[{"segment_index": 1, "category": "hook"}],
+        ),
+        prefer_hardware=True,
+    )
+
+    result = slicer.execute(batch, low_priority=True)
+
+    item = result["items"][0]
+    assert result["status"] == "completed"
+    assert item["planned_video_encoder"] == VIDEOTOOLBOX_VIDEO_ENCODER
+    if hardware_succeeds:
+        assert item["actual_video_encoder"] == VIDEOTOOLBOX_VIDEO_ENCODER
+        assert item["hardware_acceleration_used"] is True
+        assert item["encoder_fallback_reason"] is None
+        assert [attempt["status"] for attempt in item["encoder_attempts"]] == [
+            "succeeded"
+        ]
+        assert len(commands) == 1
+    else:
+        assert item["actual_video_encoder"] == SOFTWARE_VIDEO_ENCODER
+        assert item["hardware_acceleration_used"] is False
+        assert "compression session" in item["encoder_fallback_reason"]
+        assert [attempt["status"] for attempt in item["encoder_attempts"]] == [
+            "failed",
+            "succeeded",
+        ]
+        assert result["encoding"]["fallback_count"] == 1
+        assert len(commands) == 2
+    assert VIDEOTOOLBOX_VIDEO_ENCODER in commands[0]
+    assert "-q:v" in commands[0]
 
 
 def test_timeline_slicer_exports_every_segment_and_manifest(tmp_path):

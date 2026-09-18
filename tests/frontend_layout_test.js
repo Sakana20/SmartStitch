@@ -9,11 +9,14 @@ const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 const openConfigSource = app.match(
   /async function openConfig\(\) \{([\s\S]*?)\n\}\nfunction configEditorIsDirty/,
 )?.[1] || "";
+const selectTimelineSegmentSource = app.match(
+  /function selectTimelineSegment\([^\n]+\) \{([\s\S]*?)\n\}\n\nfunction renderMergeToolbar/,
+)?.[1] || "";
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260918-53"/,
-  "配置协作锁更新后必须刷新静态资源缓存版本",
+  /href="\/styles\.css\?v=20260918-56"/,
+  "后台切片编码展示更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
@@ -139,6 +142,21 @@ assert.match(
   app,
   /simpleChoiceButtons[\s\S]*data-simple-choice[\s\S]*生成速度与画质[\s\S]*组合重复规则/,
   "简单模式应使用大选项呈现常用成片设置",
+);
+assert.match(
+  app,
+  /workflow_type === "generic"[\s\S]*id="simpleNamingEnabled"[\s\S]*id="simpleNamingProduct"[\s\S]*id="simpleNamingBenefit"[\s\S]*id="simpleNamingPreview"/,
+  "通用项目简单模式必须提供动态命名开关、产品、利益点和文件名预览",
+);
+assert.match(
+  app,
+  /data-config-section="output-naming"[\s\S]*output\.naming\.source_metadata\.pattern[\s\S]*testNamingPatternBtn/,
+  "高级模式必须提供素材文件名解析规则和测试入口",
+);
+assert.match(
+  css,
+  /\.simple-naming-group\s*\{[^}]*grid-column:\s*1 \/ -1/,
+  "简单模式命名设置应沿用输出卡片并占据完整宽度",
 );
 assert.match(
   app,
@@ -418,8 +436,14 @@ assert.match(
 );
 assert.doesNotMatch(
   app,
-  /selectTimelineSegment\(unit\.segmentIds\[0\], \{ toggleMembership: true \}\)|selectTimelineSegment\(event\.currentTarget\.dataset\.seekMember, \{ toggleMembership: true \}\)/,
-  "下方片段列表只能选中和定位，不得通过重复点击删除",
+  /selectTimelineSegment\(unit\.segmentIds\[0\], \{ toggleMembership: true \}\)|selectTimelineSegment\(event\.currentTarget\.dataset\.selectMember, \{ toggleMembership: true \}\)/,
+  "下方片段列表只能选中，不得通过重复点击删除",
+);
+assert.ok(selectTimelineSegmentSource, "必须能定位片段选中逻辑");
+assert.doesNotMatch(
+  selectTimelineSegmentSource,
+  /seekTimelineFrame|timelineVideo"\)\.pause|segment_select/,
+  "选中片段只能更新选中状态，不得暂停视频或移动播放头",
 );
 assert.match(
   app,

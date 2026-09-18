@@ -609,6 +609,11 @@ class LibraryService:
             updated = config.model_copy(deep=True)
             del updated.sources[pool_id]
             updated.timeline = [item for item in updated.timeline if item != pool_id]
+            naming_categories = updated.output.naming.source_metadata.categories
+            if pool_id in naming_categories:
+                naming_categories.remove(pool_id)
+                if not naming_categories:
+                    naming_categories.append("pool_*")
             self.config_store.save_config(config_id, updated)
             return {
                 "ok": True,
