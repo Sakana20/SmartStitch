@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -30,6 +33,28 @@ class SliceCancelled(SliceError):
 
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
+BACKGROUND_SLICE_NICE = 10
+
+
+def _lower_background_process_priority(process: subprocess.Popen[str]) -> None:
+    """Best-effort priority reduction that must never break slice encoding."""
+    if os.name == "posix" and hasattr(os, "setpriority"):
+        try:
+            os.setpriority(os.PRIO_PROCESS, process.pid, BACKGROUND_SLICE_NICE)
+        except OSError:
+            pass
+    if sys.platform == "darwin":
+        taskpolicy = shutil.which("taskpolicy")
+        if taskpolicy:
+            try:
+                subprocess.run(
+                    [taskpolicy, "-b", "-p", str(process.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except OSError:
+                pass
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -333,6 +358,7 @@ class TimelineSlicer:
         on_update: Callable[[dict[str, Any]], None] | None = None,
         cancel_event: threading.Event | None = None,
         process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+        low_priority: bool = False,
     ) -> dict[str, Any]:
         with self._execution_lock:
             return self._execute(
@@ -340,6 +366,7 @@ class TimelineSlicer:
                 on_update=on_update,
                 cancel_event=cancel_event,
                 process_callback=process_callback,
+                low_priority=low_priority,
             )
 
     def _execute(
@@ -349,6 +376,7 @@ class TimelineSlicer:
         on_update: Callable[[dict[str, Any]], None] | None = None,
         cancel_event: threading.Event | None = None,
         process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+        low_priority: bool = False,
     ) -> dict[str, Any]:
         source = Path(str(batch["source"]["path"]))
         fps = float(batch["source"]["fps"])
@@ -409,6 +437,7 @@ class TimelineSlicer:
                         on_progress=update_progress,
                         cancel_event=cancel_event,
                         process_callback=process_callback,
+                        low_priority=low_priority,
                     )
                     item["ffmpeg_exit_code"] = 0
                     item["phase"] = "verifying"
@@ -429,6 +458,7 @@ class TimelineSlicer:
                         on_progress=update_progress,
                         cancel_event=cancel_event,
                         process_callback=process_callback,
+                        low_priority=low_priority,
                     )
                     item["ffmpeg_exit_code"] = 0
                     item["phase"] = "verifying"
@@ -489,6 +519,7 @@ class TimelineSlicer:
         on_progress: Callable[[float], None] | None = None,
         cancel_event: threading.Event | None = None,
         process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+        low_priority: bool = False,
     ) -> None:
         command = [
             "ffmpeg",
@@ -524,6 +555,7 @@ class TimelineSlicer:
             cancel_event=cancel_event,
             process_callback=process_callback,
             error_message="FFmpeg 切片失败",
+            low_priority=low_priority,
         )
 
     def _source_has_audio(self, source: Path) -> bool:
@@ -563,6 +595,7 @@ class TimelineSlicer:
         on_progress: Callable[[float], None] | None = None,
         cancel_event: threading.Event | None = None,
         process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+        low_priority: bool = False,
     ) -> None:
         count = len(parts)
         if count < 2:
@@ -637,6 +670,7 @@ class TimelineSlicer:
             cancel_event=cancel_event,
             process_callback=process_callback,
             error_message="FFmpeg 组合片段失败",
+            low_priority=low_priority,
         )
 
     def _run_ffmpeg(
@@ -648,6 +682,7 @@ class TimelineSlicer:
         cancel_event: threading.Event | None,
         process_callback: Callable[[subprocess.Popen[str] | None], None] | None,
         error_message: str,
+        low_priority: bool,
     ) -> None:
         if self.runner is not subprocess.run:
             result = self.runner(command, capture_output=True, text=True, check=False)
@@ -665,6 +700,8 @@ class TimelineSlicer:
             text=True,
             bufsize=1,
         )
+        if low_priority:
+            _lower_background_process_priority(process)
         stderr_tail: deque[str] = deque(maxlen=30)
         stderr_done = threading.Event()
 

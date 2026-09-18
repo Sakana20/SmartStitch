@@ -17,6 +17,9 @@ const state = {
   configDraft: null,
   configRefreshPromise: null,
   previewAudioCleanup: null,
+  user: null,
+  device: null,
+  configLease: null,
   timeline: {
     sourceDirectory: "",
     sourceVideos: [],
@@ -40,8 +43,6 @@ const state = {
     pixelsPerSecond: 30,
     shiftPressed: false,
     dragAnimationFrameId: null,
-    pointerOverTimeline: false,
-    pointerOverVideo: false,
     reviewSaved: false,
     reviewRevision: null,
     selectedSegmentId: null,
@@ -81,6 +82,7 @@ function categoryLabel(category) {
 }
 const terminalStates = new Set(["completed", "partial_failed", "failed", "cancelled", "interrupted"]);
 const configUiStoragePrefix = "smartstitch.config-ui.";
+const browserSessionStorageKey = "smartstitch.browser_session_id";
 const pathQuotePairs = { "'": "'", '"': '"', "‘": "’", "“": "”" };
 
 function normalizePathInput(value) {
@@ -112,22 +114,38 @@ function clientRequestId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
 }
 
+function browserSessionId() {
+  let value = "";
+  try { value = sessionStorage.getItem(browserSessionStorageKey) || ""; } catch (_) {}
+  if (value) return value;
+  value = clientRequestId();
+  try { sessionStorage.setItem(browserSessionStorageKey, value); } catch (_) {}
+  return value;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(`/api/v1${path}`, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   if (!response.ok) {
     let detail = `请求失败 (${response.status})`;
+    let payloadDetail = null;
     try {
       const payload = await response.json();
       if (Array.isArray(payload.detail)) {
         detail = payload.detail.map(item => `${item.loc?.slice(1).join(".") || "配置"}: ${item.msg}`).join("；");
+      } else if (payload.detail && typeof payload.detail === "object") {
+        payloadDetail = payload.detail;
+        detail = payload.detail.message || detail;
       } else {
         detail = payload.detail || detail;
       }
     } catch (_) {}
-    throw new Error(detail);
+    const error = new Error(detail);
+    error.status = response.status;
+    error.detail = payloadDetail;
+    throw error;
   }
   return response.json();
 }
@@ -139,6 +157,222 @@ function toast(message, error = false) {
   element.classList.add("show");
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => element.classList.remove("show"), 3000);
+}
+
+function renderCurrentUser() {
+  const name = state.user?.display_name || "设置用户名";
+  const device = state.device?.device_name || "用于配置协作锁";
+  $("#userProfileName").textContent = name;
+  $("#userProfileBtn .user-avatar").textContent = state.user?.display_name?.trim()?.[0] || "?";
+  $("#userDeviceName").textContent = device;
+}
+
+async function loadCurrentUser() {
+  try {
+    const result = await api("/users/me");
+    state.user = result.user;
+    state.device = result.device;
+    renderCurrentUser();
+    if (!result.configured) openUserProfile(true);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function openUserProfile(required = false) {
+  $("#userProfileModal").dataset.required = required ? "true" : "false";
+  $("#userDisplayNameInput").value = state.user?.display_name || "";
+  $("#switchUserProfileBtn").classList.toggle("hidden", !state.user);
+  $$('[data-close-user-profile]').forEach(element => element.classList.toggle("hidden", required));
+  $("#userProfileModal").classList.add("open");
+  $("#userProfileModal").setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => $("#userDisplayNameInput").focus());
+}
+
+function closeUserProfile() {
+  if ($("#userProfileModal").dataset.required === "true" && !state.user) {
+    toast("请先输入用户名", true);
+    return;
+  }
+  $("#userProfileModal").classList.remove("open");
+  $("#userProfileModal").setAttribute("aria-hidden", "true");
+}
+
+async function saveUserProfile(switchUser) {
+  if (state.configLease) {
+    toast("请先保存或关闭正在编辑的配置", true);
+    return;
+  }
+  const name = $("#userDisplayNameInput").value.trim();
+  if (!name) {
+    toast("请输入用户名", true);
+    $("#userDisplayNameInput").focus();
+    return;
+  }
+  if (switchUser && state.user && !window.confirm(`切换为新用户“${name}”？`)) return;
+  const button = switchUser ? $("#switchUserProfileBtn") : $("#saveUserProfileBtn");
+  button.disabled = true;
+  try {
+    const result = await api("/users/me", {
+      method: "PUT",
+      body: JSON.stringify({ display_name: name, switch_user: switchUser }),
+    });
+    state.user = result.user;
+    state.device = result.device;
+    renderCurrentUser();
+    $("#userProfileModal").dataset.required = "false";
+    closeUserProfile();
+    toast(switchUser ? `已切换为 ${name}` : `用户名已保存为 ${name}`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function ensureCurrentUser() {
+  if (state.user) return true;
+  openUserProfile(true);
+  toast("请先输入用户名", true);
+  return false;
+}
+
+function configLeaseHeaders(lease = state.configLease, configHash = state.configHash) {
+  if (!lease?.leaseToken) throw new Error("没有配置编辑权，请重新打开配置");
+  if (lease.lost) throw new Error("配置编辑权已失效，请关闭后重新打开配置");
+  return {
+    "X-SmartStitch-Lease": lease.leaseToken,
+    "X-SmartStitch-Config-Hash": configHash || "",
+  };
+}
+
+function renderConfigLeaseBanner(lost = false, message = "") {
+  const banner = $("#configLeaseBanner");
+  if (!banner) return;
+  const owner = state.configLease?.owner;
+  if (state.configLease) state.configLease.lost = lost;
+  banner.classList.toggle("lost", lost);
+  banner.querySelector("strong").textContent = message || (lost ? "配置编辑权已失效" : "你正在独占编辑此配置");
+  banner.querySelector("small").textContent = owner ? `${owner.display_name} · ${owner.device_name}` : "";
+  $("#saveConfigBtn").disabled = lost;
+}
+
+async function acquireConfigLease(configId) {
+  if (!ensureCurrentUser()) return null;
+  const payload = { browser_session_id: browserSessionId() };
+  try {
+    return await api(`/configs/${configId}/lock/acquire`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    const lock = error.detail;
+    if (error.status === 423 && lock?.code === "config_locked" && lock.stale) {
+      const owner = lock.owner;
+      const label = owner?.display_name ? `${owner.display_name}（${owner.device_name || "未知电脑"}）` : "上一位用户";
+      if (window.confirm(`${label}的编辑锁已经过期，是否接管此配置？`)) {
+        return api(`/configs/${configId}/lock/takeover`, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+      }
+      return null;
+    }
+    if (error.status === 423 && lock?.code === "config_locked") {
+      window.alert(lock.message || error.message);
+      return null;
+    }
+    throw error;
+  }
+}
+
+function installConfigLease(configId, acquired) {
+  if (state.configLease?.heartbeatTimer) clearInterval(state.configLease.heartbeatTimer);
+  state.configLease = {
+    configId,
+    leaseToken: acquired.lease_token,
+    browserSessionId: browserSessionId(),
+    owner: acquired.owner,
+    heartbeatFailures: 0,
+    lost: false,
+    heartbeatTimer: null,
+  };
+  state.configLease.heartbeatTimer = setInterval(renewConfigLease, 15000);
+  renderConfigLeaseBanner(false);
+}
+
+async function renewConfigLease() {
+  const lease = state.configLease;
+  if (!lease) return;
+  try {
+    const renewed = await api(`/configs/${lease.configId}/lock/renew`, {
+      method: "POST",
+      body: JSON.stringify({
+        lease_token: lease.leaseToken,
+        browser_session_id: lease.browserSessionId,
+      }),
+    });
+    if (state.configLease !== lease) return;
+    lease.owner = renewed.owner;
+    lease.heartbeatFailures = 0;
+    renderConfigLeaseBanner(false);
+  } catch (error) {
+    if (state.configLease !== lease) return;
+    lease.heartbeatFailures += 1;
+    const lost = error.status === 423 || lease.heartbeatFailures >= 3;
+    renderConfigLeaseBanner(lost, lost ? "无法续租，已停止保存" : "NAS 连接不稳定，正在重试续租");
+    if (lost) toast(error.message, true);
+  }
+}
+
+async function releaseConfigLease(lease = state.configLease, { silent = false } = {}) {
+  if (!lease) return;
+  if (lease.heartbeatTimer) clearInterval(lease.heartbeatTimer);
+  if (state.configLease === lease) state.configLease = null;
+  try {
+    await api(`/configs/${lease.configId}/lock/release`, {
+      method: "POST",
+      body: JSON.stringify({
+        lease_token: lease.leaseToken,
+        browser_session_id: lease.browserSessionId,
+      }),
+    });
+  } catch (error) {
+    if (!silent) toast(`${error.message}；锁将在约 2 分钟后自动过期`, true);
+  }
+}
+
+function releaseConfigLeaseBeacon() {
+  const lease = state.configLease;
+  if (!lease || !navigator.sendBeacon) return;
+  const body = new Blob([JSON.stringify({
+    lease_token: lease.leaseToken,
+    browser_session_id: lease.browserSessionId,
+  })], { type: "application/json" });
+  navigator.sendBeacon(`/api/v1/configs/${lease.configId}/lock/release`, body);
+}
+
+async function withTemporaryConfigLease(callback, { requireCurrentHash = true } = {}) {
+  if (!state.configId) return null;
+  const existing = state.configLease?.configId === state.configId ? state.configLease : null;
+  if (existing) return callback(existing, state.configHash);
+  const acquired = await acquireConfigLease(state.configId);
+  if (!acquired) return null;
+  const lease = {
+    configId: state.configId,
+    leaseToken: acquired.lease_token,
+    browserSessionId: browserSessionId(),
+    owner: acquired.owner,
+  };
+  try {
+    if (requireCurrentHash && acquired.content_hash !== state.configHash) {
+      await selectConfig(state.configId);
+      throw new Error("配置已被同事修改，页面已刷新，请重新操作");
+    }
+    return await callback(lease, acquired.content_hash);
+  } finally {
+    await releaseConfigLease(lease, { silent: true });
+  }
 }
 
 function statusInfo(status) {
@@ -158,6 +392,7 @@ async function init() {
     $("#healthDot").classList.add("ok");
     $("#healthText").textContent = health.ffmpeg ? `FFmpeg 已就绪 · v${health.version}` : "FFmpeg 未找到";
   } catch (error) { $("#healthText").textContent = "后端连接失败"; }
+  await loadCurrentUser();
   await loadConfigs();
   await Promise.all([loadJobs(), loadSliceJobs()]);
   connectSliceJobEvents();
@@ -210,11 +445,19 @@ function bindEvents() {
   $("#cloneConfigBtn").addEventListener("click", cloneConfig);
   $("#editConfigBtn").addEventListener("click", openConfig);
   $("#saveConfigBtn").addEventListener("click", saveConfig);
+  $("#userProfileBtn").addEventListener("click", () => openUserProfile(false));
+  $("#saveUserProfileBtn").addEventListener("click", () => saveUserProfile(false));
+  $("#switchUserProfileBtn").addEventListener("click", () => saveUserProfile(true));
+  $("#userDisplayNameInput").addEventListener("keydown", event => {
+    if (event.key === "Enter") saveUserProfile(false);
+  });
+  $$('[data-close-user-profile]').forEach(element => element.addEventListener("click", closeUserProfile));
   $$(".config-mode-tab").forEach(button => button.addEventListener("click", () => setConfigMode(button.dataset.configMode)));
-  $$('[data-close-modal]').forEach(element => element.addEventListener("click", closeConfig));
+  $$('[data-close-modal]').forEach(element => element.addEventListener("click", () => closeConfig()));
   $$('[data-close-new-config]').forEach(element => element.addEventListener("click", closeNewConfig));
   $$('[data-close-drawer]').forEach(element => element.addEventListener("click", closeDrawer));
   bindTimelineEvents();
+  window.addEventListener("beforeunload", releaseConfigLeaseBeacon);
 }
 
 function switchView(view) {
@@ -266,7 +509,6 @@ function bindTimelineEvents() {
   $("#timelineAudioLockBtn").addEventListener("click", toggleTimelineAudioLock);
   $("#selectedFrameInput").addEventListener("change", event => moveSelectedBreakpoint(Number(event.target.value)));
   const video = $("#timelineVideo");
-  const videoStage = $("#timelineVideoStage");
   video.addEventListener("play", startTimelineVideoSync);
   video.addEventListener("pause", syncTimelineFromVideo);
   video.addEventListener("timeupdate", syncTimelineFromVideo);
@@ -274,12 +516,6 @@ function bindTimelineEvents() {
   video.addEventListener("seeked", syncTimelineFromVideo);
   video.addEventListener("loadedmetadata", () => {
     updateTimelineMediaLayout(video.videoWidth, video.videoHeight);
-  });
-  videoStage.addEventListener("pointerenter", () => {
-    state.timeline.pointerOverVideo = true;
-  });
-  videoStage.addEventListener("pointerleave", () => {
-    state.timeline.pointerOverVideo = false;
   });
   $("#timelineRulerBar").addEventListener("pointerdown", event => {
     const frame = frameFromPointer(event, 0, event.shiftKey);
@@ -292,12 +528,6 @@ function bindTimelineEvents() {
     renderTimelineRuler();
     scheduleTimelineWaveformRender();
   });
-  timelineViewport.addEventListener("pointerenter", () => {
-    state.timeline.pointerOverTimeline = true;
-  });
-  timelineViewport.addEventListener("pointerleave", () => {
-    state.timeline.pointerOverTimeline = false;
-  });
   timelineViewport.addEventListener("wheel", handleTimelineWheel, { passive: false });
   $("#timelineZoomInput").addEventListener("input", event => {
     setTimelineZoom(Number(event.target.value));
@@ -306,7 +536,7 @@ function bindTimelineEvents() {
   window.addEventListener("resize", () => {
     if (state.timeline.analysis) renderTimeline();
   });
-  document.addEventListener("keydown", event => {
+  window.addEventListener("keydown", event => {
     if (event.key === "Shift") {
       state.timeline.shiftPressed = true;
       scheduleTimelineDragFrame();
@@ -321,14 +551,15 @@ function bindTimelineEvents() {
     const activeElement = document.activeElement;
     const isEditing = ["INPUT", "TEXTAREA", "SELECT"].includes(activeElement?.tagName)
       || Boolean(activeElement?.isContentEditable);
+    if (event.code === "Space" && !isEditing) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
     if (TimelineMath.shouldTogglePlaybackFromSpace({
       code: event.code,
-      pointerOverTimeline: state.timeline.pointerOverTimeline,
-      pointerOverVideo: state.timeline.pointerOverVideo,
       hasAnalysis: Boolean(state.timeline.analysis),
       isEditing,
     })) {
-      event.preventDefault();
       if (!event.repeat) toggleTimelinePlayback();
       return;
     }
@@ -342,7 +573,7 @@ function bindTimelineEvents() {
       event.preventDefault();
       stepTimelineFrame(event.key === "ArrowLeft" ? -1 : 1);
     }
-  });
+  }, { capture: true });
   document.addEventListener("keyup", event => {
     if (event.key !== "Shift") return;
     state.timeline.shiftPressed = false;
@@ -713,7 +944,8 @@ function renderTimeline() {
     const groupLabel = groupLabelBySegment.get(segment.id) || "";
     const composite = groupLabel ? "composite-member" : "";
     const titlePrefix = groupLabel ? `${groupLabel} 组合成员` : "加入片段";
-    return `<button class="timeline-segment ${segmentCategoryClass(category)} ${selected} ${queued} ${composite}" type="button" data-timeline-segment="${segment.id}" data-group-label="${groupLabel}" style="left:${left}px;width:${width}px" title="${titlePrefix} ${segment.index} · ${escapeHtml(categoryLabelForTimeline(category))} · ${segment.durationFrames} 帧" aria-label="加入片段 ${segment.index}"></button>`;
+    const selectionLabel = selected ? "移除片段" : "选中片段";
+    return `<button class="timeline-segment ${segmentCategoryClass(category)} ${selected} ${queued} ${composite}" type="button" data-timeline-segment="${segment.id}" data-group-label="${groupLabel}" style="left:${left}px;width:${width}px" title="${titlePrefix} ${segment.index} · ${escapeHtml(categoryLabelForTimeline(category))} · ${segment.durationFrames} 帧" aria-label="${selectionLabel} ${segment.index}" aria-pressed="${selected ? "true" : "false"}"></button>`;
   }).join("");
   const audioLocked = state.timeline.audioLocked;
   const activeBreakpoints = timelineActiveBreakpoints();
@@ -735,7 +967,10 @@ function renderTimeline() {
     .filter(point => point.review_status !== "machine_suggested" && activeBreakpoints.includes(point))
     .map(point => markerHtml(point)).join("");
   $$('[data-timeline-segment]').forEach(segment => {
-    segment.addEventListener("click", () => selectTimelineSegment(segment.dataset.timelineSegment));
+    segment.addEventListener("click", () => selectTimelineSegment(
+      segment.dataset.timelineSegment,
+      { toggleMembership: true },
+    ));
   });
   $$(".timeline-marker:not(:disabled)").forEach(marker => bindTimelineMarker(marker));
   const audioTrack = $("#timelineAudioTrack");
@@ -1390,10 +1625,14 @@ function stopTimelineVideoSync() {
 }
 
 function stepTimelineFrame(delta) {
-  const base = state.timeline.selectedFrame ?? currentTimelineFrame();
-  const next = base + delta;
-  if (state.timeline.selectedFrame !== null) moveSelectedBreakpoint(next);
-  else seekTimelineFrame(next);
+  const analysis = state.timeline.analysis;
+  if (!analysis) return;
+  const next = TimelineMath.stepFrameFromPlayhead(
+    state.timeline.playheadFrame,
+    delta,
+    analysis.frame_count,
+  );
+  seekTimelineFrame(next, "frame_step");
 }
 
 function addBreakpointAtPlayhead() {
@@ -1575,9 +1814,17 @@ function segmentCategoryClass(category) {
   }[category] || "cat-unclassified";
 }
 
-function selectTimelineSegment(segmentId, scrollIntoView = false) {
+function selectTimelineSegment(segmentId, { scrollIntoView = false, toggleMembership = false } = {}) {
   const segment = timelineSegments().find(item => item.id === segmentId);
   if (!segment) return;
+  if (TimelineMath.shouldRemoveSelectedSegment(
+    state.timeline.selectedSegmentId,
+    segment.id,
+    toggleMembership,
+  )) {
+    removeSliceSegment(segment.id);
+    return;
+  }
   if (!sliceUnitForSegment(segment.id)) state.timeline.sliceUnits.push(newSliceUnit([segment.id]));
   setSelectedBreakpointFrames([]);
   state.timeline.selectedSegmentId = segment.id;
@@ -1651,6 +1898,18 @@ function removeSliceUnit(unitId) {
   state.timeline.sliceUnits = state.timeline.sliceUnits.filter(item => item.id !== unitId);
   state.timeline.mergeSelection = state.timeline.mergeSelection.filter(id => id !== unitId);
   if (unit.segmentIds.includes(state.timeline.selectedSegmentId)) state.timeline.selectedSegmentId = null;
+  renderTimeline();
+}
+
+function removeSliceSegment(segmentId) {
+  const unit = sliceUnitForSegment(segmentId);
+  if (!unit) return;
+  if (unit.segmentIds.length === 1) {
+    removeSliceUnit(unit.id);
+    return;
+  }
+  unit.segmentIds = unit.segmentIds.filter(id => id !== segmentId);
+  if (state.timeline.selectedSegmentId === segmentId) state.timeline.selectedSegmentId = null;
   renderTimeline();
 }
 
@@ -1784,7 +2043,7 @@ async function exportTimelineSlices() {
   const unclassifiedUnit = state.timeline.sliceUnits.find(unit => !unit.category);
   if (unclassifiedUnit) {
     const firstSegment = segments.find(segment => segment.id === unclassifiedUnit.segmentIds[0]);
-    if (firstSegment) selectTimelineSegment(firstSegment.id, true);
+    if (firstSegment) selectTimelineSegment(firstSegment.id, { scrollIntoView: true });
     return toast("请先为所有输出片段选择类型", true);
   }
   const segmentById = new Map(segments.map(segment => [segment.id, segment]));
@@ -2111,7 +2370,13 @@ async function saveWeights() {
     .filter(([category]) => category !== "benefit_overlay")
     .flatMap(([category, assets]) => assets.map(asset => ({ category, path: asset.path, enabled: asset.enabled, weight: Number(asset.weight), tags: asset.tags })));
   try {
-    await api(`/configs/${state.configId}/weights`, { method: "POST", body: JSON.stringify({ items }) });
+    const saved = await withTemporaryConfigLease((lease, configHash) => api(`/configs/${state.configId}/weights`, {
+      method: "POST",
+      headers: configLeaseHeaders(lease, configHash),
+      body: JSON.stringify({ items }),
+    }));
+    if (!saved) return;
+    state.configHash = saved.content_hash;
     toast("权重已保存，原配置已备份");
     await selectConfig(state.configId);
   } catch (error) { toast(error.message, true); }
@@ -2481,7 +2746,11 @@ async function deleteConfig() {
   const button = $("#confirmDeleteConfigBtn");
   button.disabled = true; button.textContent = "删除中…";
   try {
-    await api(`/configs/${deletedId}`, { method: "DELETE" });
+    const deleted = await withTemporaryConfigLease((lease, configHash) => api(`/configs/${deletedId}`, {
+      method: "DELETE",
+      headers: configLeaseHeaders(lease, configHash),
+    }));
+    if (!deleted) return;
     try { localStorage.removeItem(`${configUiStoragePrefix}${deletedId}`); } catch (_) {}
     state.configId = null;
     hideDeleteConfigConfirm();
@@ -2491,18 +2760,39 @@ async function deleteConfig() {
   finally { button.disabled = false; button.textContent = "确认删除"; }
 }
 
-function openConfig() {
+async function openConfig() {
   if (!state.config) return;
-  state.configDraft = structuredClone(state.config);
-  $("#yamlEditor").value = state.yaml;
-  renderSimpleConfig();
-  renderVisualConfig();
-  restoreConfigUiPreferences();
-  $("#configModal").classList.add("open");
-  $("#configModal").setAttribute("aria-hidden","false");
-  requestAnimationFrame(restoreConfigEditorScroll);
+  const button = $("#editConfigBtn");
+  button.disabled = true;
+  try {
+    const acquired = await acquireConfigLease(state.configId);
+    if (!acquired) return;
+    installConfigLease(state.configId, acquired);
+    state.config = acquired.config;
+    state.configDraft = structuredClone(acquired.config);
+    state.configHash = acquired.content_hash;
+    state.yaml = acquired.yaml_text;
+    $("#yamlEditor").value = state.yaml;
+    renderSimpleConfig();
+    renderVisualConfig();
+    restoreConfigUiPreferences();
+    $("#configModal").classList.add("open");
+    $("#configModal").setAttribute("aria-hidden","false");
+    requestAnimationFrame(restoreConfigEditorScroll);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
 }
-function closeConfig() {
+function configEditorIsDirty() {
+  if (!state.configDraft || !state.config) return false;
+  if (state.configMode === "yaml") return $("#yamlEditor").value !== state.yaml;
+  try { return JSON.stringify(currentStructuredDraft()) !== JSON.stringify(state.config); }
+  catch (_) { return true; }
+}
+async function closeConfig({ skipConfirm = false } = {}) {
+  if (!skipConfirm && configEditorIsDirty() && !window.confirm("放弃未保存的修改并释放配置吗？")) return false;
   saveConfigUiPreferences();
   const audio = $("#loudnessPreviewAudio");
   if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
@@ -2510,6 +2800,8 @@ function closeConfig() {
   state.previewAudioCleanup = null;
   $("#configModal").classList.remove("open");
   $("#configModal").setAttribute("aria-hidden","true");
+  await releaseConfigLease();
+  return true;
 }
 
 function setConfigMode(mode) {
@@ -2601,8 +2893,8 @@ function simpleOverlayDirectory() {
 }
 
 function simpleChoiceButtons(name, choices, selected) {
-  return `<div class="simple-choice-row" role="group">${choices.map(([value, title, note]) => `
-    <button type="button" class="simple-choice ${selected === value ? "active" : ""}" data-simple-choice="${name}" data-simple-value="${value}">
+  return `<div class="simple-choice-row" role="group">${choices.map(([value, title, note, disabled = false]) => `
+    <button type="button" class="simple-choice ${selected === value ? "active" : ""}" data-simple-choice="${name}" data-simple-value="${value}" ${disabled ? "disabled" : ""}>
       <strong>${title}</strong>${note ? `<small>${note}</small>` : ""}
     </button>`).join("")}</div>`;
 }
@@ -2665,8 +2957,8 @@ function renderSimpleConfig() {
   const qualityPreset = simpleQualityPreset(config.output);
   const outputChoices = [
     ["portrait", "竖屏", "720 × 1280"],
-    ["landscape", "横屏", "1280 × 720"],
-    ["square", "方形", "1080 × 1080"],
+    ["landscape", "横屏（未完成）", "1280 × 720", true],
+    ["square", "方形（未完成）", "1080 × 1080", true],
   ];
   if (outputPreset === "custom") outputChoices.push(["custom", "保留当前", `${config.output.width} × ${config.output.height}`]);
 
@@ -2900,11 +3192,14 @@ async function uploadOverlayImage(file, input) {
   try {
     const saved = await api(`/configs/${state.configId}/structured`, {
       method: "PUT",
+      headers: configLeaseHeaders(),
       body: JSON.stringify({ config: currentStructuredDraft() }),
     });
+    state.configHash = saved.content_hash;
     const dataBase64 = arrayBufferToBase64(await file.arrayBuffer());
     const result = await api(`/configs/${state.configId}/overlay-image`, {
       method: "POST",
+      headers: configLeaseHeaders(state.configLease, saved.content_hash),
       body: JSON.stringify({
         filename: file.name,
         data_base64: dataBase64,
@@ -3290,11 +3585,13 @@ async function addPoolFromEditor(button) {
   try {
     const saved = await api(`/configs/${state.configId}/structured`, {
       method: "PUT",
+      headers: configLeaseHeaders(),
       body: JSON.stringify({ config: currentStructuredDraft() }),
     });
     state.configHash = saved.content_hash;
     const added = await api(`/configs/${state.configId}/pools`, {
       method: "POST",
+      headers: configLeaseHeaders(state.configLease, saved.content_hash),
       body: JSON.stringify({
         label,
         description: "",
@@ -3319,11 +3616,13 @@ async function deletePoolFromEditor(poolId, button) {
   try {
     const saved = await api(`/configs/${state.configId}/structured`, {
       method: "PUT",
+      headers: configLeaseHeaders(),
       body: JSON.stringify({ config: currentStructuredDraft() }),
     });
     state.configHash = saved.content_hash;
     const result = await api(`/configs/${state.configId}/pools/${poolId}`, {
       method: "DELETE",
+      headers: configLeaseHeaders(state.configLease, saved.content_hash),
       body: JSON.stringify({ current_config_hash: saved.content_hash }),
     });
     await refreshConfigEditor(scrollTop);
@@ -3365,10 +3664,13 @@ async function addBenefitFromEditor(button) {
     const draft = currentStructuredDraft();
     const saved = await api(`/configs/${state.configId}/structured`, {
       method: "PUT",
+      headers: configLeaseHeaders(),
       body: JSON.stringify({ config: draft }),
     });
+    state.configHash = saved.content_hash;
     const added = await api(`/configs/${state.configId}/benefits`, {
       method: "POST",
+      headers: configLeaseHeaders(state.configLease, saved.content_hash),
       body: JSON.stringify({
         client_request_id: clientRequestId(),
         current_config_hash: saved.content_hash,
@@ -3520,15 +3822,30 @@ async function cloneConfig() {
 async function saveConfig() {
   const button = $("#saveConfigBtn"); button.disabled = true; button.textContent = "校验中…";
   try {
+    let saved;
     if (state.configMode !== "yaml") {
       const config = currentStructuredDraft();
-      await api(`/configs/${state.configId}/structured`, { method: "PUT", body: JSON.stringify({ config }) });
+      saved = await api(`/configs/${state.configId}/structured`, {
+        method: "PUT",
+        headers: configLeaseHeaders(),
+        body: JSON.stringify({ config }),
+      });
     } else {
-      await api(`/configs/${state.configId}`, { method: "PUT", body: JSON.stringify({ yaml_text: $("#yamlEditor").value }) });
+      saved = await api(`/configs/${state.configId}`, {
+        method: "PUT",
+        headers: configLeaseHeaders(),
+        body: JSON.stringify({ yaml_text: $("#yamlEditor").value }),
+      });
     }
-    closeConfig(); toast("配置已保存并备份"); await loadConfigs(state.configId);
+    state.config = saved.config;
+    state.configDraft = structuredClone(saved.config);
+    state.configHash = saved.content_hash;
+    state.yaml = state.configMode === "yaml" ? $("#yamlEditor").value : state.yaml;
+    await closeConfig({ skipConfirm: true });
+    toast("配置已保存并备份");
+    await loadConfigs(state.configId);
   } catch (error) { toast(error.message, true); }
-  finally { button.disabled = false; button.textContent = "校验并保存"; }
+  finally { button.disabled = Boolean(state.configLease?.lost); button.textContent = "校验并保存"; }
 }
 
 function formatDuration(seconds) { const mins = Math.floor(seconds/60); const secs = Math.round(seconds%60); return mins ? `${mins}m${secs}s` : `${secs}s`; }

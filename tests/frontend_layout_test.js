@@ -9,17 +9,52 @@ const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260918-40"/,
-  "几何折叠箭头更新后必须刷新静态资源缓存版本",
+  /href="\/styles\.css\?v=20260918-51"/,
+  "配置协作锁更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
 assert.equal(staticVersions.length, 3, "三个前端静态资源都必须声明缓存版本");
 assert.equal(new Set(staticVersions).size, 1, "CSS 与 JS 必须使用同一个发布版本，避免新旧资源混用");
 assert.match(
+  css,
+  /html\s*\{[^}]*scrollbar-gutter:\s*stable/,
+  "页面必须预留稳定滚动条槽位，避免异步内容加载时固定队列横向跳动",
+);
+assert.match(
   html,
   /data-config-mode="simple">简单模式[\s\S]*data-config-mode="advanced">高级模式[\s\S]*data-config-mode="yaml">YAML 专家模式/,
   "配置管理必须提供简单、高级和 YAML 三级模式",
+);
+assert.match(
+  html,
+  /id="userProfileBtn"[\s\S]*id="configLeaseBanner"[\s\S]*id="userProfileModal"/,
+  "页面必须提供本机用户资料和配置编辑租约状态",
+);
+assert.match(
+  html,
+  /<span>姓名<\/span><input id="userDisplayNameInput"/,
+  "登录资料弹窗必须使用姓名作为字段名称",
+);
+assert.doesNotMatch(
+  html,
+  /id="userProfileDevice"|用于配置协作锁<\/small>/,
+  "顶部用户名按钮不应显示设备或协作锁副文案",
+);
+assert.match(
+  css,
+  /\.system-pill, \.user-profile-pill\s*\{[^}]*min-height:\s*40px[^}]*font-size:\s*12px/,
+  "用户名按钮必须与 FFmpeg 状态卡片使用一致的高度和字号",
+);
+assert.match(
+  app,
+  /lock\/acquire[\s\S]*lock\/takeover[\s\S]*setInterval\(renewConfigLease, 15000\)[\s\S]*lock\/release/,
+  "配置编辑器必须获取、续租、接管并释放 NAS 编辑锁",
+);
+assert.match(
+  app,
+  /X-SmartStitch-Lease[\s\S]*X-SmartStitch-Config-Hash/,
+  "配置写入必须同时提交租约令牌和配置版本",
 );
 assert.match(
   html,
@@ -62,9 +97,29 @@ assert.match(
   "风险提示语图片选择按钮必须拉伸到与左侧状态框等高",
 );
 assert.match(
+  css,
+  /\.timeline-slice-queue > header small\s*\{[^}]*display:\s*none[^}]*\}[\s\S]*\.timeline-slice-queue:hover > header small[^}]*\{[^}]*display:\s*block/,
+  "收起的切片队列不得为隐藏的副说明预留空间",
+);
+assert.match(
+  css,
+  /\.slice-queue-list\s*\{[^}]*display:\s*none[^}]*\}[\s\S]*\.timeline-slice-queue:hover \.slice-queue-list[^}]*\{[^}]*display:\s*grid/,
+  "收起的切片队列只能展示任务摘要，展开后才显示完整任务列表",
+);
+assert.match(
   app,
   /simpleChoiceButtons[\s\S]*data-simple-choice[\s\S]*生成速度与画质[\s\S]*组合重复规则/,
   "简单模式应使用大选项呈现常用成片设置",
+);
+assert.match(
+  app,
+  /\["landscape", "横屏（未完成）", "1280 × 720", true\][\s\S]*\["square", "方形（未完成）", "1080 × 1080", true\]/,
+  "未完成的横屏和方形输出必须明确标注并禁用",
+);
+assert.match(
+  css,
+  /\.simple-choice:disabled\s*\{[^}]*cursor:\s*not-allowed;/,
+  "禁用的输出方向必须显示为不可点击的灰色状态",
 );
 assert.doesNotMatch(
   app,
@@ -171,10 +226,10 @@ assert.match(
   /id="timelineMediaGrid" class="timeline-media-grid"/,
   "视频和审核面板需要可根据方向切换布局",
 );
-assert.match(
+assert.doesNotMatch(
   app,
-  /videoStage\.addEventListener\("pointerenter"[\s\S]*pointerOverVideo = true;[\s\S]*videoStage\.addEventListener\("pointerleave"[\s\S]*pointerOverVideo = false;/,
-  "播放窗口必须跟踪鼠标进入和离开",
+  /pointerOverVideo|pointerOverTimeline/,
+  "全局空格快捷键不应再依赖播放窗口或时间线的悬停状态",
 );
 assert.match(
   app,
@@ -316,6 +371,31 @@ assert.match(
   app,
   /#timelineSliceQueue"\)\.classList\.toggle\("hidden", view !== "timeline"\)/,
   "窗口级切片抽屉只能在时间线页面显示",
+);
+assert.match(
+  app,
+  /window\.addEventListener\("keydown",[\s\S]*event\.code === "Space"[\s\S]*event\.preventDefault\(\)[\s\S]*toggleTimelinePlayback\(\)[\s\S]*capture: true/,
+  "切片页空格快捷键必须以捕获阶段全局处理并阻止页面滚动",
+);
+assert.match(
+  app,
+  /function stepTimelineFrame\(delta\)[\s\S]*stepFrameFromPlayhead\([\s\S]*state\.timeline\.playheadFrame[\s\S]*seekTimelineFrame\(next, "frame_step"\)/,
+  "逐帧操作必须基于当前播放头并只移动播放头",
+);
+assert.match(
+  app,
+  /function selectTimelineSegment\(segmentId, \{ scrollIntoView = false, toggleMembership = false \} = \{\}\)[\s\S]*shouldRemoveSelectedSegment\([\s\S]*removeSliceSegment\(segment\.id\);[\s\S]*return;/,
+  "再次点击上方时间轴中的已选片段必须将它从待切片列表移除",
+);
+assert.doesNotMatch(
+  app,
+  /selectTimelineSegment\(unit\.segmentIds\[0\], \{ toggleMembership: true \}\)|selectTimelineSegment\(event\.currentTarget\.dataset\.seekMember, \{ toggleMembership: true \}\)/,
+  "下方片段列表只能选中和定位，不得通过重复点击删除",
+);
+assert.match(
+  app,
+  /function removeSliceSegment\(segmentId\)[\s\S]*unit\.segmentIds\.length === 1[\s\S]*removeSliceUnit\(unit\.id\)[\s\S]*unit\.segmentIds = unit\.segmentIds\.filter/,
+  "移除组合中的片段时必须保留其他组合成员",
 );
 
 console.log("frontend timeline layout contract ok");

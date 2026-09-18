@@ -11,7 +11,9 @@ const {
   mediaLayoutOrientation,
   mergeSliceUnits,
   previewTimeForFrame,
+  shouldRemoveSelectedSegment,
   shouldTogglePlaybackFromSpace,
+  stepFrameFromPlayhead,
   waveformFrameRange,
   waveformViewportGeometry,
 } = require("../frontend/timeline-math.js");
@@ -109,30 +111,35 @@ assert.equal(mergeSliceUnits({
 
 assert.equal(shouldTogglePlaybackFromSpace({
   code: "Space",
-  pointerOverVideo: true,
   hasAnalysis: true,
 }), true);
 assert.equal(shouldTogglePlaybackFromSpace({
   code: "Space",
-  pointerOverTimeline: true,
   hasAnalysis: true,
 }), true);
 assert.equal(shouldTogglePlaybackFromSpace({
   code: "Space",
-  pointerOverVideo: true,
   hasAnalysis: true,
   isEditing: true,
 }), false);
 assert.equal(shouldTogglePlaybackFromSpace({
   code: "Enter",
-  pointerOverVideo: true,
   hasAnalysis: true,
 }), false);
 assert.equal(shouldTogglePlaybackFromSpace({
   code: "Space",
-  pointerOverVideo: true,
   hasAnalysis: false,
 }), false);
+
+assert.equal(stepFrameFromPlayhead(120, -1, 300), 119);
+assert.equal(stepFrameFromPlayhead(120, 1, 300), 121);
+assert.equal(stepFrameFromPlayhead(0, -1, 300), 0);
+assert.equal(stepFrameFromPlayhead(299, 1, 300), 299);
+
+assert.equal(shouldRemoveSelectedSegment(null, "segment-1", true), false);
+assert.equal(shouldRemoveSelectedSegment("segment-1", "segment-2", true), false);
+assert.equal(shouldRemoveSelectedSegment("segment-1", "segment-1", true), true);
+assert.equal(shouldRemoveSelectedSegment("segment-1", "segment-1"), false);
 
 assert.equal(mediaLayoutOrientation(720, 1280), "portrait");
 assert.equal(mediaLayoutOrientation(1080, 1920), "portrait");

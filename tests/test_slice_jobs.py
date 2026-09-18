@@ -255,3 +255,34 @@ def test_unexpected_worker_error_does_not_leave_slice_job_running(
         assert failed["error"] == "state persistence failed"
         assert failed["items"][0]["status"] == "failed"
         assert failed["items"][0]["phase"] == "done"
+
+
+def test_background_worker_requests_low_process_priority(tmp_path, monkeypatch):
+    app, review_revision, config_hash = setup_slice_app(tmp_path)
+    execution_started = threading.Event()
+    received_options = {}
+
+    def execute(job, **kwargs):
+        received_options.update(kwargs)
+        job["status"] = "completed"
+        job["ok"] = True
+        job["progress"] = 1.0
+        kwargs["on_update"](job)
+        execution_started.set()
+        return job
+
+    monkeypatch.setattr(app.state.timeline_slicer, "execute", execute)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/timeline/slice-jobs",
+            json=request_payload(
+                "a" * 24,
+                review_revision,
+                config_hash,
+                "async-slice-low-priority",
+            ),
+        )
+        assert response.status_code == 202
+        assert execution_started.wait(timeout=2)
+
+    assert received_options["low_priority"] is True

@@ -7,12 +7,21 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .audio_preview import AudioPreviewError, create_audio_preview
+from .collaboration import (
+    CollaborationError,
+    ConfigLeaseError,
+    ConfigLeaseManager,
+    ConfigLockHeldError,
+    ConfigVersionConflictError,
+    UserProfileRequiredError,
+    UserProfileStore,
+)
 from .config import ConfigError, ConfigStore
 from .database import SQLiteStore
 from .jobs import JobManager, TERMINAL_STATES
@@ -22,6 +31,8 @@ from .models import (
     AddBenefitRequest,
     AddPoolRequest,
     CloneConfigRequest,
+    ConfigLockAcquireRequest,
+    ConfigLockActionRequest,
     ConfigUpdateRequest,
     CreateConfigRequest,
     CreateLibraryRequest,
@@ -38,6 +49,7 @@ from .models import (
     TimelineSourceDirectoryRequest,
     TimelineSliceRequest,
     UpdatePoolRequest,
+    UserProfileUpdateRequest,
     WeightUpdateRequest,
 )
 from .planner import PlanError, build_plan
@@ -123,6 +135,8 @@ def create_app(
             resolved_config_directory
         ),
     )
+    user_profiles = UserProfileStore(root / "data")
+    config_leases = ConfigLeaseManager(config_store)
     library_service = LibraryService(config_store)
     database_store = SQLiteStore(root / "data" / "smartstitch.db")
     job_manager = JobManager(config_store, root / "data", database_store)
@@ -132,12 +146,38 @@ def create_app(
     app = FastAPI(title="SmartStitch", version=__version__)
     app.state.root = root
     app.state.config_store = config_store
+    app.state.user_profiles = user_profiles
+    app.state.config_leases = config_leases
     app.state.library_service = library_service
     app.state.job_manager = job_manager
     app.state.database_store = database_store
     app.state.timeline_analyzer = timeline_analyzer
     app.state.timeline_slicer = timeline_slicer
     app.state.slice_job_manager = slice_job_manager
+
+    def collaboration_http_error(exc: CollaborationError) -> HTTPException:
+        if isinstance(exc, ConfigLockHeldError):
+            return HTTPException(
+                423,
+                {
+                    "code": "config_locked",
+                    "message": str(exc),
+                    **exc.status,
+                },
+            )
+        if isinstance(exc, ConfigVersionConflictError):
+            return HTTPException(409, {"code": "config_changed", "message": str(exc)})
+        if isinstance(exc, UserProfileRequiredError):
+            return HTTPException(428, {"code": "user_required", "message": str(exc)})
+        if isinstance(exc, ConfigLeaseError):
+            return HTTPException(423, {"code": "lease_invalid", "message": str(exc)})
+        return HTTPException(422, str(exc))
+
+    def request_lease_token(request: Request) -> str:
+        return request.headers.get("X-SmartStitch-Lease", "").strip()
+
+    def request_config_hash(request: Request) -> str:
+        return request.headers.get("X-SmartStitch-Config-Hash", "").strip()
 
     @app.get("/api/v1/system/health")
     def health() -> dict[str, object]:
@@ -161,6 +201,22 @@ def create_app(
         except (LibraryError, OSError, subprocess.SubprocessError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.get("/api/v1/users/me")
+    def get_current_user() -> dict[str, object]:
+        try:
+            return user_profiles.get()
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
+
+    @app.put("/api/v1/users/me")
+    def update_current_user(request: UserProfileUpdateRequest) -> dict[str, object]:
+        try:
+            return user_profiles.update(
+                request.display_name, switch_user=request.switch_user
+            )
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
+
     @app.post("/api/v1/libraries/preflight")
     def preflight_library(request: LibraryPreflightRequest) -> dict[str, object]:
         try:
@@ -173,7 +229,10 @@ def create_app(
     @app.post("/api/v1/libraries")
     def create_library(request: CreateLibraryRequest) -> dict[str, object]:
         try:
-            return library_service.create(request)
+            with config_leases.commit_guard(request.new_id):
+                return library_service.create(request)
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except LibraryConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
         except (LibraryError, ConfigError, OSError) as exc:
@@ -182,7 +241,12 @@ def create_app(
     @app.get("/api/v1/libraries/by-config/{config_id}")
     def get_library(config_id: str) -> dict[str, object]:
         try:
-            return library_service.inspect_by_config(config_id)
+            # Legacy library inspection can perform a one-time layout migration.
+            # Serialize that hidden write with normal configuration commits.
+            with config_leases.commit_guard(config_id):
+                return library_service.inspect_by_config(config_id)
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except (ConfigError, FileNotFoundError) as exc:
             raise HTTPException(404, str(exc)) from exc
 
@@ -205,18 +269,32 @@ def create_app(
             raise HTTPException(422, str(exc)) from exc
 
     @app.post("/api/v1/configs/{config_id}/benefits")
-    def add_benefit(config_id: str, request: AddBenefitRequest) -> dict[str, object]:
+    def add_benefit(
+        config_id: str, request: AddBenefitRequest, http_request: Request
+    ) -> dict[str, object]:
         try:
-            return library_service.add_benefit(config_id, request)
+            with config_leases.write_guard(
+                config_id, request_lease_token(http_request), request.current_config_hash
+            ):
+                return library_service.add_benefit(config_id, request)
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except LibraryConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
         except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.post("/api/v1/configs/{config_id}/pools")
-    def add_pool(config_id: str, request: AddPoolRequest) -> dict[str, object]:
+    def add_pool(
+        config_id: str, request: AddPoolRequest, http_request: Request
+    ) -> dict[str, object]:
         try:
-            return library_service.add_pool(config_id, request)
+            with config_leases.write_guard(
+                config_id, request_lease_token(http_request), request.current_config_hash
+            ):
+                return library_service.add_pool(config_id, request)
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except LibraryConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
         except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
@@ -224,10 +302,18 @@ def create_app(
 
     @app.patch("/api/v1/configs/{config_id}/pools/{pool_id}")
     def update_pool(
-        config_id: str, pool_id: str, request: UpdatePoolRequest
+        config_id: str,
+        pool_id: str,
+        request: UpdatePoolRequest,
+        http_request: Request,
     ) -> dict[str, object]:
         try:
-            return library_service.update_pool(config_id, pool_id, request)
+            with config_leases.write_guard(
+                config_id, request_lease_token(http_request), request.current_config_hash
+            ):
+                return library_service.update_pool(config_id, pool_id, request)
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except LibraryConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
         except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
@@ -235,10 +321,18 @@ def create_app(
 
     @app.delete("/api/v1/configs/{config_id}/pools/{pool_id}")
     def delete_pool(
-        config_id: str, pool_id: str, request: DeletePoolRequest
+        config_id: str,
+        pool_id: str,
+        request: DeletePoolRequest,
+        http_request: Request,
     ) -> dict[str, object]:
         try:
-            return library_service.delete_pool(config_id, pool_id, request)
+            with config_leases.write_guard(
+                config_id, request_lease_token(http_request), request.current_config_hash
+            ):
+                return library_service.delete_pool(config_id, pool_id, request)
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except LibraryConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
         except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
@@ -246,10 +340,15 @@ def create_app(
 
     @app.put("/api/v1/configs/{config_id}/timeline")
     def reorder_timeline(
-        config_id: str, request: ReorderTimelineRequest
+        config_id: str, request: ReorderTimelineRequest, http_request: Request
     ) -> dict[str, object]:
         try:
-            return library_service.reorder_timeline(config_id, request)
+            with config_leases.write_guard(
+                config_id, request_lease_token(http_request), request.current_config_hash
+            ):
+                return library_service.reorder_timeline(config_id, request)
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except LibraryConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
         except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
@@ -257,10 +356,17 @@ def create_app(
 
     @app.post("/api/v1/configs/{config_id}/overlay-image")
     def replace_overlay_image(
-        config_id: str, request: ReplaceOverlayImageRequest
+        config_id: str,
+        request: ReplaceOverlayImageRequest,
+        http_request: Request,
     ) -> dict[str, object]:
         try:
-            return library_service.replace_overlay_image(config_id, request)
+            with config_leases.write_guard(
+                config_id, request_lease_token(http_request), request.current_config_hash
+            ):
+                return library_service.replace_overlay_image(config_id, request)
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except LibraryConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
         except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
@@ -270,15 +376,86 @@ def create_app(
     def list_configs() -> list[dict[str, object]]:
         return config_store.list()
 
+    @app.get("/api/v1/configs/{config_id}/lock")
+    def get_config_lock(config_id: str) -> dict[str, object]:
+        try:
+            config_store.path_for(config_id).stat()
+            return config_leases.status(config_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
+
+    def acquire_config_lock(
+        config_id: str, request: ConfigLockAcquireRequest, *, takeover: bool
+    ) -> dict[str, object]:
+        try:
+            profile, device = user_profiles.require()
+            result = config_leases.acquire(
+                config_id,
+                profile,
+                device,
+                request.browser_session_id,
+                takeover=takeover,
+            )
+            loaded = config_store.load(config_id)
+            return {
+                **result,
+                "config": loaded.model_dump(mode="json"),
+                "yaml_text": config_store.raw(config_id),
+                "content_hash": config_store.content_hash(config_id),
+            }
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
+
+    @app.post("/api/v1/configs/{config_id}/lock/acquire")
+    def acquire_config_lock_route(
+        config_id: str, request: ConfigLockAcquireRequest
+    ) -> dict[str, object]:
+        return acquire_config_lock(config_id, request, takeover=False)
+
+    @app.post("/api/v1/configs/{config_id}/lock/takeover")
+    def takeover_config_lock_route(
+        config_id: str, request: ConfigLockAcquireRequest
+    ) -> dict[str, object]:
+        return acquire_config_lock(config_id, request, takeover=True)
+
+    @app.post("/api/v1/configs/{config_id}/lock/renew")
+    def renew_config_lock(
+        config_id: str, request: ConfigLockActionRequest
+    ) -> dict[str, object]:
+        try:
+            return config_leases.renew(
+                config_id, request.lease_token, request.browser_session_id
+            )
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
+
+    @app.post("/api/v1/configs/{config_id}/lock/release")
+    def release_config_lock(
+        config_id: str, request: ConfigLockActionRequest
+    ) -> dict[str, object]:
+        try:
+            return config_leases.release(
+                config_id, request.lease_token, request.browser_session_id
+            )
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
+
     @app.post("/api/v1/configs")
     def create_config(request: CreateConfigRequest) -> dict[str, object]:
         try:
-            config = config_store.create(request.new_id, request.new_name.strip())
+            with config_leases.commit_guard(request.new_id):
+                config = config_store.create(request.new_id, request.new_name.strip())
             return {
                 "ok": True,
                 "config": config.model_dump(mode="json"),
                 "content_hash": config_store.content_hash(config.id),
             }
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except ConfigError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -295,56 +472,97 @@ def create_app(
             raise HTTPException(404, str(exc)) from exc
 
     @app.put("/api/v1/configs/{config_id}")
-    def update_config(config_id: str, request: ConfigUpdateRequest) -> dict[str, object]:
+    def update_config(
+        config_id: str, request: ConfigUpdateRequest, http_request: Request
+    ) -> dict[str, object]:
         try:
-            config = config_store.save_text(config_id, request)
+            with config_leases.write_guard(
+                config_id,
+                request_lease_token(http_request),
+                request_config_hash(http_request),
+            ):
+                config = config_store.save_text(config_id, request)
             return {
                 "ok": True,
                 "config": config.model_dump(mode="json"),
                 "content_hash": config_store.content_hash(config_id),
             }
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except ConfigError as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.put("/api/v1/configs/{config_id}/structured")
     def update_structured_config(
-        config_id: str, request: StructuredConfigUpdateRequest
+        config_id: str,
+        request: StructuredConfigUpdateRequest,
+        http_request: Request,
     ) -> dict[str, object]:
         try:
-            config = config_store.save_config(config_id, request.config)
+            with config_leases.write_guard(
+                config_id,
+                request_lease_token(http_request),
+                request_config_hash(http_request),
+            ):
+                config = config_store.save_config(config_id, request.config)
             return {
                 "ok": True,
                 "config": config.model_dump(mode="json"),
                 "content_hash": config_store.content_hash(config_id),
             }
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except ConfigError as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.post("/api/v1/configs/{config_id}/clone")
     def clone_config(config_id: str, request: CloneConfigRequest) -> dict[str, object]:
         try:
-            config = config_store.clone(config_id, request.new_id, request.new_name)
+            with config_leases.commit_guard(request.new_id):
+                config = config_store.clone(config_id, request.new_id, request.new_name)
             return {
                 "ok": True,
                 "config": config.model_dump(mode="json"),
                 "content_hash": config_store.content_hash(config.id),
             }
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except (ConfigError, FileNotFoundError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.delete("/api/v1/configs/{config_id}")
-    def delete_config(config_id: str) -> dict[str, object]:
+    def delete_config(config_id: str, http_request: Request) -> dict[str, object]:
         try:
-            backup = config_store.delete(config_id)
+            with config_leases.write_guard(
+                config_id,
+                request_lease_token(http_request),
+                request_config_hash(http_request),
+            ):
+                backup = config_store.delete(config_id)
             return {"ok": True, "backup": str(backup)}
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except (ConfigError, FileNotFoundError) as exc:
             raise HTTPException(404, str(exc)) from exc
 
     @app.post("/api/v1/configs/{config_id}/weights")
-    def update_weights(config_id: str, request: WeightUpdateRequest) -> dict[str, object]:
+    def update_weights(
+        config_id: str, request: WeightUpdateRequest, http_request: Request
+    ) -> dict[str, object]:
         try:
-            config = config_store.update_weights(config_id, request.items)
-            return {"ok": True, "config": config.model_dump(mode="json")}
+            with config_leases.write_guard(
+                config_id,
+                request_lease_token(http_request),
+                request_config_hash(http_request),
+            ):
+                config = config_store.update_weights(config_id, request.items)
+            return {
+                "ok": True,
+                "config": config.model_dump(mode="json"),
+                "content_hash": config_store.content_hash(config_id),
+            }
+        except CollaborationError as exc:
+            raise collaboration_http_error(exc) from exc
         except (ConfigError, FileNotFoundError) as exc:
             raise HTTPException(422, str(exc)) from exc
 

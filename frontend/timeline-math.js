@@ -171,15 +171,22 @@
 
   function shouldTogglePlaybackFromSpace({
     code,
-    pointerOverTimeline = false,
-    pointerOverVideo = false,
     hasAnalysis = false,
     isEditing = false,
   }) {
     return code === "Space"
       && hasAnalysis
-      && !isEditing
-      && (pointerOverTimeline || pointerOverVideo);
+      && !isEditing;
+  }
+
+  function stepFrameFromPlayhead(playheadFrame, delta, frameCount) {
+    const maximum = Math.max(0, Math.round(frameCount) - 1);
+    const current = Math.max(0, Math.min(maximum, Math.round(playheadFrame)));
+    return Math.max(0, Math.min(maximum, current + Math.trunc(delta)));
+  }
+
+  function shouldRemoveSelectedSegment(currentSegmentId, targetSegmentId, toggleMembership = false) {
+    return toggleMembership && currentSegmentId === targetSegmentId;
   }
 
   function mediaLayoutOrientation(width, height) {
@@ -201,7 +208,9 @@
     mediaLayoutOrientation,
     mergeSliceUnits,
     previewTimeForFrame,
+    shouldRemoveSelectedSegment,
     shouldTogglePlaybackFromSpace,
+    stepFrameFromPlayhead,
     waveformFrameRange,
     waveformViewportGeometry,
   };

@@ -329,6 +329,7 @@ class SliceJobManager:
                 on_update=self._persist,
                 cancel_event=cancel_event,
                 process_callback=lambda process: self._track_process(job_id, process),
+                low_priority=True,
             )
         except Exception as exc:
             try:

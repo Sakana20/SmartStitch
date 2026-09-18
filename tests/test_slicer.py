@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,7 +12,13 @@ import pytest
 from smartstitch.config import ConfigStore
 from smartstitch.library import LibraryService
 from smartstitch.models import CreateLibraryRequest, TimelineSliceRequest
-from smartstitch.slicer import SliceConflictError, SliceError, TimelineSlicer
+from smartstitch.slicer import (
+    BACKGROUND_SLICE_NICE,
+    SliceConflictError,
+    SliceError,
+    TimelineSlicer,
+    _lower_background_process_priority,
+)
 from smartstitch.scanner import probe_media
 from smartstitch.timeline import TimelineAnalyzer
 
@@ -63,6 +71,56 @@ def setup_slicer(tmp_path, runner):
         review_revision,
         store.content_hash("slice-library"),
     )
+
+
+def test_background_slice_process_has_lower_os_priority(monkeypatch):
+    priority_calls = []
+    policy_calls = []
+    monkeypatch.setattr(
+        "smartstitch.slicer.os.setpriority",
+        lambda which, pid, priority: priority_calls.append((which, pid, priority)),
+    )
+    monkeypatch.setattr(
+        "smartstitch.slicer.shutil.which",
+        lambda name: "/usr/sbin/taskpolicy" if name == "taskpolicy" else None,
+    )
+    monkeypatch.setattr(
+        "smartstitch.slicer.subprocess.run",
+        lambda command, **kwargs: policy_calls.append((command, kwargs)),
+    )
+
+    _lower_background_process_priority(SimpleNamespace(pid=4321))
+
+    if os.name == "posix":
+        assert priority_calls == [(os.PRIO_PROCESS, 4321, BACKGROUND_SLICE_NICE)]
+    else:
+        assert priority_calls == []
+    if sys.platform == "darwin":
+        assert policy_calls[0][0] == [
+            "/usr/sbin/taskpolicy",
+            "-b",
+            "-p",
+            "4321",
+        ]
+    else:
+        assert policy_calls == []
+
+
+def test_background_priority_failure_does_not_break_slicing(monkeypatch):
+    monkeypatch.setattr(
+        "smartstitch.slicer.os.setpriority",
+        lambda *_args: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+    monkeypatch.setattr(
+        "smartstitch.slicer.shutil.which",
+        lambda name: "/usr/sbin/taskpolicy" if name == "taskpolicy" else None,
+    )
+    monkeypatch.setattr(
+        "smartstitch.slicer.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+
+    _lower_background_process_priority(SimpleNamespace(pid=4321))
 
 
 def test_timeline_slicer_exports_every_segment_and_manifest(tmp_path):

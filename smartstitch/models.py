@@ -447,6 +447,19 @@ class StructuredConfigUpdateRequest(BaseModel):
     config: AppConfig
 
 
+class UserProfileUpdateRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=50)
+    switch_user: bool = False
+
+
+class ConfigLockAcquireRequest(BaseModel):
+    browser_session_id: str = Field(min_length=8, max_length=128)
+
+
+class ConfigLockActionRequest(ConfigLockAcquireRequest):
+    lease_token: str = Field(min_length=16, max_length=128)
+
+
 class CloneConfigRequest(BaseModel):
     new_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
     new_name: str

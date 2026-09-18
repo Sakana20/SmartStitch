@@ -38,6 +38,24 @@ def write_config_template(config_directory, tmp_path):
     )
 
 
+def acquire_edit_lease(client, config_id, session_id="test-browser-session"):
+    profile = client.put(
+        "/api/v1/users/me",
+        json={"display_name": "测试用户", "switch_user": False},
+    )
+    assert profile.status_code == 200
+    acquired = client.post(
+        f"/api/v1/configs/{config_id}/lock/acquire",
+        json={"browser_session_id": session_id},
+    )
+    assert acquired.status_code == 200
+    payload = acquired.json()
+    return payload, {
+        "X-SmartStitch-Lease": payload["lease_token"],
+        "X-SmartStitch-Config-Hash": payload["content_hash"],
+    }
+
+
 def test_health_and_config_listing(tmp_path):
     (tmp_path / "config").mkdir()
     client = TestClient(create_app(tmp_path))
@@ -119,15 +137,19 @@ def test_structured_config_update(tmp_path):
         yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8"
     )
     client = TestClient(create_app(tmp_path))
-    loaded = client.get("/api/v1/configs/visual-test").json()["config"]
+    loaded_response = client.get("/api/v1/configs/visual-test").json()
+    loaded = loaded_response["config"]
     assert loaded["schema_version"] == 2
     assert loaded["timeline"] == ["hook", "benefit_1", "ending"]
     assert "benefit_1" in loaded["sources"]
     assert "benefit_video" not in loaded["sources"]
     loaded["name"] = "网页修改后的配置"
     loaded["output"]["fps"] = 25
+    _lease, headers = acquire_edit_lease(client, "visual-test")
     response = client.put(
-        "/api/v1/configs/visual-test/structured", json={"config": loaded}
+        "/api/v1/configs/visual-test/structured",
+        json={"config": loaded},
+        headers=headers,
     )
     assert response.status_code == 200
     saved = client.get("/api/v1/configs/visual-test").json()["config"]
@@ -159,7 +181,8 @@ def test_create_and_delete_config_with_recoverable_backup(tmp_path):
     )
     assert duplicate.status_code == 422
 
-    response = client.delete("/api/v1/configs/summer-sale")
+    _lease, headers = acquire_edit_lease(client, "summer-sale")
+    response = client.delete("/api/v1/configs/summer-sale", headers=headers)
     assert response.status_code == 200
     assert not (config_directory / "summer-sale.yaml").exists()
     backups = list((config_directory / "backups").glob("summer-sale-*.deleted.yaml"))
@@ -212,12 +235,14 @@ def test_create_managed_library_and_add_benefit(tmp_path):
         "end_card",
     }
 
+    _lease, headers = acquire_edit_lease(client, "product-library")
     benefit = client.post(
         "/api/v1/configs/product-library/benefits",
         json={
             "client_request_id": "benefit-request-1",
             "current_config_hash": created["content_hash"],
         },
+        headers=headers,
     )
     assert benefit.status_code == 200
     payload = benefit.json()
@@ -242,6 +267,7 @@ def test_generic_library_pool_api_supports_crud_and_reorder(tmp_path, monkeypatc
         },
     ).json()
 
+    _lease, headers = acquire_edit_lease(client, "generic-library")
     first = client.post(
         "/api/v1/configs/generic-library/pools",
         json={
@@ -249,6 +275,7 @@ def test_generic_library_pool_api_supports_crud_and_reorder(tmp_path, monkeypatc
             "client_request_id": "pool-api-request-1",
             "current_config_hash": created["content_hash"],
         },
+        headers=headers,
     )
     assert first.status_code == 200
     second = client.post(
@@ -258,6 +285,7 @@ def test_generic_library_pool_api_supports_crud_and_reorder(tmp_path, monkeypatc
             "client_request_id": "pool-api-request-2",
             "current_config_hash": first.json()["content_hash"],
         },
+        headers=headers,
     )
     assert second.status_code == 200
 
@@ -286,6 +314,7 @@ def test_generic_library_pool_api_supports_crud_and_reorder(tmp_path, monkeypatc
             "default_weight": 2,
             "current_config_hash": second.json()["content_hash"],
         },
+        headers=headers,
     )
     assert renamed.status_code == 200
     assert renamed.json()["config"]["sources"]["pool_2"]["label"] == "产品展示"
@@ -296,6 +325,7 @@ def test_generic_library_pool_api_supports_crud_and_reorder(tmp_path, monkeypatc
             "timeline": ["pool_2", "pool_1"],
             "current_config_hash": renamed.json()["content_hash"],
         },
+        headers=headers,
     )
     assert reordered.status_code == 200
     assert reordered.json()["timeline"] == ["pool_2", "pool_1"]
@@ -304,6 +334,7 @@ def test_generic_library_pool_api_supports_crud_and_reorder(tmp_path, monkeypatc
         "DELETE",
         "/api/v1/configs/generic-library/pools/pool_1",
         json={"current_config_hash": reordered.json()["content_hash"]},
+        headers=headers,
     )
     assert deleted.status_code == 200
     assert (storage / "通用项目库" / "视频库" / "pool_1").is_dir()
@@ -335,6 +366,7 @@ def test_managed_library_can_replace_overlay_image(tmp_path):
         check=True,
     )
 
+    _lease, headers = acquire_edit_lease(client, "overlay-library")
     response = client.post(
         "/api/v1/configs/overlay-library/overlay-image",
         json={
@@ -342,6 +374,7 @@ def test_managed_library_can_replace_overlay_image(tmp_path):
             "data_base64": base64.b64encode(image.read_bytes()).decode("ascii"),
             "current_config_hash": created["content_hash"],
         },
+        headers=headers,
     )
 
     assert response.status_code == 200
@@ -366,6 +399,7 @@ def test_managed_library_can_replace_overlay_image(tmp_path):
             "data_base64": base64.b64encode(replacement.read_bytes()).decode("ascii"),
             "current_config_hash": payload["content_hash"],
         },
+        headers=headers,
     )
     assert replaced.status_code == 200
     assert len(replaced.json()["backups"]) == 1

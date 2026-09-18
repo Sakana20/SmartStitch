@@ -4,6 +4,7 @@ import hashlib
 import re
 import shutil
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -276,6 +277,9 @@ class ConfigStore:
                 self.backup_directory.mkdir(parents=True, exist_ok=True)
                 stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
                 shutil.copy2(path, self.backup_directory / f"{path.stem}-{stamp}.yaml")
-            temp = path.with_suffix(".yaml.tmp")
-            temp.write_text(text, encoding="utf-8")
-            temp.replace(path)
+            temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                temp.write_text(text, encoding="utf-8")
+                temp.replace(path)
+            finally:
+                temp.unlink(missing_ok=True)
