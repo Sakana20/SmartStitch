@@ -50,6 +50,8 @@ const state = {
     sliceRequestId: null,
     sliceRequestFingerprint: null,
     mergeSelection: [],
+    undoStack: [],
+    redoStack: [],
     sliceTargets: [],
     waveform: {
       controller: null,
@@ -551,6 +553,23 @@ function bindTimelineEvents() {
     const activeElement = document.activeElement;
     const isEditing = ["INPUT", "TEXTAREA", "SELECT"].includes(activeElement?.tagName)
       || Boolean(activeElement?.isContentEditable);
+    const isTextEditing = activeElement?.tagName === "TEXTAREA"
+      || Boolean(activeElement?.isContentEditable)
+      || (activeElement?.tagName === "INPUT" && ![
+        "button", "checkbox", "radio", "range", "color", "file", "submit", "reset",
+      ].includes(activeElement.type));
+    const isTimelineHistoryShortcut = (event.metaKey || event.ctrlKey)
+      && !event.altKey
+      && event.key.toLowerCase() === "z";
+    if (isTimelineHistoryShortcut && !isTextEditing) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) {
+        if (event.shiftKey) redoTimelineEdit();
+        else undoTimelineEdit();
+      }
+      return;
+    }
     if (event.code === "Space" && !isEditing) {
       event.preventDefault();
       event.stopPropagation();
@@ -706,6 +725,7 @@ function clearTimelineAnalysisView() {
   state.timeline.selectedSegmentId = null;
   state.timeline.sliceUnits = [];
   state.timeline.mergeSelection = [];
+  resetTimelineHistory();
   const video = $("#timelineVideo");
   video.pause();
   video.removeAttribute("src");
@@ -845,6 +865,7 @@ async function analyzeTimelineSource(sourceIndex) {
   state.timeline.selectedSegmentId = null;
   state.timeline.sliceUnits = [];
   state.timeline.mergeSelection = [];
+  resetTimelineHistory();
   resetTimelineWaveform();
   stopTimelineVideoSync();
   const video = $("#timelineVideo");
@@ -885,6 +906,7 @@ function timelineActiveBreakpoints() {
 function toggleTimelineAudioLock() {
   const analysis = state.timeline.analysis;
   if (!analysis?.audio?.has_audio) return;
+  recordTimelineEdit();
   state.timeline.audioLocked = !state.timeline.audioLocked;
   const activeFrames = new Set(timelineActiveBreakpoints().map(point => point.frame_index));
   setSelectedBreakpointFrames(
@@ -907,6 +929,62 @@ function updateTimelineMediaLayout(width, height) {
 
 function newSliceUnit(segmentIds, category = "") {
   return { id: `unit-${clientRequestId()}`, segmentIds: [...segmentIds], category };
+}
+
+function timelineEditSnapshot() {
+  return structuredClone({
+    audioLocked: state.timeline.audioLocked,
+    breakpoints: state.timeline.breakpoints,
+    selectedFrame: state.timeline.selectedFrame,
+    selectedFrames: state.timeline.selectedFrames,
+    selectedSegmentId: state.timeline.selectedSegmentId,
+    sliceUnits: state.timeline.sliceUnits,
+    mergeSelection: state.timeline.mergeSelection,
+    reviewSaved: state.timeline.reviewSaved,
+    reviewRevision: state.timeline.reviewRevision,
+  });
+}
+
+function resetTimelineHistory() {
+  state.timeline.undoStack = [];
+  state.timeline.redoStack = [];
+}
+
+function recordTimelineEdit() {
+  state.timeline.undoStack.push(timelineEditSnapshot());
+  if (state.timeline.undoStack.length > 100) state.timeline.undoStack.shift();
+  state.timeline.redoStack = [];
+}
+
+function restoreTimelineEditSnapshot(snapshot, message) {
+  state.timeline.audioLocked = snapshot.audioLocked;
+  state.timeline.breakpoints = structuredClone(snapshot.breakpoints);
+  state.timeline.selectedFrame = snapshot.selectedFrame;
+  state.timeline.selectedFrames = [...snapshot.selectedFrames];
+  state.timeline.selectedSegmentId = snapshot.selectedSegmentId;
+  state.timeline.sliceUnits = structuredClone(snapshot.sliceUnits);
+  state.timeline.mergeSelection = [...snapshot.mergeSelection];
+  state.timeline.reviewSaved = snapshot.reviewSaved;
+  state.timeline.reviewRevision = snapshot.reviewRevision;
+  $("#timelineVideo").pause();
+  $("#timelineSliceResult").textContent = message;
+  $("#timelineSliceResult").className = "timeline-slice-result";
+  renderTimeline();
+  toast(message);
+}
+
+function undoTimelineEdit() {
+  const snapshot = state.timeline.undoStack.pop();
+  if (!snapshot) return;
+  state.timeline.redoStack.push(timelineEditSnapshot());
+  restoreTimelineEditSnapshot(snapshot, "已撤销上一步操作");
+}
+
+function redoTimelineEdit() {
+  const snapshot = state.timeline.redoStack.pop();
+  if (!snapshot) return;
+  state.timeline.undoStack.push(timelineEditSnapshot());
+  restoreTimelineEditSnapshot(snapshot, "已重做上一步操作");
 }
 
 function sliceUnitForSegment(segmentId) {
@@ -1467,6 +1545,7 @@ function finishTimelineDrag(event) {
     if (occupied) {
       setSelectedBreakpointFrames([occupied.frame_index]);
     } else if (drag.targetFrame !== drag.originalFrame) {
+      recordTimelineEdit();
       drag.point.frame_index = drag.targetFrame;
       drag.point.time_seconds = drag.targetFrame / state.timeline.analysis.fps;
       drag.point.review_status = "human_adjusted";
@@ -1646,6 +1725,7 @@ function addTimelineBreakpoint(frame, reviewStatus) {
     selectTimelineBreakpoint(frame);
     return;
   }
+  recordTimelineEdit();
   state.timeline.breakpoints.push({
     frame_index: frame,
     time_seconds: frame / analysis.fps,
@@ -1666,6 +1746,8 @@ function moveSelectedBreakpoint(frame) {
   const point = state.timeline.breakpoints.find(item => item.frame_index === state.timeline.selectedFrame);
   if (!point) return;
   if (state.timeline.breakpoints.some(item => item !== point && item.frame_index === frame)) return;
+  if (frame === point.frame_index) return;
+  recordTimelineEdit();
   point.frame_index = frame;
   point.time_seconds = frame / analysis.fps;
   point.review_status = "human_adjusted";
@@ -1680,6 +1762,7 @@ function moveSelectedBreakpoint(frame) {
 function deleteSelectedBreakpoints() {
   const selected = new Set(state.timeline.selectedFrames);
   if (!selected.size) return;
+  recordTimelineEdit();
   state.timeline.breakpoints = state.timeline.breakpoints.filter(
     point => !selected.has(point.frame_index),
   );
@@ -1825,7 +1908,10 @@ function selectTimelineSegment(segmentId, { scrollIntoView = false, toggleMember
     removeSliceSegment(segment.id);
     return;
   }
-  if (!sliceUnitForSegment(segment.id)) state.timeline.sliceUnits.push(newSliceUnit([segment.id]));
+  if (!sliceUnitForSegment(segment.id)) {
+    recordTimelineEdit();
+    state.timeline.sliceUnits.push(newSliceUnit([segment.id]));
+  }
   setSelectedBreakpointFrames([]);
   state.timeline.selectedSegmentId = segment.id;
   $("#timelineVideo").pause();
@@ -1861,6 +1947,7 @@ function mergeSelectedSliceUnits() {
   const segmentIds = [...new Set(selectedUnits.flatMap(unit => unit.segmentIds))];
   if (segmentIds.length > 20) return toast("一个组合最多包含 20 个源片段", true);
 
+  recordTimelineEdit();
   const result = TimelineMath.mergeSliceUnits({
     units: state.timeline.sliceUnits,
     selectedUnitIds: state.timeline.mergeSelection,
@@ -1882,6 +1969,7 @@ function clearMergeSelection() {
 function splitSliceUnit(unitId) {
   const unit = state.timeline.sliceUnits.find(item => item.id === unitId);
   if (!unit || unit.segmentIds.length < 2) return;
+  recordTimelineEdit();
   state.timeline.sliceUnits = state.timeline.sliceUnits.flatMap(item => (
     item.id === unitId
       ? item.segmentIds.map(segmentId => newSliceUnit([segmentId], item.category))
@@ -1892,9 +1980,10 @@ function splitSliceUnit(unitId) {
   renderTimeline();
 }
 
-function removeSliceUnit(unitId) {
+function removeSliceUnit(unitId, { recordHistory = true } = {}) {
   const unit = state.timeline.sliceUnits.find(item => item.id === unitId);
   if (!unit) return;
+  if (recordHistory) recordTimelineEdit();
   state.timeline.sliceUnits = state.timeline.sliceUnits.filter(item => item.id !== unitId);
   state.timeline.mergeSelection = state.timeline.mergeSelection.filter(id => id !== unitId);
   if (unit.segmentIds.includes(state.timeline.selectedSegmentId)) state.timeline.selectedSegmentId = null;
@@ -1904,8 +1993,9 @@ function removeSliceUnit(unitId) {
 function removeSliceSegment(segmentId) {
   const unit = sliceUnitForSegment(segmentId);
   if (!unit) return;
+  recordTimelineEdit();
   if (unit.segmentIds.length === 1) {
-    removeSliceUnit(unit.id);
+    removeSliceUnit(unit.id, { recordHistory: false });
     return;
   }
   unit.segmentIds = unit.segmentIds.filter(id => id !== segmentId);
@@ -1996,6 +2086,8 @@ function renderSegmentList() {
     select.addEventListener("change", event => {
       const unit = state.timeline.sliceUnits.find(item => item.id === event.target.dataset.unitCategory);
       if (!unit) return;
+      if (unit.category === event.target.value) return;
+      recordTimelineEdit();
       unit.category = event.target.value;
       state.timeline.selectedSegmentId = unit.segmentIds[0] || null;
       renderTimeline();
@@ -2104,6 +2196,7 @@ async function exportTimelineSlices() {
     state.timeline.sliceRequestFingerprint = null;
     state.timeline.sliceUnits = [];
     state.timeline.mergeSelection = [];
+    resetTimelineHistory();
     resultElement.textContent = `已加入切片队列 #${result.short_id}，可继续审核下一条视频`;
     resultElement.className = "timeline-slice-result success";
     setTimelineStatus("已加入队列", "success");
@@ -2272,6 +2365,7 @@ async function selectConfig(id) {
     state.timeline.sliceUnits = [];
     state.timeline.mergeSelection = [];
     state.timeline.selectedSegmentId = null;
+    resetTimelineHistory();
     $("#heroConfigName").textContent = state.config.name;
     $("#countInput").value = state.config.batch.default_count;
     $("#concurrencyInput").value = state.config.batch.concurrency;

@@ -9,7 +9,7 @@ const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260918-51"/,
+  /href="\/styles\.css\?v=20260918-52"/,
   "配置协作锁更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -394,8 +394,23 @@ assert.doesNotMatch(
 );
 assert.match(
   app,
-  /function removeSliceSegment\(segmentId\)[\s\S]*unit\.segmentIds\.length === 1[\s\S]*removeSliceUnit\(unit\.id\)[\s\S]*unit\.segmentIds = unit\.segmentIds\.filter/,
+  /function removeSliceSegment\(segmentId\)[\s\S]*unit\.segmentIds\.length === 1[\s\S]*removeSliceUnit\(unit\.id, \{ recordHistory: false \}\)[\s\S]*unit\.segmentIds = unit\.segmentIds\.filter/,
   "移除组合中的片段时必须保留其他组合成员",
+);
+assert.match(
+  app,
+  /isTimelineHistoryShortcut = \(event\.metaKey \|\| event\.ctrlKey\)[\s\S]*event\.key\.toLowerCase\(\) === "z"[\s\S]*if \(event\.shiftKey\) redoTimelineEdit\(\);[\s\S]*else undoTimelineEdit\(\);/,
+  "切片页必须支持 Command+Z 撤销和 Command+Shift+Z 重做",
+);
+assert.match(
+  app,
+  /function timelineEditSnapshot\(\)[\s\S]*breakpoints:[\s\S]*sliceUnits:[\s\S]*function recordTimelineEdit\(\)[\s\S]*redoStack = \[\][\s\S]*function restoreTimelineEditSnapshot/,
+  "撤销历史必须同时覆盖断点和待切片编辑状态",
+);
+assert.match(
+  html,
+  /⌘Z 撤销 · ⌘⇧Z 重做/,
+  "时间线手势提示必须展示撤销和重做快捷键",
 );
 
 console.log("frontend timeline layout contract ok");
