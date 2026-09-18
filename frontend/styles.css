@@ -324,7 +324,7 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .job-count { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); }
 
 .drawer { position: fixed; inset: 0; z-index: 20; visibility: hidden; pointer-events: none; }.drawer.open { visibility: visible; pointer-events: auto; }
-.drawer-backdrop, .modal-backdrop { position: absolute; inset: 0; background: rgba(15,24,19,.32); opacity: 0; transition: .25s; backdrop-filter: blur(3px); }.drawer.open .drawer-backdrop, .modal.open .modal-backdrop { opacity: 1; }
+.drawer-backdrop, .modal-backdrop { position: absolute; inset: 0; background: rgba(15,24,19,.42); opacity: 0; transition: opacity .18s ease; }.drawer.open .drawer-backdrop, .modal.open .modal-backdrop { opacity: 1; }
 .drawer aside { position: absolute; right: 0; top: 0; bottom: 0; width: min(580px, 93vw); padding: 38px; background: #f8f8f4; box-shadow: -20px 0 70px rgba(20,30,24,.16); transform: translateX(100%); transition: .3s ease; overflow: auto; }.drawer.open aside { transform: translateX(0); }
 .drawer-close { border: 0; background: rgba(23,33,28,.08); width: 34px; height: 34px; border-radius: 50%; font-size: 20px; line-height: 1; float: right; }
 .job-detail-header { padding-top: 40px; }.job-detail-header h2 { font-family: Georgia, "Songti SC", serif; font-size: 28px; margin: 9px 0; }.job-detail-header p { color: var(--muted); font-size: 11px; word-break: break-all; }
@@ -342,6 +342,9 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 
 .modal { position: fixed; inset: 0; z-index: 30; visibility: hidden; pointer-events: none; }.modal.open { visibility: visible; pointer-events: auto; }
 .modal-card { position: relative; width: min(1000px, calc(100vw - 40px)); margin: 4vh auto; background: #f8f8f4; border-radius: 22px; padding: 30px; box-shadow: 0 30px 100px rgba(20,30,24,.25); transform: translateY(10px); opacity: 0; transition: .25s; }.modal.open .modal-card { opacity: 1; transform: none; }.modal-heading { display: flex; justify-content: space-between; align-items: flex-start; }.modal-heading h2 { font-family: Georgia, "Songti SC", serif; margin: 0; }.modal-card > p { color: var(--muted); font-size: 12px; }
+.config-modal-open .noise { display: none; }
+.config-modal-open .orbit { animation-play-state: paused; }
+.config-modal-open .panel, .config-modal-open .timeline-source-picker, .config-modal-open .timeline-slice-queue { backdrop-filter: none; }
 .compact-modal-card { width: min(520px, calc(100vw - 40px)); margin-top: 14vh; }
 .compact-modal-card > p { line-height: 1.7; margin-bottom: 24px; }
 .compact-modal-card .actions .button { flex: none; }
@@ -352,7 +355,7 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .library-path-preview span { color: var(--muted); font-size: 9px; font-weight: 750; letter-spacing: .08em; }
 .library-path-preview strong { color: var(--green); font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 .library-path-preview small { color: var(--muted); font-size: 9px; line-height: 1.65; }
-.config-modal-card { width: min(1080px, calc(100vw - 40px)); height: 94vh; margin: 3vh auto; padding: 24px; display: flex; flex-direction: column; }
+.config-modal-card { width: min(1080px, calc(100vw - 40px)); height: 94vh; margin: 3vh auto; padding: 24px; display: flex; flex-direction: column; transform: none; transition: opacity .12s ease; }
 .config-modal-card > .modal-heading { align-items: center; }
 .config-modal-card > .modal-heading .eyebrow { margin-bottom: 5px; }
 .config-modal-card > .modal-heading h2 { font-size: 24px; }

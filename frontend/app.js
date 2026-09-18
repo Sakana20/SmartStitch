@@ -2867,9 +2867,8 @@ async function openConfig() {
     state.configHash = acquired.content_hash;
     state.yaml = acquired.yaml_text;
     $("#yamlEditor").value = state.yaml;
-    renderSimpleConfig();
-    renderVisualConfig();
     restoreConfigUiPreferences();
+    document.body.classList.add("config-modal-open");
     $("#configModal").classList.add("open");
     $("#configModal").setAttribute("aria-hidden","false");
     requestAnimationFrame(restoreConfigEditorScroll);
@@ -2894,6 +2893,7 @@ async function closeConfig({ skipConfirm = false } = {}) {
   state.previewAudioCleanup = null;
   $("#configModal").classList.remove("open");
   $("#configModal").setAttribute("aria-hidden","true");
+  document.body.classList.remove("config-modal-open");
   await releaseConfigLease();
   return true;
 }
@@ -2948,8 +2948,6 @@ function saveConfigUiPreferences() {
 }
 
 function restoreConfigUiPreferences() {
-  const preferences = readConfigUiPreferences();
-  applyAdvancedSectionPreferences(preferences);
   setConfigMode("simple");
 }
 

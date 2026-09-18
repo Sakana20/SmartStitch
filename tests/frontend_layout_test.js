@@ -6,10 +6,13 @@ const root = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "frontend/index.html"), "utf8");
 const css = fs.readFileSync(path.join(root, "frontend/styles.css"), "utf8");
 const app = fs.readFileSync(path.join(root, "frontend/app.js"), "utf8");
+const openConfigSource = app.match(
+  /async function openConfig\(\) \{([\s\S]*?)\n\}\nfunction configEditorIsDirty/,
+)?.[1] || "";
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260918-52"/,
+  /href="\/styles\.css\?v=20260918-53"/,
   "配置协作锁更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -46,6 +49,21 @@ assert.match(
   /\.system-pill, \.user-profile-pill\s*\{[^}]*min-height:\s*40px[^}]*font-size:\s*12px/,
   "用户名按钮必须与 FFmpeg 状态卡片使用一致的高度和字号",
 );
+assert.doesNotMatch(
+  css,
+  /\.modal-backdrop\s*\{[^}]*backdrop-filter|\.drawer-backdrop, \.modal-backdrop\s*\{[^}]*backdrop-filter/,
+  "全屏弹窗遮罩不得启用持续 GPU 合成的背景模糊",
+);
+assert.match(
+  css,
+  /\.config-modal-open \.noise\s*\{[^}]*display:\s*none[^}]*\}[\s\S]*\.config-modal-open \.orbit\s*\{[^}]*animation-play-state:\s*paused[\s\S]*\.config-modal-open \.panel[^}]*backdrop-filter:\s*none/,
+  "配置弹窗打开时必须停止底层动态纹理、动画与次级模糊合成",
+);
+assert.match(
+  css,
+  /\.config-modal-card\s*\{[^}]*transform:\s*none;[^}]*transition:\s*opacity/,
+  "大尺寸配置卡片不得使用整层 transform 动画",
+);
 assert.match(
   app,
   /lock\/acquire[\s\S]*lock\/takeover[\s\S]*setInterval\(renewConfigLease, 15000\)[\s\S]*lock\/release/,
@@ -55,6 +73,17 @@ assert.match(
   app,
   /X-SmartStitch-Lease[\s\S]*X-SmartStitch-Config-Hash/,
   "配置写入必须同时提交租约令牌和配置版本",
+);
+assert.ok(openConfigSource, "必须能定位配置弹窗打开逻辑");
+assert.doesNotMatch(
+  openConfigSource,
+  /renderSimpleConfig\(\)|renderVisualConfig\(\)/,
+  "打开配置时只应通过当前模式懒渲染，不得同时构建隐藏的高级编辑器",
+);
+assert.match(
+  openConfigSource,
+  /restoreConfigUiPreferences\(\)[\s\S]*classList\.add\("config-modal-open"\)/,
+  "配置弹窗打开时必须启用底层静态模式",
 );
 assert.match(
   html,
@@ -73,8 +102,8 @@ assert.match(
 );
 assert.match(
   app,
-  /function restoreConfigUiPreferences\(\)\s*\{[\s\S]*applyAdvancedSectionPreferences\(preferences\);[\s\S]*setConfigMode\("simple"\);/,
-  "每次打开配置管理必须默认进入简单模式",
+  /function restoreConfigUiPreferences\(\)\s*\{\s*setConfigMode\("simple"\);\s*\}/,
+  "每次打开配置管理必须默认进入简单模式，不提前扫描隐藏的高级编辑器",
 );
 assert.match(
   app,
