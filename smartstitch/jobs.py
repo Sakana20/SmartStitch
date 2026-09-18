@@ -115,6 +115,10 @@ class JobManager:
                     "output_path": str(batch_directory / planned.output_name),
                     "estimated_duration": planned.estimated_duration,
                     "actual_duration": None,
+                    "planned_video_encoder": config.output.video_codec,
+                    "actual_video_encoder": None,
+                    "hardware_acceleration": False,
+                    "encoder_fallback_reason": None,
                     "attempts": 0,
                     "error": None,
                     "selections": {
@@ -299,6 +303,10 @@ class JobManager:
                     status="succeeded",
                     progress=1.0,
                     actual_duration=result["actual_duration"],
+                    planned_video_encoder=result["planned_video_encoder"],
+                    actual_video_encoder=result["actual_video_encoder"],
+                    hardware_acceleration=result["hardware_acceleration"],
+                    encoder_fallback_reason=result["encoder_fallback_reason"],
                     error=None,
                 )
                 return

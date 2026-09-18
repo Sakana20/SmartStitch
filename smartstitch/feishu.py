@@ -139,9 +139,10 @@ def parse_base_url(url: str) -> tuple[str, str | None]:
     if parsed.scheme not in {"http", "https"}:
         raise FeishuError("请填写完整的飞书多维表格链接")
     parts = [part for part in parsed.path.split("/") if part]
-    if "base" not in parts or parts.index("base") + 1 >= len(parts):
-        raise FeishuError("请使用包含 /base/ 的飞书多维表格直链")
-    token = parts[parts.index("base") + 1]
+    marker = next((value for value in ("base", "wiki") if value in parts), None)
+    if marker is None or parts.index(marker) + 1 >= len(parts):
+        raise FeishuError("链接不是飞书多维表格链接")
+    token = parts[parts.index(marker) + 1]
     table_id = urllib.parse.parse_qs(parsed.query).get("table", [None])[0]
     return token, table_id
 
@@ -162,6 +163,20 @@ class FeishuBaseClient:
         self._token = ""
         self._token_expires_at = 0.0
         self._lock = threading.RLock()
+
+    def resolve_base_url(self, url: str) -> tuple[str, str | None]:
+        token, table_id = parse_base_url(url)
+        parts = [part for part in urllib.parse.urlparse(url).path.split("/") if part]
+        if "wiki" not in parts:
+            return token, table_id
+        query = urllib.parse.urlencode({"token": token})
+        data = self._request("GET", f"/wiki/v2/spaces/node_by_token?{query}")
+        node = data.get("node") if isinstance(data.get("node"), dict) else data
+        obj_type = str(node.get("obj_type") or "")
+        base_token = str(node.get("obj_token") or "")
+        if obj_type not in {"bitable", "base"} or not base_token:
+            raise FeishuError("这个知识库链接指向的不是飞书多维表格")
+        return base_token, table_id
 
     def list_tables(self, base_token: str) -> list[dict[str, object]]:
         items = self._list_all(f"/base/v3/bases/{base_token}/tables", 300)
@@ -411,7 +426,7 @@ class FeishuSyncManager:
             target = job["feishu_base_sync"]
             app_id, app_secret = self.settings.credentials()
             client = self.client_factory(app_id, app_secret)
-            base_token, linked_table_id = parse_base_url(target["base_url"])
+            base_token, linked_table_id = client.resolve_base_url(target["base_url"])
             table_id = str(target.get("table_id") or linked_table_id or "")
             tables = client.list_tables(base_token)
             selected = next(

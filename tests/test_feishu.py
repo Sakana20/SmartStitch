@@ -28,6 +28,9 @@ class FakeFeishuBaseClient:
     def list_tables(self, _token):
         return [{"table_id": "tbl123", "name": "成片记录"}]
 
+    def resolve_base_url(self, url):
+        return parse_base_url(url)
+
     def ensure_text_fields(self, _token, _table_id, field_names):
         self.fields.update(field_names)
 
@@ -111,12 +114,15 @@ def test_parse_base_url_extracts_base_and_table():
         "bascAbc123",
         None,
     )
-    with pytest.raises(FeishuError, match="/base/"):
+    assert parse_base_url(
+        "https://example.feishu.cn/wiki/wikcn123?table=tbl001&view=vew001"
+    ) == ("wikcn123", "tbl001")
+    with pytest.raises(FeishuError, match="不是飞书多维表格"):
         parse_base_url("https://example.feishu.cn/sheets/sht123")
 
 
 def test_enabled_sync_config_requires_a_direct_base_link():
-    with pytest.raises(ValueError, match="/base/"):
+    with pytest.raises(ValueError, match="/base/ 或 /wiki/"):
         FeishuBaseSyncConfig(
             enabled=True,
             base_url="javascript:alert(1)",
@@ -152,6 +158,21 @@ def test_base_client_uses_v3_field_and_record_contracts(monkeypatch):
     assert calls[4][2] == {
         "update_records": {"rec123": {"输出文件名": "b.mp4"}}
     }
+
+
+def test_base_client_resolves_wiki_wrapper_to_base_token(monkeypatch):
+    client = FeishuBaseClient("cli_demo", "secret")
+
+    def request(method, path, payload=None):
+        assert method == "GET"
+        assert path == "/wiki/v2/spaces/node_by_token?token=wikcn123"
+        assert payload is None
+        return {"node": {"obj_type": "bitable", "obj_token": "basc123"}}
+
+    monkeypatch.setattr(client, "_request", request)
+    assert client.resolve_base_url(
+        "https://example.feishu.cn/wiki/wikcn123?table=tbl123&view=vew123"
+    ) == ("basc123", "tbl123")
 
 
 def test_settings_store_never_returns_secret_and_uses_private_permissions(tmp_path):
@@ -213,6 +234,9 @@ def test_sync_manager_retries_transient_errors(tmp_path):
     calls = 0
 
     class FlakyClient:
+        def resolve_base_url(self, url):
+            return fake_client.resolve_base_url(url)
+
         def list_tables(self, token):
             nonlocal calls
             calls += 1

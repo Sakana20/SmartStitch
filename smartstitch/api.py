@@ -29,7 +29,6 @@ from .feishu import (
     FeishuError,
     FeishuSettingsStore,
     FeishuSyncManager,
-    parse_base_url,
 )
 from .jobs import JobManager, TERMINAL_STATES
 from .library import LibraryConflictError, LibraryError, LibraryService, pick_directory
@@ -243,8 +242,8 @@ def create_app(
             app_id, app_secret = feishu_settings.credentials(
                 request.app_id, request.app_secret
             )
-            base_token, linked_table_id = parse_base_url(request.base_url)
             client = app.state.feishu_client_factory(app_id, app_secret)
+            base_token, linked_table_id = client.resolve_base_url(request.base_url)
             tables = client.list_tables(base_token)
             selected_table_id = linked_table_id
             if selected_table_id and not any(

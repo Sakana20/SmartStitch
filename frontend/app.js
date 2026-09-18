@@ -3366,7 +3366,7 @@ function renderSimpleConfig() {
         <div class="simple-feishu-grid">
           <label class="simple-large-field"><span>App ID <small>全局凭证，所有项目共用</small></span><input id="simpleFeishuAppId" value="${escapeHtml(state.feishuSettingsDraft.app_id)}" placeholder="cli_xxxxxxxxxxxxx" ${feishu.enabled ? "" : "disabled"}></label>
           <label class="simple-large-field"><span>App Secret <small>只允许更换，不会读回原值</small></span><input id="simpleFeishuAppSecret" type="password" value="${escapeHtml(state.feishuSecretDraft)}" placeholder="${escapeHtml(feishuSecretHint)}" autocomplete="new-password" ${feishu.enabled ? "" : "disabled"}></label>
-          <label class="simple-large-field simple-feishu-url"><span>多维表格直链</span><input id="simpleFeishuUrl" value="${escapeHtml(feishu.base_url)}" placeholder="https://example.feishu.cn/base/..." ${feishu.enabled ? "" : "disabled"}></label>
+          <label class="simple-large-field simple-feishu-url"><span>多维表格链接</span><input id="simpleFeishuUrl" value="${escapeHtml(feishu.base_url)}" placeholder="支持 /wiki/... 或 /base/... 链接" ${feishu.enabled ? "" : "disabled"}></label>
           <label class="simple-large-field"><span>数据表</span><select id="simpleFeishuTable" ${feishu.enabled ? "" : "disabled"}>${feishuTableOptions(feishu.table_id)}</select></label>
         </div>
         <div class="simple-feishu-actions"><button id="simpleTestFeishuBtn" class="button secondary small" type="button" ${feishu.enabled ? "" : "disabled"}>测试连接</button><span class="${state.feishuConnection ? "ok" : ""}">${escapeHtml(feishuConnectionStatus())}</span><small>Secret 仅保存在本机，不会进入成片任务快照。</small></div>
@@ -3802,7 +3802,7 @@ function renderVisualConfig() {
         <div class="config-field"><label>同步状态</label><div class="config-switch"><span>任务结束后自动同步</span><input id="advancedFeishuEnabled" class="switch-input" type="checkbox" data-config-path="output.feishu_base_sync.enabled" data-config-type="boolean" ${feishu.enabled ? "checked" : ""}></div></div>
         <div class="config-field"><label>App ID <small>全局凭证</small></label><input id="advancedFeishuAppId" value="${escapeHtml(state.feishuSettingsDraft.app_id)}" placeholder="cli_xxxxxxxxxxxxx"></div>
         <div class="config-field"><label>App Secret <small>不会读回</small></label><input id="advancedFeishuAppSecret" type="password" value="${escapeHtml(state.feishuSecretDraft)}" placeholder="${escapeHtml(feishuSecretHint)}" autocomplete="new-password"></div>
-        <div class="config-field wide"><label>多维表格直链</label><input id="advancedFeishuUrl" data-config-path="output.feishu_base_sync.base_url" data-config-type="string" value="${escapeHtml(feishu.base_url)}" placeholder="https://example.feishu.cn/base/..."></div>
+        <div class="config-field wide"><label>多维表格链接</label><input id="advancedFeishuUrl" data-config-path="output.feishu_base_sync.base_url" data-config-type="string" value="${escapeHtml(feishu.base_url)}" placeholder="支持 /wiki/... 或 /base/... 链接"></div>
         <div class="config-field"><label>数据表</label><select id="advancedFeishuTable" data-config-path="output.feishu_base_sync.table_id" data-config-type="string">${feishuTableOptions(feishu.table_id)}</select></div>
         ${configSelect("同步条目", "output.feishu_base_sync.row_scope", feishu.row_scope, [["all_items", "成功与失败都同步"], ["succeeded_only", "只同步成功成片"]])}
         <div class="config-field"><label>写入方式</label><code class="managed-pool-path">upsert · 稳定键去重</code></div>

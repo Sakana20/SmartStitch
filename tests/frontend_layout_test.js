@@ -15,8 +15,8 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260918-61"/,
-  "飞书多维表格同步卡片更新后必须刷新静态资源缓存版本",
+  /href="\/styles\.css\?v=20260918-62"/,
+  "飞书多维表格 Wiki 链接支持更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);

@@ -15,6 +15,56 @@ class RenderError(RuntimeError):
 
 
 ProgressCallback = Callable[[float], None]
+SOFTWARE_VIDEO_ENCODER = "libx264"
+VIDEOTOOLBOX_VIDEO_ENCODER = "h264_videotoolbox"
+VIDEOTOOLBOX_QUALITY = 65
+_videotoolbox_capability_lock = threading.Lock()
+_videotoolbox_capability_cache: tuple[bool, str | None] | None = None
+
+
+def _videotoolbox_capability() -> tuple[bool, str | None]:
+    """Return whether this FFmpeg supports both VideoToolbox decode and encode."""
+    global _videotoolbox_capability_cache
+    with _videotoolbox_capability_lock:
+        if _videotoolbox_capability_cache is not None:
+            return _videotoolbox_capability_cache
+        try:
+            encoders = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            accelerators = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-hwaccels"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            _videotoolbox_capability_cache = (False, str(exc))
+            return _videotoolbox_capability_cache
+
+        encoder_output = f"{encoders.stdout}\n{encoders.stderr}"
+        accelerator_output = f"{accelerators.stdout}\n{accelerators.stderr}"
+        if encoders.returncode != 0:
+            reason = encoders.stderr.strip() or "无法读取 FFmpeg 编码器列表"
+            _videotoolbox_capability_cache = (False, reason)
+        elif accelerators.returncode != 0:
+            reason = accelerators.stderr.strip() or "无法读取 FFmpeg 硬件加速列表"
+            _videotoolbox_capability_cache = (False, reason)
+        elif VIDEOTOOLBOX_VIDEO_ENCODER not in encoder_output:
+            _videotoolbox_capability_cache = (
+                False,
+                f"FFmpeg 未提供 {VIDEOTOOLBOX_VIDEO_ENCODER}",
+            )
+        elif "videotoolbox" not in accelerator_output:
+            _videotoolbox_capability_cache = (False, "FFmpeg 未提供 videotoolbox 硬件解码")
+        else:
+            _videotoolbox_capability_cache = (True, None)
+        return _videotoolbox_capability_cache
 
 
 def _escape_filter_value(value: str) -> str:
@@ -93,6 +143,9 @@ def build_ffmpeg_command(
     config: AppConfig,
     item: PlanItem,
     output_path: Path,
+    *,
+    video_codec: str | None = None,
+    hardware_decode: bool | None = None,
 ) -> tuple[list[str], float]:
     timeline: list[tuple[str, Asset]] = []
     for category in config.timeline:
@@ -102,12 +155,18 @@ def build_ffmpeg_command(
     if not timeline:
         raise RenderError("时间线为空")
 
+    selected_video_codec = video_codec or config.output.video_codec
+    if hardware_decode is None:
+        hardware_decode = selected_video_codec == VIDEOTOOLBOX_VIDEO_ENCODER
+
     command = ["ffmpeg", "-hide_banner", "-y"]
     for category, asset in timeline:
         if asset.media_type == "image":
             duration = asset.probe.duration if asset.probe else config.sources[category].image_duration_seconds
             command.extend(["-loop", "1", "-t", f"{duration:.6f}", "-i", asset.path])
         else:
+            if hardware_decode:
+                command.extend(["-hwaccel", "videotoolbox"])
             command.extend(["-i", asset.path])
 
     overlay_index: int | None = None
@@ -166,15 +225,24 @@ def build_ffmpeg_command(
             "-map",
             "[outa]",
             "-c:v",
-            config.output.video_codec,
-            "-preset",
-            config.output.video_preset,
+            selected_video_codec,
         ]
     )
-    if config.output.rate_control == "vbr":
-        command.extend(["-b:v", f"{config.output.video_bitrate_kbps}k"])
+    if selected_video_codec == VIDEOTOOLBOX_VIDEO_ENCODER:
+        command.extend(
+            [
+                "-q:v",
+                str(VIDEOTOOLBOX_QUALITY),
+                "-profile:v",
+                "high",
+            ]
+        )
     else:
-        command.extend(["-crf", str(config.output.crf)])
+        command.extend(["-preset", config.output.video_preset])
+        if config.output.rate_control == "vbr":
+            command.extend(["-b:v", f"{config.output.video_bitrate_kbps}k"])
+        else:
+            command.extend(["-crf", str(config.output.crf)])
     command.extend(
         [
             "-pix_fmt",
@@ -207,17 +275,14 @@ def _stderr_reader(stream: object, sink: queue.Queue[str]) -> None:
         stream.close()
 
 
-def render_item(
-    config: AppConfig,
-    item: PlanItem,
-    output_path: Path,
+def _run_ffmpeg_command(
+    command: list[str],
+    duration: float,
+    temp_path: Path,
     cancel_event: threading.Event,
-    on_progress: ProgressCallback | None = None,
-    process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
-) -> dict[str, object]:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = output_path.with_name(f".{output_path.stem}.{os.getpid()}.part.mp4")
-    command, duration = build_ffmpeg_command(config, item, temp_path)
+    on_progress: ProgressCallback | None,
+    process_callback: Callable[[subprocess.Popen[str] | None], None] | None,
+) -> None:
     stderr_lines: queue.Queue[str] = queue.Queue()
     process = subprocess.Popen(
         command,
@@ -271,6 +336,8 @@ def render_item(
         temp_path.unlink(missing_ok=True)
         raise RenderError(stderr_tail or f"FFmpeg 退出码 {return_code}")
 
+
+def _probe_rendered_duration(temp_path: Path, expected_duration: float) -> float:
     probe = subprocess.run(
         [
             "ffprobe",
@@ -289,10 +356,111 @@ def render_item(
     if probe.returncode != 0:
         temp_path.unlink(missing_ok=True)
         raise RenderError(probe.stderr.strip() or "输出文件校验失败")
-    actual_duration = float(probe.stdout.strip())
-    if actual_duration <= 0 or abs(actual_duration - duration) > max(1.0, duration * 0.03):
+    try:
+        actual_duration = float(probe.stdout.strip())
+    except ValueError as exc:
         temp_path.unlink(missing_ok=True)
-        raise RenderError(f"输出时长异常: 预计 {duration:.3f}s，实际 {actual_duration:.3f}s")
+        raise RenderError("ffprobe 返回了无效的输出时长") from exc
+    if actual_duration <= 0 or abs(actual_duration - expected_duration) > max(
+        1.0, expected_duration * 0.03
+    ):
+        temp_path.unlink(missing_ok=True)
+        raise RenderError(
+            f"输出时长异常: 预计 {expected_duration:.3f}s，实际 {actual_duration:.3f}s"
+        )
+    return actual_duration
+
+
+def render_item(
+    config: AppConfig,
+    item: PlanItem,
+    output_path: Path,
+    cancel_event: threading.Event,
+    on_progress: ProgressCallback | None = None,
+    process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+) -> dict[str, object]:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_name(f".{output_path.stem}.{os.getpid()}.part.mp4")
+    planned_video_encoder = config.output.video_codec
+    actual_video_encoder = planned_video_encoder
+    hardware_acceleration = False
+    fallback_reason: str | None = None
+
+    if planned_video_encoder == VIDEOTOOLBOX_VIDEO_ENCODER:
+        hardware_available, capability_error = _videotoolbox_capability()
+        if hardware_available:
+            command, duration = build_ffmpeg_command(
+                config,
+                item,
+                temp_path,
+                video_codec=VIDEOTOOLBOX_VIDEO_ENCODER,
+                hardware_decode=True,
+            )
+            try:
+                _run_ffmpeg_command(
+                    command,
+                    duration,
+                    temp_path,
+                    cancel_event,
+                    on_progress,
+                    process_callback,
+                )
+                actual_duration = _probe_rendered_duration(temp_path, duration)
+                hardware_acceleration = True
+            except (OSError, RenderError) as exc:
+                if cancel_event.is_set():
+                    raise
+                fallback_reason = str(exc)
+                temp_path.unlink(missing_ok=True)
+                if on_progress:
+                    on_progress(0.0)
+                actual_video_encoder = SOFTWARE_VIDEO_ENCODER
+                command, duration = build_ffmpeg_command(
+                    config,
+                    item,
+                    temp_path,
+                    video_codec=SOFTWARE_VIDEO_ENCODER,
+                    hardware_decode=False,
+                )
+                _run_ffmpeg_command(
+                    command,
+                    duration,
+                    temp_path,
+                    cancel_event,
+                    on_progress,
+                    process_callback,
+                )
+                actual_duration = _probe_rendered_duration(temp_path, duration)
+        else:
+            fallback_reason = capability_error or "VideoToolbox 不可用"
+            actual_video_encoder = SOFTWARE_VIDEO_ENCODER
+            command, duration = build_ffmpeg_command(
+                config,
+                item,
+                temp_path,
+                video_codec=SOFTWARE_VIDEO_ENCODER,
+                hardware_decode=False,
+            )
+            _run_ffmpeg_command(
+                command,
+                duration,
+                temp_path,
+                cancel_event,
+                on_progress,
+                process_callback,
+            )
+            actual_duration = _probe_rendered_duration(temp_path, duration)
+    else:
+        command, duration = build_ffmpeg_command(config, item, temp_path)
+        _run_ffmpeg_command(
+            command,
+            duration,
+            temp_path,
+            cancel_event,
+            on_progress,
+            process_callback,
+        )
+        actual_duration = _probe_rendered_duration(temp_path, duration)
     if output_path.exists():
         output_path.unlink()
     temp_path.replace(output_path)
@@ -302,4 +470,8 @@ def render_item(
         "output_path": str(output_path),
         "actual_duration": actual_duration,
         "ffmpeg_command": command,
+        "planned_video_encoder": planned_video_encoder,
+        "actual_video_encoder": actual_video_encoder,
+        "hardware_acceleration": hardware_acceleration,
+        "encoder_fallback_reason": fallback_reason,
     }

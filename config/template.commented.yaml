@@ -104,7 +104,8 @@ output:
   width: 720
   height: 1280
   fps: 30
-  video_codec: libx264
+  # Apple VideoToolbox 硬件编解码；不可用或失败时自动回退 libx264。
+  video_codec: h264_videotoolbox
   pixel_format: yuv420p
   video_preset: medium
   # crf=恒定质量；vbr=目标平均码率。选择 vbr 时使用 video_bitrate_kbps。
@@ -159,7 +160,7 @@ output:
   # App ID/App Secret 保存在本机 data/integrations.yaml，不进入项目快照。
   feishu_base_sync:
     enabled: false
-    # 粘贴包含 /base/ 的多维表格直链，前端测试连接后会写入稳定 table_id。
+    # 粘贴 /wiki/ 或 /base/ 多维表格链接，前端测试连接后会写入稳定 table_id。
     base_url: ""
     table_id: ""
     trigger: job_terminal

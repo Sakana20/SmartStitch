@@ -297,9 +297,12 @@ class FeishuBaseSyncConfig(BaseModel):
         if self.enabled:
             parsed = urllib.parse.urlparse(self.base_url)
             parts = [part for part in parsed.path.split("/") if part]
-            has_base_token = "base" in parts and parts.index("base") + 1 < len(parts)
-            if parsed.scheme not in {"http", "https"} or not has_base_token:
-                raise ValueError("请填写以 /base/ 开头的飞书多维表格直链")
+            has_resource_token = any(
+                marker in parts and parts.index(marker) + 1 < len(parts)
+                for marker in ("base", "wiki")
+            )
+            if parsed.scheme not in {"http", "https"} or not has_resource_token:
+                raise ValueError("请填写飞书多维表格的 /base/ 或 /wiki/ 链接")
         if self.enabled and not self.table_id:
             raise ValueError("启用飞书多维表格同步时必须选择数据表")
         return self
@@ -310,7 +313,7 @@ class OutputConfig(BaseModel):
     width: int = Field(default=720, gt=0)
     height: int = Field(default=1280, gt=0)
     fps: float = Field(default=30, gt=0)
-    video_codec: str = "libx264"
+    video_codec: str = "h264_videotoolbox"
     pixel_format: str = "yuv420p"
     video_preset: str = "medium"
     rate_control: Literal["crf", "vbr"] = "crf"
