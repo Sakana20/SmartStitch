@@ -31,6 +31,10 @@ test -d "${APP}"
 file "${APP}/Contents/MacOS/SmartStitch" | grep -q "arm64"
 test -x "${APP}/Contents/Resources/bin/ffmpeg"
 test -x "${APP}/Contents/Resources/bin/ffprobe"
+ICON_FILE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "${APP}/Contents/Info.plist")"
+test -n "${ICON_FILE}"
+test -f "${APP}/Contents/Resources/${ICON_FILE}"
+file "${APP}/Contents/Resources/${ICON_FILE}" | grep -q 'Mac OS X icon'
 
 dependency_report="$(mktemp "${TMPDIR:-/tmp}/smartstitch-otool.XXXXXX")"
 trap 'rm -f "${dependency_report}"' EXIT

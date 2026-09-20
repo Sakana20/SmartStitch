@@ -81,7 +81,9 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name="SmartStitch.app",
-    icon=None,
+    # PyInstaller uses Pillow to turn this 1024 px source artwork into the
+    # multi-resolution .icns embedded in the application bundle.
+    icon=str(project_root / "packaging" / "assets" / "SmartStitch.icon-master.png"),
     bundle_identifier="com.sakana.smartstitch",
     version=version,
     target_arch="arm64",
