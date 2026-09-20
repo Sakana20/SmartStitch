@@ -11,6 +11,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+import smartstitch.api as api_module
 from smartstitch.api import (
     SharedConfigUnavailableError,
     canonical_config_directory,
@@ -18,6 +19,10 @@ from smartstitch.api import (
     resolve_config_directory,
 )
 from smartstitch.slicer import SliceConflictError
+
+
+def test_importing_api_does_not_create_application() -> None:
+    assert not hasattr(api_module, "app")
 
 
 def write_config_template(config_directory, tmp_path):

@@ -21,7 +21,13 @@ def main() -> None:
     args = parser.parse_args()
     if args.config_directory:
         os.environ["SMARTSTITCH_CONFIG_DIRECTORY"] = args.config_directory
-    uvicorn.run("smartstitch.api:app", host=args.host, port=args.port, reload=args.reload)
+    uvicorn.run(
+        "smartstitch.api:create_app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        factory=True,
+    )
 
 
 if __name__ == "__main__":

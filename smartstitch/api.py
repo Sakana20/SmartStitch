@@ -1163,6 +1163,3 @@ def create_app(
     if static_directory.exists():
         app.mount("/", StaticFiles(directory=static_directory, html=True), name="frontend")
     return app
-
-
-app = create_app()

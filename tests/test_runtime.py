@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from smartstitch.runtime import configure_bundled_media_tools, seed_packaged_configs
 
 
@@ -72,3 +74,42 @@ def test_frozen_app_falls_back_to_seeded_writable_directories(tmp_path, monkeypa
     assert application.state.data_directory == support / "data"
     assert (support / "config" / "template.commented.yaml").read_text("utf-8") == "template"
     assert (support / "data" / "smartstitch.db").is_file()
+
+
+def test_source_app_preserves_missing_nas_error(tmp_path, monkeypatch):
+    from smartstitch import api
+
+    monkeypatch.delenv(api.CONFIG_DIRECTORY_ENV, raising=False)
+    monkeypatch.setattr(api, "resource_root", lambda: tmp_path / "source")
+    monkeypatch.setattr(api, "is_frozen", lambda: False)
+    monkeypatch.setattr(
+        api,
+        "resolve_config_directory",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            api.SharedConfigUnavailableError("未连接 NAS：测试共享目录不存在")
+        ),
+    )
+
+    with pytest.raises(api.SharedConfigUnavailableError, match="未连接 NAS"):
+        api.create_app()
+
+
+def test_create_app_uses_explicit_isolated_directories(tmp_path, monkeypatch):
+    from smartstitch import api
+
+    resources = tmp_path / "resources"
+    config_directory = tmp_path / "isolated-config"
+    data_directory = tmp_path / "isolated-data"
+    (resources / "frontend").mkdir(parents=True)
+    config_directory.mkdir()
+    monkeypatch.delenv(api.CONFIG_DIRECTORY_ENV, raising=False)
+
+    application = api.create_app(
+        resources,
+        config_directory=config_directory,
+        data_directory=data_directory,
+    )
+
+    assert application.state.config_store.directory == config_directory.resolve()
+    assert application.state.data_directory == data_directory.resolve()
+    assert (data_directory / "smartstitch.db").is_file()

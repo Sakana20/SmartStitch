@@ -50,8 +50,9 @@ def main() -> None:
     )
 
     # Import only after PATH and writable runtime directories are prepared.
-    from smartstitch.api import app
+    from smartstitch.api import create_app
 
+    app = create_app()
     if os.environ.get("SMARTSTITCH_NO_BROWSER") != "1":
         threading.Thread(target=_open_browser_when_ready, daemon=True).start()
     uvicorn.run(app, host=HOST, port=PORT, log_config=None)
