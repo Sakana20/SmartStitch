@@ -2,11 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
-import time
-import urllib.error
-import urllib.request
-import webbrowser
 
 import uvicorn
 
@@ -18,20 +13,6 @@ from smartstitch.runtime import (
 
 
 HOST = "127.0.0.1"
-PORT = int(os.environ.get("SMARTSTITCH_PORT", "8766"))
-URL = f"http://{HOST}:{PORT}"
-
-
-def _open_browser_when_ready() -> None:
-    health_url = f"{URL}/api/v1/system/health"
-    for _ in range(120):
-        try:
-            with urllib.request.urlopen(health_url, timeout=0.5) as response:
-                if response.status == 200:
-                    webbrowser.open(URL)
-                    return
-        except (OSError, urllib.error.URLError):
-            time.sleep(0.1)
 
 
 def main() -> None:
@@ -53,9 +34,17 @@ def main() -> None:
     from smartstitch.api import create_app
 
     app = create_app()
-    if os.environ.get("SMARTSTITCH_NO_BROWSER") != "1":
-        threading.Thread(target=_open_browser_when_ready, daemon=True).start()
-    uvicorn.run(app, host=HOST, port=PORT, log_config=None)
+    port = int(os.environ.get("SMARTSTITCH_PORT", "0"))
+    headless = os.environ.get("SMARTSTITCH_HEADLESS") == "1"
+    # Backward compatibility for existing packaged smoke-test scripts.
+    headless = headless or os.environ.get("SMARTSTITCH_NO_BROWSER") == "1"
+    if headless:
+        uvicorn.run(app, host=HOST, port=port or 8766, log_config=None)
+        return
+
+    from smartstitch.desktop import run_desktop_application
+
+    run_desktop_application(app, port=port)
 
 
 if __name__ == "__main__":

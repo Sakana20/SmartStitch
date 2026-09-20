@@ -580,7 +580,9 @@ class FeishuSyncManager:
         self.retry_delays = retry_delays
         self.lock = threading.RLock()
         self.running: set[str] = set()
+        self.threads: dict[str, threading.Thread] = {}
         self.retry_timers: dict[str, threading.Timer] = {}
+        self.stopping = False
         self.database.ensure_job_table("output_sync_jobs")
         self.database.mark_active_interrupted("output_sync_jobs")
 
@@ -597,6 +599,8 @@ class FeishuSyncManager:
         if not target.get("enabled"):
             raise FeishuError("该任务创建时未启用飞书多维表格同步")
         with self.lock:
+            if self.stopping:
+                raise FeishuError("SmartStitch 正在退出，不能启动同步")
             if job_id in self.running:
                 return self.get(job_id) or self._new_record(job_id, target)
             timer = self.retry_timers.pop(job_id, None)
@@ -608,8 +612,27 @@ class FeishuSyncManager:
             thread = threading.Thread(
                 target=self._run, args=(job_id,), daemon=True, name=f"feishu-{job_id[:6]}"
             )
+            self.threads[job_id] = thread
             thread.start()
             return record
+
+    def active_count(self) -> int:
+        with self.lock:
+            return len(self.running) + len(self.retry_timers)
+
+    def shutdown(self, timeout: float = 8.0) -> None:
+        """Cancel scheduled retries and briefly wait for in-flight requests."""
+
+        with self.lock:
+            self.stopping = True
+            timers = list(self.retry_timers.values())
+            self.retry_timers.clear()
+            threads = list(self.threads.values())
+        for timer in timers:
+            timer.cancel()
+        deadline = time.monotonic() + max(0.0, timeout)
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
 
     def enqueue_if_enabled(self, job: dict[str, Any]) -> None:
         if (job.get("feishu_base_sync") or {}).get("enabled"):
@@ -665,6 +688,8 @@ class FeishuSyncManager:
         except Exception as exc:
             retryable = isinstance(exc, FeishuError) and exc.retryable
             attempt = int(record.get("attempts", 0))
+            with self.lock:
+                retryable = retryable and not self.stopping
             if retryable and attempt <= len(self.retry_delays):
                 delay = self.retry_delays[attempt - 1]
                 next_retry = datetime.now().astimezone() + timedelta(seconds=delay)
@@ -691,9 +716,13 @@ class FeishuSyncManager:
         finally:
             with self.lock:
                 self.running.discard(job_id)
+                self.threads.pop(job_id, None)
 
     def _run_scheduled_retry(self, job_id: str) -> None:
         with self.lock:
+            if self.stopping:
+                self.retry_timers.pop(job_id, None)
+                return
             if job_id in self.running:
                 timer = threading.Timer(0.05, self._run_scheduled_retry, args=(job_id,))
                 timer.daemon = True

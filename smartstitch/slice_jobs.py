@@ -60,9 +60,10 @@ class SliceJobManager:
         self.slicer = slicer
         self.database = SliceJobDatabase(database_store)
         self.lock = threading.RLock()
-        self.pending: queue.Queue[str] = queue.Queue()
+        self.pending: queue.Queue[str | None] = queue.Queue()
         self.cancel_events: dict[str, threading.Event] = {}
         self.processes: dict[str, subprocess.Popen[str]] = {}
+        self.stopping = False
         self.worker = threading.Thread(
             target=self._worker_loop,
             name="slice-job-worker",
@@ -73,6 +74,8 @@ class SliceJobManager:
     def create(self, request: TimelineSliceRequest) -> dict[str, Any]:
         request_key = slice_request_key(request)
         with self.lock:
+            if self.stopping:
+                raise RuntimeError("SmartStitch 正在退出，不能创建新任务")
             existing = self.database.get_by_request_key(request_key)
             if existing is not None:
                 result = self._summary(existing)
@@ -250,6 +253,8 @@ class SliceJobManager:
 
     def retry(self, job_id: str, *, interrupted_only: bool = False) -> dict[str, Any]:
         with self.lock:
+            if self.stopping:
+                raise RuntimeError("SmartStitch 正在退出，不能重试任务")
             job = self.get_job(job_id)
             allowed = {"interrupted"} if interrupted_only else {
                 "partial_failed",
@@ -335,9 +340,41 @@ class SliceJobManager:
         while True:
             job_id = self.pending.get()
             try:
+                if job_id is None:
+                    return
                 self._run(job_id)
             finally:
                 self.pending.task_done()
+
+    def active_count(self) -> int:
+        return sum(
+            job.get("status") in SLICE_ACTIVE_STATES
+            for job in self.database.list()
+        )
+
+    def shutdown(self, timeout: float = 8.0) -> None:
+        """Cancel queued/running slicing and stop the worker thread."""
+
+        with self.lock:
+            if self.stopping:
+                return
+            self.stopping = True
+            active_ids = [
+                str(job["id"])
+                for job in self.database.list()
+                if job.get("status") in SLICE_ACTIVE_STATES
+            ]
+        for job_id in active_ids:
+            try:
+                self.cancel(job_id)
+            except KeyError:
+                pass
+        self.pending.put(None)
+        self.worker.join(max(0.0, timeout))
+        with self.lock:
+            for process in list(self.processes.values()):
+                if process.poll() is None:
+                    process.kill()
 
     def _run(self, job_id: str) -> None:
         try:

@@ -104,7 +104,7 @@ jobs:
           SMARTSTITCH_DATA_DIRECTORY="${smoke_root}" \
           SMARTSTITCH_CONFIG_DIRECTORY="${smoke_root}/config" \
           SMARTSTITCH_PORT=18766 \
-          SMARTSTITCH_NO_BROWSER=1 \
+          SMARTSTITCH_HEADLESS=1 \
             dist/SmartStitch.app/Contents/MacOS/SmartStitch &
           app_pid=$!
           trap 'kill "${app_pid}" 2>/dev/null || true' EXIT

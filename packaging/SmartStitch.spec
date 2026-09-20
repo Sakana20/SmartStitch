@@ -37,8 +37,9 @@ datas = [
     *copy_metadata("pydantic"),
     *copy_metadata("truststore"),
     *copy_metadata("uvicorn"),
+    *copy_metadata("pywebview"),
 ]
-hiddenimports = collect_submodules("uvicorn")
+hiddenimports = collect_submodules("uvicorn") + ["webview.platforms.cocoa"]
 
 a = Analysis(
     [str(project_root / "packaging" / "launcher.py")],

@@ -1,6 +1,6 @@
 # SmartStitch
 
-SmartStitch 是一个本地运行的 Python + FFmpeg 视频随机拼接工具，提供浏览器管理界面。它支持：
+SmartStitch 是一个本地运行的 Python + FFmpeg 视频随机拼接工具。正式 macOS 应用使用原生窗口承载管理界面，源码开发模式使用浏览器。它支持：
 
 - 按配置组合前贴、引子、可增删排序的多段利益点、结尾和尾帧。
 - 为每个素材设置权重，并按整批配额分配后随机洗牌。
@@ -38,7 +38,7 @@ smartstitch
 
 也可以双击 macOS 下的 `start.command`，它会自动创建虚拟环境和安装依赖。
 
-正式发布的 `SmartStitch.app` 自带 Python、Python 依赖、FFmpeg 和 ffprobe，普通用户不需要安装上述开发工具。应用启动后会在 `127.0.0.1:8766` 启动本地服务并自动打开默认浏览器。发布版的本机运行数据保存在：
+正式发布的 `SmartStitch.app` 自带 Python、Python 依赖、FFmpeg 和 ffprobe，普通用户不需要安装上述开发工具。应用会在随机的本机环回端口启动服务，并在自己的 macOS 原生窗口中显示 Web UI，不再打开默认浏览器。关闭主窗口或退出应用时，本地服务会同时停止；如果有成片、切片或飞书同步任务，退出前会提示确认。发布版的本机运行数据保存在：
 
 ```text
 ~/Library/Application Support/SmartStitch/

@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -70,7 +71,9 @@ class JobManager:
         self.database = JobDatabase(shared_store)
         self.cancel_events: dict[str, threading.Event] = {}
         self.processes: dict[tuple[str, int], subprocess.Popen[str]] = {}
+        self.threads: dict[str, threading.Thread] = {}
         self.lock = threading.RLock()
+        self.stopping = False
         self.output_sync_manager: Any | None = None
         self.visual_border_library = visual_border_library
         self.media_probe_cache = media_probe_cache or MediaProbeCache(shared_store)
@@ -184,6 +187,8 @@ class JobManager:
 
     def start(self, job_id: str) -> dict[str, Any]:
         with self.lock:
+            if self.stopping:
+                raise RuntimeError("SmartStitch 正在退出，不能启动新任务")
             job = self.get_job(job_id)
             if job["status"] != "draft":
                 raise ValueError(f"只有 draft 任务可以启动，当前为 {job['status']}")
@@ -191,9 +196,46 @@ class JobManager:
             self.database.save(job)
             cancel_event = threading.Event()
             self.cancel_events[job_id] = cancel_event
-            thread = threading.Thread(target=self._run, args=(job_id,), daemon=True)
+            thread = threading.Thread(
+                target=self._run,
+                args=(job_id,),
+                daemon=True,
+                name=f"stitch-job-{job_id[:6]}",
+            )
+            self.threads[job_id] = thread
             thread.start()
         return self.get_job(job_id)
+
+    def active_count(self) -> int:
+        return sum(
+            job.get("status") not in TERMINAL_STATES | {"draft"}
+            for job in self.database.list()
+        )
+
+    def shutdown(self, timeout: float = 8.0) -> None:
+        """Stop accepting work and terminate child encoders before app exit."""
+
+        with self.lock:
+            self.stopping = True
+            active_ids = [
+                str(job["id"])
+                for job in self.database.list()
+                if job.get("status") not in TERMINAL_STATES | {"draft"}
+            ]
+        for job_id in active_ids:
+            try:
+                self.cancel(job_id)
+            except KeyError:
+                pass
+
+        deadline = time.monotonic() + max(0.0, timeout)
+        for thread in list(self.threads.values()):
+            thread.join(max(0.0, deadline - time.monotonic()))
+
+        with self.lock:
+            for process in list(self.processes.values()):
+                if process.poll() is None:
+                    process.kill()
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         with self.lock:
@@ -273,6 +315,7 @@ class JobManager:
             self.output_sync_manager.enqueue_if_enabled(job)
         with self.lock:
             self.cancel_events.pop(job_id, None)
+            self.threads.pop(job_id, None)
 
     def _run_item(
         self,
