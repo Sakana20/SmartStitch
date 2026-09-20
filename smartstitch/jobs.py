@@ -58,6 +58,7 @@ class JobManager:
         config_store: ConfigStore,
         data_directory: Path,
         database_store: SQLiteStore | None = None,
+        visual_border_library: Any | None = None,
     ):
         self.config_store = config_store
         self.data_directory = data_directory
@@ -70,6 +71,7 @@ class JobManager:
         self.processes: dict[tuple[str, int], subprocess.Popen[str]] = {}
         self.lock = threading.RLock()
         self.output_sync_manager: Any | None = None
+        self.visual_border_library = visual_border_library
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return [self._summary(job) for job in self.database.list()]
@@ -86,7 +88,12 @@ class JobManager:
             raise ValueError("配置已停用")
         if request.output_directory:
             config.output.directory = request.output_directory
-        scan = scan_config(config)
+        global_borders = (
+            self.visual_border_library.assets_for_config(config)
+            if self.visual_border_library is not None
+            else None
+        )
+        scan = scan_config(config, global_borders)
         job_id = uuid.uuid4().hex
         short_id = job_id[:8]
         plan = build_plan(config, scan, request.count, request.seed, short_id)

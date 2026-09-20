@@ -327,9 +327,14 @@ def build_plan(
         and config.visual_dedup.border_overlay.mode == SourceMode.REQUIRED
     )
     if border_assets:
-        if len(border_assets) != 1:
-            raise PlanError("每个配置必须且只能有一个视觉去重边框")
-        visual_borders = [border_assets[0]] * count
+        if config.visual_dedup.border_overlay.selection_mode == "fixed":
+            if len(border_assets) != 1:
+                raise PlanError("固定模式必须且只能选择一个视觉去重边框")
+            visual_borders = [border_assets[0]] * count
+        else:
+            visual_borders = _sequence(
+                border_assets, count, config.randomization.mode, rng
+            )
     elif border_required:
         raise PlanError("视觉去重边框为必需，但没有可用素材")
 

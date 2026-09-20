@@ -47,7 +47,6 @@ STANDARD_DIRECTORIES = (
     Path("切片素材/尾帧"),
     Path("切片素材/未归类"),
     Path("风险提示语图片"),
-    Path("视觉去重边框"),
     Path("成片输出"),
     Path("工作记录/切片清单"),
     Path("工作记录/生成清单"),
@@ -58,7 +57,6 @@ GENERIC_DIRECTORIES = (
     Path("视频库"),
     Path("未归类"),
     Path("风险提示语图片"),
-    Path("视觉去重边框"),
     Path("成片输出"),
     Path("工作记录/切片清单"),
     Path("工作记录/生成清单"),
@@ -169,7 +167,6 @@ def _marker_payload(request: CreateLibraryRequest) -> dict[str, Any]:
                 "pools": "视频库",
                 "unclassified": "未归类",
                 "overlays": "风险提示语图片",
-                "visual_borders": "视觉去重边框",
                 "outputs": "成片输出",
                 "records": "工作记录",
             },
@@ -188,7 +185,6 @@ def _marker_payload(request: CreateLibraryRequest) -> dict[str, Any]:
             "slices": "切片素材",
             "benefits": "切片素材/利益点",
             "overlays": "风险提示语图片",
-            "visual_borders": "视觉去重边框",
             "outputs": "成片输出",
             "records": "工作记录",
         },
@@ -386,9 +382,6 @@ class LibraryService:
                     config.benefit_overlays.mode = SourceMode.OPTIONAL
                     config.benefit_overlays.timing.scope = "full"
                     self.config_store.save_config(config_id, config)
-            visual_border_layout_upgraded = self._ensure_visual_border_layout(
-                root, marker
-            )
         except (OSError, json.JSONDecodeError, LibraryError) as exc:
             return {
                 "managed": True,
@@ -416,9 +409,7 @@ class LibraryService:
             "workflow_type": config.workflow_type,
             "next_benefit_number": marker.get("next_benefit_number"),
             "next_pool_number": marker.get("next_pool_number"),
-            "config_updated": (
-                overlay_layout_upgraded or visual_border_layout_upgraded
-            ),
+            "config_updated": overlay_layout_upgraded,
             "missing_directories": missing,
         }
 
@@ -956,7 +947,6 @@ class LibraryService:
         if marker.get("layout_version") != GENERIC_LAYOUT_VERSION:
             raise LibraryError("通用项目标记版本不正确")
         self._ensure_generic_overlay_layout(root, marker)
-        self._ensure_visual_border_layout(root, marker)
         return config, root, marker
 
     def _ensure_generic_overlay_layout(

@@ -458,6 +458,56 @@ def test_managed_library_streams_and_replaces_visual_border(tmp_path):
     assert payload["config"]["visual_dedup"]["border_overlay"]["mode"] == "required"
 
 
+def test_global_visual_border_api_streams_into_shared_config_root(tmp_path):
+    (tmp_path / "config").mkdir()
+    client = TestClient(create_app(tmp_path))
+    initial = client.get("/api/v1/global-assets/visual-borders").json()
+    border = tmp_path / "全局动态边框.mov"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i",
+            (
+                "color=c=black@0.0:s=180x320:r=2:d=0.5,format=argb,"
+                "drawbox=x=0:y=0:w=iw:h=20:color=red@1:t=fill:replace=1"
+            ),
+            "-c:v", "qtrle", "-pix_fmt", "argb", str(border),
+        ],
+        check=True,
+    )
+
+    response = client.post(
+        "/api/v1/global-assets/visual-borders",
+        content=border.read_bytes(),
+        headers={
+            "X-SmartStitch-Filename": quote(border.name),
+            "X-SmartStitch-Library-Revision": str(initial["revision"]),
+            "Content-Type": "application/octet-stream",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["revision"] == 1
+    assert payload["asset"]["display_name"] == border.name
+    assert (tmp_path / "config" / payload["asset"]["storage_path"]).is_file()
+    assert Path(payload["directory"]) == tmp_path / "config" / "全局素材库" / "视觉去重边框"
+
+    conflict = client.patch(
+        f"/api/v1/global-assets/visual-borders/{payload['asset']['asset_id']}",
+        json={"library_revision": 0, "enabled": False},
+    )
+    assert conflict.status_code == 409
+
+    updated = client.patch(
+        f"/api/v1/global-assets/visual-borders/{payload['asset']['asset_id']}",
+        json={"library_revision": 1, "default_weight": 2.5},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["asset"]["default_weight"] == 2.5
+    assert updated.json()["revision"] == 2
+
+
 def test_directory_picker_api_returns_selected_path(tmp_path, monkeypatch):
     (tmp_path / "config").mkdir()
     monkeypatch.setattr(

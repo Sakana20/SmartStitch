@@ -220,6 +220,11 @@ def build_ffmpeg_command(
 
     if visual_border_index is not None:
         border = config.visual_dedup.border_overlay
+        border_alpha_mode = (
+            item.visual_border.alpha_mode
+            if border.alpha_mode == "auto" and item.visual_border.alpha_mode
+            else "straight" if border.alpha_mode == "auto" else border.alpha_mode
+        )
         border_scale = (
             f"scale={config.output.width}:{config.output.height}"
             if border.scale_mode == "stretch"
@@ -232,7 +237,7 @@ def build_ffmpeg_command(
         )
         filters.append(
             f"{video_map}[visual_border]overlay=x=0:y=0:shortest=1:"
-            f"eof_action=pass:format=auto:alpha={border.alpha_mode}[framedv]"
+            f"eof_action=pass:format=auto:alpha={border_alpha_mode}[framedv]"
         )
         video_map = "[framedv]"
 

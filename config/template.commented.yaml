@@ -83,6 +83,7 @@ benefit_overlays:
     end_seconds: null
 
 # 视觉去重：模糊背景→缩小前景→透明边框→风险提示语。
+# 边框统一来自 SmartStitch 配置根下的“全局素材库/视觉去重边框”。
 # 旧配置未填写本段时默认关闭。
 visual_dedup:
   enabled: false
@@ -95,17 +96,25 @@ visual_dedup:
     steps: 2
     brightness: 0.0
   border_overlay:
-    # disabled=不叠加；optional=无文件时允许生成；required=缺失时阻止生成。
+    # disabled=不叠加；optional=无兼容素材时允许生成；required=缺失时阻止生成。
     mode: disabled
-    # 受管项目可留空，自动识别“视觉去重边框”目录中的唯一素材。
+    source: global_library
+    # random=按权重为每条成片选择；fixed=固定使用一个素材。
+    selection_mode: random
+    fixed_asset_id: ""
+    # 空列表表示使用全部启用且与输出画布兼容的全局素材。
+    enabled_asset_ids: []
+    # 可选项目级权重覆盖，键为全局 asset_id。
+    weights: {}
+    # 旧版项目内单边框兼容字段，新配置保持为空。
     file: ""
     media_kind: auto
     # exact=要求与输出画布同尺寸；stretch=拉伸铺满。
     scale_mode: exact
     playback: loop
     opacity: 1.0
-    # 边缘出现黑边时可在高级模式尝试 premultiplied。
-    alpha_mode: straight
+    # auto 使用全局素材设置；边缘出现黑边时可覆盖为 premultiplied。
+    alpha_mode: auto
 
 matching:
   # 预留的素材标签匹配设置；固定风险提示语图片不使用此项。

@@ -137,14 +137,37 @@ class VisualDedupBackgroundConfig(BaseModel):
 
 class VisualBorderOverlayConfig(BaseModel):
     mode: SourceMode = SourceMode.DISABLED
+    source: Literal["global_library", "legacy_file"] = "global_library"
+    selection_mode: Literal["random", "fixed"] = "random"
+    fixed_asset_id: str = ""
+    enabled_asset_ids: list[str] = Field(default_factory=list)
+    weights: dict[str, float] = Field(default_factory=dict)
     file: str = ""
     media_kind: Literal["auto"] = "auto"
     scale_mode: Literal["exact", "stretch"] = "exact"
     playback: Literal["loop"] = "loop"
     opacity: float = Field(default=1.0, ge=0, le=1)
-    alpha_mode: Literal["straight", "premultiplied"] = "straight"
+    alpha_mode: Literal["auto", "straight", "premultiplied"] = "auto"
 
     _normalize_file = field_validator("file", mode="before")(normalize_path_input)
+
+    @field_validator("fixed_asset_id")
+    @classmethod
+    def strip_fixed_asset_id(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("enabled_asset_ids")
+    @classmethod
+    def normalize_enabled_asset_ids(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+    @field_validator("weights")
+    @classmethod
+    def validate_border_weights(cls, values: dict[str, float]) -> dict[str, float]:
+        normalized = {key.strip(): value for key, value in values.items() if key.strip()}
+        if any(value < 0 for value in normalized.values()):
+            raise ValueError("全局边框权重不能为负数")
+        return normalized
 
 
 class VisualDedupConfig(BaseModel):
@@ -638,6 +661,8 @@ class Asset(BaseModel):
     error: str | None = None
     size_bytes: int | None = None
     modified_at: float | None = None
+    content_hash: str | None = None
+    alpha_mode: Literal["straight", "premultiplied"] | None = None
     probe: MediaProbe | None = None
     naming_metadata: AssetNamingMetadata | None = None
 
@@ -797,6 +822,14 @@ class ReplaceOverlayImageRequest(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     data_base64: str = Field(min_length=1)
     current_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class GlobalVisualBorderUpdateRequest(BaseModel):
+    library_revision: int = Field(ge=0)
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    enabled: bool | None = None
+    default_weight: float | None = Field(default=None, ge=0)
+    alpha_mode: Literal["straight", "premultiplied"] | None = None
 
 
 class SliceAssignment(BaseModel):

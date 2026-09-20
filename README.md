@@ -63,7 +63,7 @@ SMARTSTITCH_CONFIG_DIRECTORY=/自定义/NAS/Smartstitch smartstitch
 
 风险提示语图片在每个配置中是唯一固定图片。受管标准库会自动识别 `风险提示语图片` 目录中的唯一图片；普通配置也可在“高级配置”中填写具体文件路径。将 `mode` 设为 `required` 时，缺图或多图会阻止生成。尾帧仍按素材目录配置。
 
-受管标准库还包含 `视觉去重边框` 目录。简单模式可以流式上传或替换一个透明 MOV/PNG/WebP 边框；动态 MOV 必须为 QuickTime Animation（`qtrle`）且实际包含透明像素。精确缩放、模糊、边框 Alpha 与拉伸策略集中在高级模式配置。
+视觉去重边框统一保存在 SmartStitch 配置根下的 `全局素材库/视觉去重边框`，所有项目和挂载同一 NAS 的电脑复用同一批素材。简单模式支持流式添加透明 MOV/PNG/WebP，并可随机或固定使用；动态 MOV 必须为 QuickTime Animation（`qtrle`）且实际包含透明像素。旧项目内单边框路径继续兼容读取，详见[视觉去重设计](doc/18-视觉去重边框与模糊背景设计.md)。
 
 ## 权重规则
 

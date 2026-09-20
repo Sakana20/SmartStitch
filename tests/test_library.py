@@ -100,8 +100,8 @@ def test_create_library_builds_complete_tree_and_config(tmp_path):
     assert marker["next_benefit_number"] == 2
     assert marker["paths"]["overlays"] == "风险提示语图片"
     assert (root / "风险提示语图片").is_dir()
-    assert marker["paths"]["visual_borders"] == "视觉去重边框"
-    assert (root / "视觉去重边框").is_dir()
+    assert "visual_borders" not in marker["paths"]
+    assert not (root / "视觉去重边框").exists()
     assert not (root / "利益点图片").exists()
 
     config = store.load("summer-sale")
@@ -127,8 +127,8 @@ def test_create_generic_library_starts_empty_and_uses_independent_layout(tmp_pat
     assert marker["next_pool_number"] == 1
     assert marker["paths"]["overlays"] == "风险提示语图片"
     assert (root / "风险提示语图片").is_dir()
-    assert marker["paths"]["visual_borders"] == "视觉去重边框"
-    assert (root / "视觉去重边框").is_dir()
+    assert "visual_borders" not in marker["paths"]
+    assert not (root / "视觉去重边框").exists()
     config = store.load("generic-video")
     assert config.schema_version == 3
     assert config.workflow_type == "generic"

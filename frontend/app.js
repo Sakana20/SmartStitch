@@ -6,6 +6,7 @@ const state = {
   library: null,
   yaml: "",
   scan: null,
+  visualBorderLibrary: null,
   assetCategory: "pre_roll",
   preview: null,
   jobs: [],
@@ -2424,8 +2425,17 @@ async function selectConfig(id) {
     state.preview = null;
     resetPreview();
     if (state.timeline.analysis) renderTimeline();
+    await loadVisualBorderLibrary();
     await scanAssets(false);
   } catch (error) { toast(error.message, true); }
+}
+
+async function loadVisualBorderLibrary() {
+  try {
+    state.visualBorderLibrary = await api("/global-assets/visual-borders");
+  } catch (_) {
+    state.visualBorderLibrary = null;
+  }
 }
 
 async function scanAssets(showToast = true) {
@@ -3133,8 +3143,16 @@ function ensureVisualDedup(config) {
     scale_mode: "exact",
     playback: "loop",
     opacity: 1,
-    alpha_mode: "straight",
+    alpha_mode: "auto",
   };
+  visual.border_overlay.source ||= "global_library";
+  visual.border_overlay.selection_mode ||= "random";
+  visual.border_overlay.fixed_asset_id ||= "";
+  visual.border_overlay.enabled_asset_ids ||= [];
+  visual.border_overlay.weights ||= {};
+  if (visual.border_overlay.alpha_mode === "straight" && !visual.border_overlay.file) {
+    visual.border_overlay.alpha_mode = "auto";
+  }
   return visual;
 }
 
@@ -3438,16 +3456,25 @@ function renderSimpleConfig() {
   const visual = ensureVisualDedup(config);
   const visualPreset = simpleVisualDedupPreset(visual);
   const visualBorderEnabled = visual.border_overlay.mode !== "disabled";
-  const visualBorderAsset = (state.scan?.assets?.visual_border || []).find(asset => asset.valid);
+  const compatibleVisualBorders = (state.scan?.assets?.visual_border || []).filter(asset => asset.valid);
+  const visualBorderAsset = compatibleVisualBorders.find(asset =>
+    visual.border_overlay.selection_mode !== "fixed"
+      || asset.id === visual.border_overlay.fixed_asset_id
+  );
   const visualBorderInvalid = (state.scan?.assets?.visual_border || []).find(asset => !asset.valid);
-  const visualBorderName = visualBorderAsset?.name
-    || visualBorderInvalid?.name
-    || (visual.border_overlay.file ? visual.border_overlay.file.split("/").pop() : "尚未选择边框");
-  const visualBorderStatus = visualBorderInvalid
-    ? visualBorderInvalid.error
-    : visualBorderAsset
-      ? (visualBorderAsset.media_type === "video" ? "动态边框可用" : "静态边框可用")
-      : visualBorderEnabled ? "已开启，请选择透明边框" : "当前不使用边框";
+  const globalBorderCount = (state.visualBorderLibrary?.assets || []).filter(asset => asset.enabled).length;
+  const visualBorderName = visual.border_overlay.selection_mode === "fixed"
+    ? (visualBorderAsset?.name || visualBorderInvalid?.name || "尚未选择固定边框")
+    : `全局边框库 · ${compatibleVisualBorders.length} 个兼容素材`;
+  const visualBorderStatus = compatibleVisualBorders.length
+      ? (visual.border_overlay.selection_mode === "fixed" ? "固定边框可用" : "每条成片将从兼容素材中选择")
+      : visualBorderInvalid
+        ? visualBorderInvalid.error
+        : visualBorderEnabled ? "全局库没有兼容的透明边框" : `全局库共 ${globalBorderCount} 个素材`;
+  const visualBorderOptions = (state.visualBorderLibrary?.assets || [])
+    .filter(asset => asset.enabled)
+    .map(asset => `<option value="${escapeHtml(asset.asset_id)}" ${asset.asset_id === visual.border_overlay.fixed_asset_id ? "selected" : ""}>${escapeHtml(asset.display_name)}</option>`)
+    .join("");
   const naming = generic ? ensureOutputNaming(config) : null;
   const feishu = ensureFeishuBaseSync(config);
   const namingErrors = generic
@@ -3548,9 +3575,11 @@ function renderSimpleConfig() {
         ], visualPreset)}</div>
         <label class="simple-toggle-row compact"><span><b>使用透明边框</b><small>边框位于主画面之上，风险提示语之下</small></span><input id="simpleVisualBorderEnabled" class="switch-input" type="checkbox" ${visualBorderEnabled ? "checked" : ""}></label>
         <div class="simple-overlay-row ${visualBorderEnabled ? "" : "hidden"}">
-          <div class="simple-overlay-status ${visualBorderAsset ? "has-file" : ""}"><i></i><div><strong>${escapeHtml(visualBorderName)}</strong><span>${escapeHtml(visualBorderStatus)}</span></div></div>
-          <div class="simple-overlay-actions"><label class="button secondary ${state.library?.managed ? "" : "disabled"}">${visualBorderAsset ? "更换边框" : "选择边框"}<input id="simpleVisualBorderFile" type="file" accept=".mov,.png,.webp" ${state.library?.managed ? "" : "disabled"}></label></div>
+          <div class="simple-overlay-status ${compatibleVisualBorders.length ? "has-file" : ""}"><i></i><div><strong>${escapeHtml(visualBorderName)}</strong><span>${escapeHtml(visualBorderStatus)}</span></div></div>
+          <div class="simple-overlay-actions"><label class="button secondary">添加到全局库<input id="simpleVisualBorderFile" type="file" accept=".mov,.png,.webp"></label></div>
         </div>
+        <div class="simple-setting-group ${visualBorderEnabled ? "" : "hidden"}"><div class="simple-setting-label">边框选择方式</div>${simpleChoiceButtons("visualBorderSelection", [["random", "随机使用", "无需每个项目配置"], ["fixed", "固定使用", "始终使用同一边框"]], visual.border_overlay.selection_mode)}</div>
+        <label class="simple-large-field ${visualBorderEnabled && visual.border_overlay.selection_mode === "fixed" ? "" : "hidden"}"><span>固定边框</span><select id="simpleVisualBorderFixed"><option value="">请选择全局边框</option>${visualBorderOptions}</select></label>
       </div>
     </section>
 
@@ -3729,6 +3758,13 @@ function bindSimpleConfigControls() {
           brightness: presets[value].brightness,
         });
       }
+    } else if (choice === "visualBorderSelection") {
+      const border = ensureVisualDedup(state.configDraft).border_overlay;
+      border.selection_mode = value;
+      if (value === "fixed" && !border.fixed_asset_id) {
+        border.fixed_asset_id = (state.visualBorderLibrary?.assets || [])
+          .find(asset => asset.enabled)?.asset_id || "";
+      }
     }
     renderSimpleConfig();
   }));
@@ -3740,6 +3776,9 @@ function bindSimpleConfigControls() {
   });
   $("#simpleOverlayFile")?.addEventListener("change", event => uploadOverlayImage(event.target.files?.[0], event.target));
   $("#simpleVisualBorderFile")?.addEventListener("change", event => uploadVisualBorder(event.target.files?.[0], event.target));
+  $("#simpleVisualBorderFixed")?.addEventListener("change", event => {
+    ensureVisualDedup(state.configDraft).border_overlay.fixed_asset_id = event.target.value;
+  });
 
   $("#simpleLoudnessEnabled")?.addEventListener("change", event => {
     state.configDraft.output.loudness.enabled = event.target.checked;
@@ -3842,23 +3881,31 @@ async function uploadVisualBorder(file, input) {
   }
   input.disabled = true;
   try {
+    if (!state.visualBorderLibrary) await loadVisualBorderLibrary();
+    if (!state.visualBorderLibrary) throw new Error("无法读取全局边框库");
+    const borderSettings = ensureVisualDedup(state.configDraft).border_overlay;
+    borderSettings.source = "global_library";
+    borderSettings.file = "";
     const saved = await api(`/configs/${state.configId}/structured`, {
       method: "PUT",
       headers: configLeaseHeaders(),
       body: JSON.stringify({ config: currentStructuredDraft() }),
     });
     state.configHash = saved.content_hash;
-    const result = await api(`/configs/${state.configId}/visual-border`, {
+    const result = await api("/global-assets/visual-borders", {
       method: "POST",
       headers: {
-        ...configLeaseHeaders(state.configLease, saved.content_hash),
         "Content-Type": "application/octet-stream",
         "X-SmartStitch-Filename": encodeURIComponent(file.name),
+        "X-SmartStitch-Library-Revision": String(state.visualBorderLibrary.revision),
       },
       body: file,
     });
+    state.visualBorderLibrary = result;
     await refreshConfigEditor($("#simpleConfigEditor").scrollTop);
-    toast(`视觉去重边框已更换为 ${result.filename}`);
+    toast(result.deduplicated
+      ? `${result.asset.display_name} 已存在于全局边框库`
+      : `${result.asset.display_name} 已添加到全局边框库`);
   } catch (error) {
     toast(error.message, true);
     input.disabled = false;
@@ -3953,6 +4000,16 @@ function renderVisualConfig() {
   const visual = ensureVisualDedup(config);
   const visualBorderAsset = (state.scan?.assets?.visual_border || [])[0];
   const visualBorderProbe = visualBorderAsset?.probe;
+  const globalVisualBorderChoices = [
+    ["", "请选择全局边框"],
+    ...(state.visualBorderLibrary?.assets || [])
+      .filter(asset => asset.enabled)
+      .map(asset => [asset.asset_id, asset.display_name]),
+  ];
+  const globalVisualBorderRows = (state.visualBorderLibrary?.assets || []).map(asset => {
+    const probe = asset.probe || {};
+    return `<div class="simple-info-strip"><span class="${asset.enabled ? "ok" : "warning"}">${asset.enabled ? "启用" : "停用"}</span><strong>${escapeHtml(asset.display_name)}</strong><small>${escapeHtml(`${probe.width || "?"}×${probe.height || "?"} · ${probe.video_codec || "图片"} · ${probe.pixel_format || "未知格式"}`)}</small><label>默认权重 <input class="weight-input" type="number" min="0" step="0.1" value="${asset.default_weight}" data-global-border-weight="${escapeHtml(asset.asset_id)}"></label><button class="text-btn" type="button" data-global-border-toggle="${escapeHtml(asset.asset_id)}" data-global-border-enabled="${asset.enabled ? "true" : "false"}">${asset.enabled ? "停用" : "启用"}</button></div>`;
+  }).join("");
   const output = config.output;
   const loudness = output.loudness || {
     enabled: false,
@@ -4039,12 +4096,16 @@ function renderVisualConfig() {
         ${configInput("模糊步数", "visual_dedup.background.steps", visual.background.steps, { type: "number", hint: "1～6" })}
         ${configInput("背景亮度", "visual_dedup.background.brightness", visual.background.brightness, { type: "number", hint: "-1～1" })}
         ${configSelect("边框使用方式", "visual_dedup.border_overlay.mode", visual.border_overlay.mode, modeChoices)}
-        ${configInput("边框文件", "visual_dedup.border_overlay.file", visual.border_overlay.file, { wide: true, pathInput: true, hint: "受管项目可留空自动识别", placeholder: "/路径/透明边框.mov" })}
+        ${configSelect("边框来源", "visual_dedup.border_overlay.source", visual.border_overlay.source, [["global_library", "全局边框库"], ["legacy_file", "旧版项目文件（兼容）"]])}
+        ${configSelect("选择方式", "visual_dedup.border_overlay.selection_mode", visual.border_overlay.selection_mode, [["random", "按权重随机"], ["fixed", "固定素材"]])}
+        ${configSelect("固定边框", "visual_dedup.border_overlay.fixed_asset_id", visual.border_overlay.fixed_asset_id, globalVisualBorderChoices)}
+        ${visual.border_overlay.file ? configInput("旧版边框文件", "visual_dedup.border_overlay.file", visual.border_overlay.file, { wide: true, pathInput: true, hint: "仅用于迁移兼容", placeholder: "/路径/透明边框.mov" }) : ""}
         ${configSelect("边框素材类型", "visual_dedup.border_overlay.media_kind", visual.border_overlay.media_kind, [["auto", "自动识别"]])}
         ${configSelect("边框尺寸", "visual_dedup.border_overlay.scale_mode", visual.border_overlay.scale_mode, [["exact", "必须与画布一致"], ["stretch", "拉伸铺满画布"]])}
         ${configSelect("播放方式", "visual_dedup.border_overlay.playback", visual.border_overlay.playback, [["loop", "循环到成片结束"]])}
         ${configInput("边框透明度", "visual_dedup.border_overlay.opacity", visual.border_overlay.opacity, { type: "number", hint: "0～1" })}
-        ${configSelect("Alpha 模式", "visual_dedup.border_overlay.alpha_mode", visual.border_overlay.alpha_mode, [["straight", "直通 Alpha"], ["premultiplied", "预乘 Alpha（黑边时尝试）"]])}
+        ${configSelect("Alpha 模式", "visual_dedup.border_overlay.alpha_mode", visual.border_overlay.alpha_mode, [["auto", "使用素材设置"], ["straight", "直通 Alpha"], ["premultiplied", "预乘 Alpha（黑边时尝试）"]])}
+        <div class="config-field wide"><label>全局边框库 <small>${escapeHtml(state.visualBorderLibrary?.directory || "共享目录不可用")}</small></label><div class="simple-source-list">${globalVisualBorderRows || '<div class="simple-empty-state">全局边框库为空，请在简单模式添加透明边框。</div>'}</div></div>
         <div class="config-field wide"><label>边框预检 <small>由后端 FFmpeg 统一检查</small></label><code class="managed-pool-path">${escapeHtml(visualBorderAsset
           ? (visualBorderAsset.valid
             ? `${visualBorderAsset.name} · ${visualBorderProbe?.video_codec || "未知编码"} · ${visualBorderProbe?.pixel_format || "未知像素格式"} · ${visualBorderProbe?.width || "?"}×${visualBorderProbe?.height || "?"} · ${visualBorderProbe?.fps || "静态"} fps · ${visualBorderProbe?.duration || "?"} s${visualBorderProbe?.has_audio ? " · 含音轨（将忽略）" : ""}`
@@ -4178,6 +4239,40 @@ function renderVisualConfig() {
   else bindBenefitConfigControls();
   bindOutputControls();
   bindFeishuControls("advanced");
+  bindGlobalVisualBorderControls();
+}
+
+function bindGlobalVisualBorderControls() {
+  $$('[data-global-border-toggle]').forEach(button => button.addEventListener("click", async () => {
+    const enabled = button.dataset.globalBorderEnabled !== "true";
+    await updateGlobalVisualBorder(button.dataset.globalBorderToggle, { enabled }, button);
+  }));
+  $$('[data-global-border-weight]').forEach(input => input.addEventListener("change", async () => {
+    await updateGlobalVisualBorder(input.dataset.globalBorderWeight, {
+      default_weight: Number(input.value),
+    }, input);
+  }));
+}
+
+async function updateGlobalVisualBorder(assetId, updates, control) {
+  if (!state.visualBorderLibrary) return;
+  control.disabled = true;
+  try {
+    state.visualBorderLibrary = await api(`/global-assets/visual-borders/${encodeURIComponent(assetId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        library_revision: state.visualBorderLibrary.revision,
+        ...updates,
+      }),
+    });
+    await scanAssets(false);
+    renderVisualConfig();
+    toast("全局边框库已更新");
+  } catch (error) {
+    await loadVisualBorderLibrary();
+    renderVisualConfig();
+    toast(error.message, true);
+  }
 }
 
 function mutateBenefitConfig(mutator) {
@@ -4293,6 +4388,7 @@ async function refreshConfigEditor(scrollTop = 0) {
   state.yaml = refreshed.yaml_text;
   state.library = await api(`/libraries/by-config/${state.configId}`);
   state.timeline.sliceTargets = (await api(`/libraries/by-config/${state.configId}/slice-targets`)).targets;
+  await loadVisualBorderLibrary();
   $("#yamlEditor").value = state.yaml;
   renderSimpleConfig();
   renderVisualConfig();

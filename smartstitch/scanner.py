@@ -152,6 +152,34 @@ def _contains_transparent_samples(path: Path, probe: MediaProbe) -> bool:
     return False
 
 
+def validate_visual_border_media(
+    path: Path,
+    *,
+    output_width: int | None = None,
+    output_height: int | None = None,
+    exact_size: bool = False,
+) -> MediaProbe:
+    """Validate one transparent border independently from project discovery."""
+    extension = path.suffix.lower()
+    if extension not in VISUAL_BORDER_EXTENSIONS:
+        raise ValueError("边框仅支持 qtrle/ARGB MOV、透明 PNG 或透明 WebP")
+    probe = probe_media(path)
+    if extension == ".mov" and probe.video_codec != "qtrle":
+        raise ValueError("MOV 边框必须使用 QuickTime Animation/qtrle 编码")
+    if not probe.has_alpha:
+        raise ValueError(f"边框像素格式 {probe.pixel_format or '未知'} 不含 Alpha 通道")
+    if exact_size and (
+        probe.width != output_width or probe.height != output_height
+    ):
+        raise ValueError(
+            f"边框尺寸 {probe.width}x{probe.height} 与输出画布 "
+            f"{output_width}x{output_height} 不一致"
+        )
+    if not _contains_transparent_samples(path, probe):
+        raise ValueError("边框抽样帧完全不透明，可能覆盖整个主画面")
+    return probe
+
+
 def probe_config_audio(config: AppConfig, requested_path: Path) -> MediaProbe:
     """Validate and probe one configured audio/video path without scanning every source."""
     path = requested_path.expanduser().resolve()
@@ -421,11 +449,41 @@ def _discover_managed_visual_border(
 
 def scan_visual_border(
     config: AppConfig,
+    global_assets: list[Asset] | None = None,
 ) -> tuple[list[Asset], list[str], list[str]]:
     settings = config.visual_dedup
     group = settings.border_overlay
     if not settings.enabled or group.mode == SourceMode.DISABLED:
         return [], [], []
+
+    if global_assets is not None and group.source == "global_library" and not group.file.strip():
+        assets = list(global_assets)
+        if group.selection_mode == "fixed":
+            if not group.fixed_asset_id:
+                return assets, ["visual_border: 固定模式必须选择一个全局边框"], []
+            matched = [asset for asset in assets if asset.id == group.fixed_asset_id]
+            if not matched:
+                return assets, ["visual_border: 固定的全局边框不存在或已停用"], []
+            assets = matched
+        selectable = [asset for asset in assets if asset.selectable]
+        errors: list[str] = []
+        if group.mode == SourceMode.REQUIRED and not selectable:
+            detail = next((asset.error for asset in assets if asset.error), None)
+            errors.append(
+                "visual_border: "
+                + (detail or "全局边框库没有与当前输出兼容的可用素材")
+            )
+        warnings = [
+            f"visual_border: {asset.name}: {asset.error}"
+            for asset in assets
+            if not asset.valid and asset.error
+        ]
+        warnings.extend(
+            f"visual_border: {asset.name} 包含音轨，生成时将忽略该音轨"
+            for asset in selectable
+            if asset.probe and asset.probe.has_audio
+        )
+        return assets, errors, warnings
 
     explicit_file = bool(group.file.strip())
     if explicit_file:
@@ -454,20 +512,12 @@ def scan_visual_border(
         error = "边框仅支持 qtrle/ARGB MOV、透明 PNG 或透明 WebP"
     else:
         try:
-            probe = probe_media(path)
-            if extension == ".mov" and probe.video_codec != "qtrle":
-                error = "MOV 边框必须使用 QuickTime Animation/qtrle 编码"
-            elif not probe.has_alpha:
-                error = f"边框像素格式 {probe.pixel_format or '未知'} 不含 Alpha 通道"
-            elif group.scale_mode == "exact" and (
-                probe.width != config.output.width or probe.height != config.output.height
-            ):
-                error = (
-                    f"边框尺寸 {probe.width}x{probe.height} 与输出画布 "
-                    f"{config.output.width}x{config.output.height} 不一致"
-                )
-            elif not _contains_transparent_samples(path, probe):
-                error = "边框抽样帧完全不透明，可能覆盖整个主画面"
+            probe = validate_visual_border_media(
+                path,
+                output_width=config.output.width,
+                output_height=config.output.height,
+                exact_size=group.scale_mode == "exact",
+            )
         except Exception as exc:
             error = str(exc)
 
@@ -496,7 +546,10 @@ def scan_visual_border(
     return [asset], errors, warnings
 
 
-def scan_config(config: AppConfig) -> ScanResult:
+def scan_config(
+    config: AppConfig,
+    global_visual_borders: list[Asset] | None = None,
+) -> ScanResult:
     assets: dict[str, list[Asset]] = {}
     errors: list[str] = []
     warnings: list[str] = []
@@ -542,7 +595,9 @@ def scan_config(config: AppConfig) -> ScanResult:
     errors.extend(overlay_errors)
     if any(not asset.valid for asset in overlays):
         warnings.append("benefit_overlay: 存在不可用图片")
-    borders, border_errors, border_warnings = scan_visual_border(config)
+    borders, border_errors, border_warnings = scan_visual_border(
+        config, global_visual_borders
+    )
     assets["visual_border"] = borders
     errors.extend(border_errors)
     warnings.extend(border_warnings)

@@ -100,10 +100,12 @@ def test_every_item_contains_core_categories(tmp_path):
     assert all(all(item.selections[category] for category in config.timeline) for item in plan.items)
 
 
-def test_visual_border_is_fixed_in_plan_and_not_randomized(tmp_path):
+def test_visual_border_fixed_mode_uses_one_global_asset(tmp_path):
     config = make_config(tmp_path)
     config.visual_dedup.enabled = True
     config.visual_dedup.border_overlay.mode = "required"
+    config.visual_dedup.border_overlay.selection_mode = "fixed"
+    config.visual_dedup.border_overlay.fixed_asset_id = "visual-border"
     border = Asset(
         id="visual-border",
         category="visual_border",
@@ -133,6 +135,33 @@ def test_visual_border_is_fixed_in_plan_and_not_randomized(tmp_path):
 
     assert all(item.visual_border == border for item in plan.items)
     assert plan.distribution["visual_border"] == {"border.mov": 3}
+
+
+def test_visual_border_random_mode_uses_weighted_reproducible_sequence(tmp_path):
+    config = make_config(tmp_path)
+    config.visual_dedup.enabled = True
+    config.visual_dedup.border_overlay.mode = "required"
+    config.visual_dedup.border_overlay.selection_mode = "random"
+    borders = [
+        asset("visual_border", "red", 3),
+        asset("visual_border", "blue", 1),
+    ]
+    scan = ScanResult(
+        config_id=config.id,
+        assets={
+            category: [asset(category, category)]
+            for category in config.timeline
+        }
+        | {"benefit_overlay": [], "visual_border": borders},
+    )
+
+    first = build_plan(config, scan, 4, seed=99)
+    second = build_plan(config, scan, 4, seed=99)
+
+    assert [item.visual_border.id for item in first.items] == [
+        item.visual_border.id for item in second.items
+    ]
+    assert first.distribution["visual_border"] == {"red.mp4": 3, "blue.mp4": 1}
 
 
 def test_generic_plan_uses_dynamic_timeline_order(tmp_path):

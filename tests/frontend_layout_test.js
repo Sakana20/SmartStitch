@@ -15,7 +15,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260920-66"/,
+  /href="\/styles\.css\?v=20260920-67"/,
   "配置租约超时关闭更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -162,6 +162,16 @@ assert.match(
   app + css,
   /simple-visual-dedup-body[\s\S]*\.simple-visual-dedup-body\s*\{[^}]*display:\s*grid[^}]*gap:\s*16px/,
   "视觉去重卡片各设置组之间必须保留与其他卡片一致的纵向留白",
+);
+assert.match(
+  app,
+  /loadVisualBorderLibrary[\s\S]*\/global-assets\/visual-borders[\s\S]*添加到全局库[\s\S]*visualBorderSelection/,
+  "视觉边框必须从全局库读取，并在简单模式支持随机或固定选择",
+);
+assert.match(
+  app,
+  /data-global-border-weight[\s\S]*data-global-border-toggle[\s\S]*function bindGlobalVisualBorderControls/,
+  "高级模式必须复用现有配置界面管理全局边框状态和默认权重",
 );
 assert.match(
   app,

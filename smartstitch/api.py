@@ -53,6 +53,7 @@ from .models import (
     DeletePoolRequest,
     FeishuConnectionTestRequest,
     FeishuSettingsUpdateRequest,
+    GlobalVisualBorderUpdateRequest,
     JobCreateRequest,
     LibraryPreflightRequest,
     LoudnessPreviewRequest,
@@ -73,6 +74,11 @@ from .scanner import probe_config_audio, scan_config
 from .slice_jobs import SliceJobManager
 from .slicer import SliceConflictError, SliceError, TimelineSlicer
 from .timeline import TimelineAnalyzer, TimelineError, list_source_videos
+from .visual_borders import (
+    VisualBorderLibrary,
+    VisualBorderLibraryConflict,
+    VisualBorderLibraryError,
+)
 
 
 DEFAULT_SHARED_CONFIG_DIRECTORY = Path("/Volumes/home/Smartstitch")
@@ -154,8 +160,14 @@ def create_app(
     user_profiles = UserProfileStore(root / "data")
     config_leases = ConfigLeaseManager(config_store)
     library_service = LibraryService(config_store)
+    visual_border_library = VisualBorderLibrary(config_store.directory)
     database_store = SQLiteStore(root / "data" / "smartstitch.db")
-    job_manager = JobManager(config_store, root / "data", database_store)
+    job_manager = JobManager(
+        config_store,
+        root / "data",
+        database_store,
+        visual_border_library=visual_border_library,
+    )
     feishu_settings = FeishuSettingsStore(root / "data")
     feishu_sync_manager = FeishuSyncManager(
         database_store, feishu_settings, job_manager.get_job
@@ -171,6 +183,7 @@ def create_app(
     app.state.user_profiles = user_profiles
     app.state.config_leases = config_leases
     app.state.library_service = library_service
+    app.state.visual_border_library = visual_border_library
     app.state.job_manager = job_manager
     app.state.feishu_settings = feishu_settings
     app.state.feishu_sync_manager = feishu_sync_manager
@@ -509,6 +522,95 @@ def create_app(
         finally:
             temporary_path.unlink(missing_ok=True)
 
+    @app.get("/api/v1/global-assets/visual-borders")
+    def list_global_visual_borders() -> dict[str, object]:
+        try:
+            return visual_border_library.list()
+        except VisualBorderLibraryError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/global-assets/visual-borders")
+    async def upload_global_visual_border(
+        http_request: Request,
+    ) -> dict[str, object]:
+        encoded_filename = http_request.headers.get(
+            "X-SmartStitch-Filename", ""
+        ).strip()
+        filename = urllib.parse.unquote(encoded_filename)
+        if not filename:
+            raise HTTPException(422, "缺少边框文件名")
+        revision_header = http_request.headers.get(
+            "X-SmartStitch-Library-Revision", ""
+        ).strip()
+        try:
+            expected_revision = int(revision_header)
+        except ValueError as exc:
+            raise HTTPException(422, "缺少或无效的全局边框库版本") from exc
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="smartstitch-global-visual-border-",
+            suffix=Path(filename).suffix.lower(),
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary_name)
+        total = 0
+        try:
+            with temporary_path.open("wb") as handle:
+                async for chunk in http_request.stream():
+                    total += len(chunk)
+                    if total > MAX_VISUAL_BORDER_BYTES:
+                        raise HTTPException(413, "视觉去重边框不能超过 500 MB")
+                    handle.write(chunk)
+            if total == 0:
+                raise HTTPException(422, "视觉去重边框不能为空")
+            return visual_border_library.upload(
+                filename, temporary_path, expected_revision
+            )
+        except VisualBorderLibraryConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (VisualBorderLibraryError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    @app.patch("/api/v1/global-assets/visual-borders/{asset_id}")
+    def update_global_visual_border(
+        asset_id: str,
+        request: GlobalVisualBorderUpdateRequest,
+    ) -> dict[str, object]:
+        try:
+            return visual_border_library.update(
+                asset_id,
+                expected_revision=request.library_revision,
+                updates=request.model_dump(exclude={"library_revision"}),
+            )
+        except VisualBorderLibraryConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except VisualBorderLibraryError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.delete("/api/v1/global-assets/visual-borders/{asset_id}")
+    def disable_global_visual_border(
+        asset_id: str,
+        http_request: Request,
+    ) -> dict[str, object]:
+        revision_header = http_request.headers.get(
+            "X-SmartStitch-Library-Revision", ""
+        ).strip()
+        try:
+            expected_revision = int(revision_header)
+        except ValueError as exc:
+            raise HTTPException(422, "缺少或无效的全局边框库版本") from exc
+        try:
+            return visual_border_library.update(
+                asset_id,
+                expected_revision=expected_revision,
+                updates={"enabled": False},
+            )
+        except VisualBorderLibraryConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except VisualBorderLibraryError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/v1/configs")
     def list_configs() -> list[dict[str, object]]:
         return config_store.list()
@@ -706,7 +808,10 @@ def create_app(
     @app.post("/api/v1/configs/{config_id}/scan")
     def scan(config_id: str) -> dict[str, object]:
         try:
-            result = scan_config(config_store.load(config_id))
+            config = config_store.load(config_id)
+            result = scan_config(
+                config, visual_border_library.assets_for_config(config)
+            )
             return {**result.model_dump(mode="json"), "ok": result.ok}
         except (ConfigError, FileNotFoundError) as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -717,7 +822,14 @@ def create_app(
             config = config_store.load(request.config_id)
             if request.output_directory:
                 config.output.directory = request.output_directory
-            result = build_plan(config, scan_config(config), request.count, request.seed)
+            result = build_plan(
+                config,
+                scan_config(
+                    config, visual_border_library.assets_for_config(config)
+                ),
+                request.count,
+                request.seed,
+            )
             return result.model_dump(mode="json")
         except (ConfigError, FileNotFoundError, PlanError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
