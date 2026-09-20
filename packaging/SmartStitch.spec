@@ -35,6 +35,7 @@ datas = [
     *data_tree(project_root / "config", "config"),
     *copy_metadata("fastapi"),
     *copy_metadata("pydantic"),
+    *copy_metadata("truststore"),
     *copy_metadata("uvicorn"),
 ]
 hiddenimports = collect_submodules("uvicorn")

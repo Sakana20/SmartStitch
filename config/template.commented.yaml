@@ -214,3 +214,11 @@ scanner:
   ignore_hidden_files: true
   ignore_prefixes: ["._", ".~"]
   ignore_names: [.DS_Store]
+  # 未变化的媒体复用本机 data/smartstitch.db 中的 ffprobe 结果。
+  probe_cache_enabled: true
+  # 缓存未命中的素材并发探测；外接机械盘或较慢 NAS 可调低。
+  probe_concurrency: 8
+  # 单个损坏或异常媒体最多占用 ffprobe 的时间。
+  probe_timeout_seconds: 15
+  # 探测失败短期缓存，避免连续点击时反复启动必然失败的子进程。
+  probe_failure_ttl_seconds: 60

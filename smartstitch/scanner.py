@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import shutil
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+from typing import Iterable
 
 from .naming import NamingError, category_is_naming_source, parse_asset_naming
 from .models import (
@@ -15,11 +22,18 @@ from .models import (
     SourceMode,
     resolve_directory,
 )
+from .probe_cache import CachedProbe, MediaProbeCache, ProbeFingerprint
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 VISUAL_BORDER_IMAGE_EXTENSIONS = {".png", ".webp"}
 VISUAL_BORDER_EXTENSIONS = VISUAL_BORDER_IMAGE_EXTENSIONS | {".mov"}
 MANAGED_LIBRARY_MARKER = Path(".smartstitch/library.json")
+LOGGER = logging.getLogger(__name__)
+
+
+def _timeout_error(timeout_seconds: float | None) -> ValueError:
+    value = f"{timeout_seconds:g}" if timeout_seconds is not None else "未知"
+    return ValueError(f"ffprobe 超时（{value} 秒）")
 
 
 def _pixel_format_has_alpha(pixel_format: str | None) -> bool:
@@ -52,7 +66,12 @@ def _fps(value: str | None) -> float | None:
         return None
 
 
-def probe_media(path: Path, image_duration: float = 1.5) -> MediaProbe:
+def probe_media(
+    path: Path,
+    image_duration: float = 1.5,
+    *,
+    timeout_seconds: float | None = None,
+) -> MediaProbe:
     if path.suffix.lower() in IMAGE_EXTENSIONS:
         command = [
             "ffprobe",
@@ -66,7 +85,16 @@ def probe_media(path: Path, image_duration: float = 1.5) -> MediaProbe:
             "json",
             str(path),
         ]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise _timeout_error(timeout_seconds) from exc
         if result.returncode != 0:
             raise ValueError(result.stderr.strip() or "ffprobe 无法读取图片")
         data = json.loads(result.stdout)
@@ -93,7 +121,16 @@ def probe_media(path: Path, image_duration: float = 1.5) -> MediaProbe:
         "json",
         str(path),
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _timeout_error(timeout_seconds) from exc
     if result.returncode != 0:
         raise ValueError(result.stderr.strip() or "ffprobe 无法读取视频")
     data = json.loads(result.stdout)
@@ -117,6 +154,148 @@ def probe_media(path: Path, image_duration: float = 1.5) -> MediaProbe:
         sample_rate=int(audio["sample_rate"]) if audio and audio.get("sample_rate") else None,
         channels=audio.get("channels") if audio else None,
     )
+
+
+def _probe_profile(path: Path, image_duration: float) -> str:
+    if path.suffix.lower() in IMAGE_EXTENSIONS:
+        return f"image-v1:{image_duration:.9g}"
+    return "video-v1"
+
+
+@lru_cache(maxsize=1)
+def _ffprobe_signature() -> str:
+    executable = shutil.which("ffprobe") or "ffprobe"
+    try:
+        result = subprocess.run(
+            [executable, "-version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        version = result.stdout.splitlines()[0].strip() if result.stdout else "unknown"
+    except (OSError, subprocess.SubprocessError):
+        version = "unknown"
+    return f"{executable}|{version}"
+
+
+class _ProbeSession:
+    def __init__(
+        self,
+        config: AppConfig,
+        cache: MediaProbeCache | None,
+    ):
+        self.config = config
+        self.cache = cache if config.scanner.probe_cache_enabled else None
+        self.results: dict[tuple[str, str], CachedProbe] = {}
+        self.requested_keys: set[tuple[str, str]] = set()
+        self.cache_success_hits = 0
+        self.cache_failure_hits = 0
+        self.probe_count = 0
+        self.probe_failures = 0
+        self.cache_seconds = 0.0
+        self.probe_seconds = 0.0
+
+    @staticmethod
+    def _fingerprint(path: Path, image_duration: float) -> ProbeFingerprint:
+        stat = path.stat()
+        return ProbeFingerprint(
+            path=path,
+            size_bytes=stat.st_size,
+            modified_at_ns=stat.st_mtime_ns,
+            profile=_probe_profile(path, image_duration),
+        )
+
+    def prefetch(self, requests: Iterable[tuple[Path, float]]) -> None:
+        pending: dict[tuple[str, str], tuple[ProbeFingerprint, float]] = {}
+        for path, image_duration in requests:
+            try:
+                fingerprint = self._fingerprint(path, image_duration)
+            except OSError as exc:
+                key = (str(path), _probe_profile(path, image_duration))
+                self.requested_keys.add(key)
+                self.results[key] = CachedProbe(error=str(exc))
+                continue
+            self.requested_keys.add(fingerprint.key)
+            if fingerprint.key not in self.results:
+                pending[fingerprint.key] = (fingerprint, image_duration)
+        if not pending:
+            return
+
+        signature = _ffprobe_signature()
+        if self.cache is not None:
+            cache_started = time.perf_counter()
+            try:
+                hits = self.cache.get_many(
+                    (item[0] for item in pending.values()),
+                    ffprobe_signature=signature,
+                )
+            except Exception:
+                hits = {}
+            self.cache_seconds += time.perf_counter() - cache_started
+            self.cache_success_hits += sum(
+                result.probe is not None for result in hits.values()
+            )
+            self.cache_failure_hits += sum(
+                result.probe is None for result in hits.values()
+            )
+            self.results.update(hits)
+            for key in hits:
+                pending.pop(key, None)
+        if not pending:
+            return
+
+        fresh: list[tuple[ProbeFingerprint, CachedProbe]] = []
+        probe_started = time.perf_counter()
+
+        def execute(
+            fingerprint: ProbeFingerprint, image_duration: float
+        ) -> CachedProbe:
+            try:
+                return CachedProbe(
+                    probe=probe_media(
+                        fingerprint.path,
+                        image_duration,
+                        timeout_seconds=self.config.scanner.probe_timeout_seconds,
+                    )
+                )
+            except Exception as exc:
+                return CachedProbe(error=str(exc))
+
+        with ThreadPoolExecutor(
+            max_workers=self.config.scanner.probe_concurrency,
+            thread_name_prefix="ffprobe",
+        ) as pool:
+            futures = {
+                pool.submit(execute, fingerprint, image_duration): fingerprint
+                for fingerprint, image_duration in pending.values()
+            }
+            for future in as_completed(futures):
+                fingerprint = futures[future]
+                result = future.result()
+                self.results[fingerprint.key] = result
+                fresh.append((fingerprint, result))
+        self.probe_seconds += time.perf_counter() - probe_started
+        self.probe_count += len(fresh)
+        self.probe_failures += sum(result.probe is None for _, result in fresh)
+
+        if self.cache is not None:
+            try:
+                self.cache.put_many(
+                    fresh,
+                    ffprobe_signature=signature,
+                    failure_ttl_seconds=(
+                        self.config.scanner.probe_failure_ttl_seconds
+                    ),
+                )
+            except Exception:
+                pass
+
+    def get(self, path: Path, image_duration: float) -> CachedProbe:
+        key = (str(path), _probe_profile(path, image_duration))
+        if key not in self.results:
+            self.prefetch([(path, image_duration)])
+        return self.results[key]
 
 
 def _contains_transparent_samples(path: Path, probe: MediaProbe) -> bool:
@@ -158,12 +337,13 @@ def validate_visual_border_media(
     output_width: int | None = None,
     output_height: int | None = None,
     exact_size: bool = False,
+    probe: MediaProbe | None = None,
 ) -> MediaProbe:
     """Validate one transparent border independently from project discovery."""
     extension = path.suffix.lower()
     if extension not in VISUAL_BORDER_EXTENSIONS:
         raise ValueError("边框仅支持 qtrle/ARGB MOV、透明 PNG 或透明 WebP")
-    probe = probe_media(path)
+    probe = probe or probe_media(path)
     if extension == ".mov" and probe.video_codec != "qtrle":
         raise ValueError("MOV 边框必须使用 QuickTime Animation/qtrle 编码")
     if not probe.has_alpha:
@@ -249,10 +429,43 @@ def _discover_paths(config: AppConfig, group: SourceGroupConfig) -> tuple[Path, 
     return directory, sorted(paths, key=lambda item: str(item).casefold())
 
 
-def scan_group(config: AppConfig, category: str, group: SourceGroupConfig) -> tuple[list[Asset], list[str]]:
+@dataclass(frozen=True)
+class _PreparedGroup:
+    directory: Path
+    explicit: dict[Path, object]
+    candidates: list[Path]
+
+
+def _prepare_group(config: AppConfig, group: SourceGroupConfig) -> _PreparedGroup:
+    directory, discovered = _discover_paths(config, group)
+    explicit: dict[Path, object] = {}
+    for item in group.items:
+        item_path = Path(item.path).expanduser()
+        if not item_path.is_absolute():
+            item_path = directory / item_path
+        explicit[item_path.resolve()] = item
+    candidates = sorted(
+        set(discovered) | set(explicit), key=lambda item: str(item).casefold()
+    )
+    return _PreparedGroup(
+        directory=directory,
+        explicit=explicit,
+        candidates=candidates,
+    )
+
+
+def scan_group(
+    config: AppConfig,
+    category: str,
+    group: SourceGroupConfig,
+    *,
+    prepared: _PreparedGroup | None = None,
+    probe_session: _ProbeSession | None = None,
+) -> tuple[list[Asset], list[str]]:
     if group.mode == SourceMode.DISABLED:
         return [], []
-    directory, discovered = _discover_paths(config, group)
+    prepared = prepared or _prepare_group(config, group)
+    directory = prepared.directory
     errors: list[str] = []
     category_name = f"{group.label}（{category}）" if group.label else category
     if not directory.exists():
@@ -261,17 +474,9 @@ def scan_group(config: AppConfig, category: str, group: SourceGroupConfig) -> tu
             errors.append(message)
         return [], errors
 
-    explicit: dict[Path, object] = {}
-    for item in group.items:
-        item_path = Path(item.path).expanduser()
-        if not item_path.is_absolute():
-            item_path = directory / item_path
-        explicit[item_path.resolve()] = item
-
-    candidates = sorted(set(discovered) | set(explicit), key=lambda item: str(item).casefold())
     assets: list[Asset] = []
-    for path in candidates:
-        item = explicit.get(path)
+    for path in prepared.candidates:
+        item = prepared.explicit.get(path)
         enabled = item.enabled if item is not None else True
         weight = item.weight if item is not None else group.default_weight
         tags = list(item.tags) if item is not None else []
@@ -293,8 +498,18 @@ def scan_group(config: AppConfig, category: str, group: SourceGroupConfig) -> tu
             modified_at=stat.st_mtime if stat else None,
         )
         if exists:
+            result = (
+                probe_session.get(path, group.image_duration_seconds)
+                if probe_session is not None
+                else None
+            )
             try:
-                asset.probe = probe_media(path, group.image_duration_seconds)
+                if result is not None and result.probe is not None:
+                    asset.probe = result.probe
+                elif result is not None:
+                    raise ValueError(result.error or "ffprobe 无法读取媒体")
+                else:
+                    asset.probe = probe_media(path, group.image_duration_seconds)
             except Exception as exc:
                 asset.valid = False
                 asset.error = str(exc)
@@ -352,7 +567,10 @@ def _discover_managed_overlay(config: AppConfig) -> tuple[Path | None, str | Non
     return (candidates[0], None) if candidates else (None, None)
 
 
-def scan_fixed_overlay(config: AppConfig) -> tuple[list[Asset], list[str]]:
+def scan_fixed_overlay(
+    config: AppConfig,
+    probe_session: _ProbeSession | None = None,
+) -> tuple[list[Asset], list[str]]:
     group = config.benefit_overlays
     if group.mode == SourceMode.DISABLED:
         return [], []
@@ -394,7 +612,13 @@ def scan_fixed_overlay(config: AppConfig) -> tuple[list[Asset], list[str]]:
     )
     if asset.valid:
         try:
-            asset.probe = probe_media(path, group.image_duration_seconds)
+            if probe_session is None:
+                asset.probe = probe_media(path, group.image_duration_seconds)
+            else:
+                result = probe_session.get(path, group.image_duration_seconds)
+                if result.probe is None:
+                    raise ValueError(result.error or "ffprobe 无法读取图片")
+                asset.probe = result.probe
         except Exception as exc:
             asset.valid = False
             asset.error = str(exc)
@@ -450,6 +674,7 @@ def _discover_managed_visual_border(
 def scan_visual_border(
     config: AppConfig,
     global_assets: list[Asset] | None = None,
+    probe_session: _ProbeSession | None = None,
 ) -> tuple[list[Asset], list[str], list[str]]:
     settings = config.visual_dedup
     group = settings.border_overlay
@@ -512,11 +737,18 @@ def scan_visual_border(
         error = "边框仅支持 qtrle/ARGB MOV、透明 PNG 或透明 WebP"
     else:
         try:
+            cached_probe: MediaProbe | None = None
+            if probe_session is not None:
+                result = probe_session.get(path, 1.5)
+                if result.probe is None:
+                    raise ValueError(result.error or "ffprobe 无法读取边框")
+                cached_probe = result.probe
             probe = validate_visual_border_media(
                 path,
                 output_width=config.output.width,
                 output_height=config.output.height,
                 exact_size=group.scale_mode == "exact",
+                probe=cached_probe,
             )
         except Exception as exc:
             error = str(exc)
@@ -549,12 +781,33 @@ def scan_visual_border(
 def scan_config(
     config: AppConfig,
     global_visual_borders: list[Asset] | None = None,
+    probe_cache: MediaProbeCache | None = None,
 ) -> ScanResult:
+    scan_started = time.perf_counter()
     assets: dict[str, list[Asset]] = {}
     errors: list[str] = []
     warnings: list[str] = []
+    probe_session = _ProbeSession(config, probe_cache)
+    prepared_groups = {
+        category: _prepare_group(config, group)
+        for category, group in config.sources.items()
+        if group.mode != SourceMode.DISABLED
+    }
+    probe_session.prefetch(
+        (path, group.image_duration_seconds)
+        for category, group in config.sources.items()
+        if group.mode != SourceMode.DISABLED
+        for path in prepared_groups[category].candidates
+        if path.is_file()
+    )
     for category, group in config.sources.items():
-        group_assets, group_errors = scan_group(config, category, group)
+        group_assets, group_errors = scan_group(
+            config,
+            category,
+            group,
+            prepared=prepared_groups.get(category),
+            probe_session=probe_session,
+        )
         assets[category] = group_assets
         errors.extend(group_errors)
         invalid = [asset.name for asset in group_assets if not asset.valid]
@@ -590,17 +843,38 @@ def scan_config(
         if naming_categories and selectable_count == 0:
             errors.append("参与成片命名的视频库中没有可用素材")
 
-    overlays, overlay_errors = scan_fixed_overlay(config)
+    overlays, overlay_errors = scan_fixed_overlay(config, probe_session)
     assets["benefit_overlay"] = overlays
     errors.extend(overlay_errors)
     if any(not asset.valid for asset in overlays):
         warnings.append("benefit_overlay: 存在不可用图片")
     borders, border_errors, border_warnings = scan_visual_border(
-        config, global_visual_borders
+        config, global_visual_borders, probe_session
     )
     assets["visual_border"] = borders
     errors.extend(border_errors)
     warnings.extend(border_warnings)
     if any(not asset.valid for asset in borders):
         warnings.append("visual_border: 存在不可用边框")
-    return ScanResult(config_id=config.id, assets=assets, errors=errors, warnings=warnings)
+    result = ScanResult(
+        config_id=config.id,
+        assets=assets,
+        errors=errors,
+        warnings=warnings,
+    )
+    LOGGER.info(
+        "media scan config=%s candidates=%d cache_success_hits=%d "
+        "cache_failure_hits=%d ffprobe_calls=%d ffprobe_failures=%d "
+        "concurrency=%d cache_seconds=%.3f ffprobe_seconds=%.3f total_seconds=%.3f",
+        config.id,
+        len(probe_session.requested_keys),
+        probe_session.cache_success_hits,
+        probe_session.cache_failure_hits,
+        probe_session.probe_count,
+        probe_session.probe_failures,
+        config.scanner.probe_concurrency,
+        probe_session.cache_seconds,
+        probe_session.probe_seconds,
+        time.perf_counter() - scan_started,
+    )
+    return result

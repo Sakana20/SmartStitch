@@ -18,6 +18,7 @@ from .config import ConfigStore
 from .database import SQLiteStore
 from .models import AppConfig, JobCreateRequest
 from .planner import build_plan
+from .probe_cache import MediaProbeCache
 from .renderer import render_item
 from .scanner import scan_config
 
@@ -59,19 +60,20 @@ class JobManager:
         data_directory: Path,
         database_store: SQLiteStore | None = None,
         visual_border_library: Any | None = None,
+        media_probe_cache: MediaProbeCache | None = None,
     ):
         self.config_store = config_store
         self.data_directory = data_directory
         self.jobs_directory = data_directory / "jobs"
         self.jobs_directory.mkdir(parents=True, exist_ok=True)
-        self.database = JobDatabase(
-            database_store or SQLiteStore(data_directory / "smartstitch.db")
-        )
+        shared_store = database_store or SQLiteStore(data_directory / "smartstitch.db")
+        self.database = JobDatabase(shared_store)
         self.cancel_events: dict[str, threading.Event] = {}
         self.processes: dict[tuple[str, int], subprocess.Popen[str]] = {}
         self.lock = threading.RLock()
         self.output_sync_manager: Any | None = None
         self.visual_border_library = visual_border_library
+        self.media_probe_cache = media_probe_cache or MediaProbeCache(shared_store)
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return [self._summary(job) for job in self.database.list()]
@@ -93,7 +95,7 @@ class JobManager:
             if self.visual_border_library is not None
             else None
         )
-        scan = scan_config(config, global_borders)
+        scan = scan_config(config, global_borders, self.media_probe_cache)
         job_id = uuid.uuid4().hex
         short_id = job_id[:8]
         plan = build_plan(config, scan, request.count, request.seed, short_id)

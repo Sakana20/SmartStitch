@@ -409,6 +409,10 @@ class ScannerConfig(BaseModel):
     ignore_hidden_files: bool = True
     ignore_prefixes: list[str] = Field(default_factory=lambda: ["._", ".~"])
     ignore_names: list[str] = Field(default_factory=lambda: [".DS_Store"])
+    probe_cache_enabled: bool = True
+    probe_concurrency: int = Field(default=8, ge=1, le=16)
+    probe_timeout_seconds: float = Field(default=15, ge=3, le=120)
+    probe_failure_ttl_seconds: int = Field(default=60, ge=0, le=3600)
 
 
 class AppConfig(BaseModel):

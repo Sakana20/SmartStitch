@@ -70,6 +70,7 @@ from .models import (
     WeightUpdateRequest,
 )
 from .planner import PlanError, build_plan
+from .probe_cache import MediaProbeCache
 from .runtime import (
     configure_bundled_media_tools,
     is_frozen,
@@ -184,11 +185,17 @@ def create_app(
     library_service = LibraryService(config_store)
     visual_border_library = VisualBorderLibrary(config_store.directory)
     database_store = SQLiteStore(resolved_data_directory / "smartstitch.db")
+    media_probe_cache = MediaProbeCache(database_store)
+    try:
+        media_probe_cache.prune()
+    except Exception:
+        pass
     job_manager = JobManager(
         config_store,
         resolved_data_directory,
         database_store,
         visual_border_library=visual_border_library,
+        media_probe_cache=media_probe_cache,
     )
     feishu_settings = FeishuSettingsStore(resolved_data_directory)
     feishu_sync_manager = FeishuSyncManager(
@@ -212,6 +219,7 @@ def create_app(
     app.state.feishu_sync_manager = feishu_sync_manager
     app.state.feishu_client_factory = FeishuBaseClient
     app.state.database_store = database_store
+    app.state.media_probe_cache = media_probe_cache
     app.state.timeline_analyzer = timeline_analyzer
     app.state.timeline_slicer = timeline_slicer
     app.state.slice_job_manager = slice_job_manager
@@ -833,7 +841,9 @@ def create_app(
         try:
             config = config_store.load(config_id)
             result = scan_config(
-                config, visual_border_library.assets_for_config(config)
+                config,
+                visual_border_library.assets_for_config(config),
+                media_probe_cache,
             )
             return {**result.model_dump(mode="json"), "ok": result.ok}
         except (ConfigError, FileNotFoundError) as exc:
@@ -848,7 +858,9 @@ def create_app(
             result = build_plan(
                 config,
                 scan_config(
-                    config, visual_border_library.assets_for_config(config)
+                    config,
+                    visual_border_library.assets_for_config(config),
+                    media_probe_cache,
                 ),
                 request.count,
                 request.seed,

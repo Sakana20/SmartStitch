@@ -12,6 +12,7 @@ dependencies = [
   "fastapi>=0.115,<1",
   "pydantic>=2.10,<3",
   "PyYAML>=6.0,<7",
+  "truststore>=0.10,<1",
   "uvicorn[standard]>=0.32,<1",
 ]
 

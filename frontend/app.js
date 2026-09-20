@@ -4230,6 +4230,10 @@ function renderVisualConfig() {
         ${configSwitch("忽略隐藏文件", "scanner.ignore_hidden_files", config.scanner.ignore_hidden_files)}
         ${configInput("忽略文件前缀", "scanner.ignore_prefixes", config.scanner.ignore_prefixes, { type: "list" })}
         ${configInput("忽略文件名", "scanner.ignore_names", config.scanner.ignore_names, { type: "list" })}
+        ${configSwitch("启用 ffprobe 缓存", "scanner.probe_cache_enabled", config.scanner.probe_cache_enabled)}
+        ${configInput("扫描并发数", "scanner.probe_concurrency", config.scanner.probe_concurrency, { type: "number", hint: "1～16" })}
+        ${configInput("单文件探测超时", "scanner.probe_timeout_seconds", config.scanner.probe_timeout_seconds, { type: "number", hint: "秒" })}
+        ${configInput("失败缓存时间", "scanner.probe_failure_ttl_seconds", config.scanner.probe_failure_ttl_seconds, { type: "number", hint: "秒" })}
       </div>
     </details>`;
 

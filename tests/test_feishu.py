@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import ssl
 import stat
 import time
 from pathlib import Path
@@ -177,6 +179,45 @@ def test_base_client_uses_v3_field_and_record_contracts(monkeypatch):
     assert calls[4][2] == {
         "update_records": {"rec123": {"输出文件名": "b.mp4"}}
     }
+
+
+def test_base_client_uses_native_trust_store_for_https():
+    ssl_context = object()
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps({"code": 0, "data": {"ok": True}}).encode()
+
+    def opener(request, *, timeout, context):
+        calls.append((request.full_url, timeout, context))
+        return Response()
+
+    client = FeishuBaseClient(
+        "cli_demo",
+        "secret",
+        opener=opener,
+        ssl_context=ssl_context,  # type: ignore[arg-type]
+        timeout=9,
+    )
+
+    assert client._raw_request(
+        "GET", "/test", None, authenticated=False
+    ) == {"ok": True}
+    assert calls == [(f"{feishu_module.FEISHU_API_BASE}/test", 9, ssl_context)]
+
+
+def test_default_feishu_ssl_context_verifies_hostnames():
+    client = FeishuBaseClient("cli_demo", "secret")
+
+    assert client.ssl_context.verify_mode == ssl.CERT_REQUIRED
+    assert client.ssl_context.check_hostname is True
 
 
 def test_base_client_validates_user_fields_and_only_creates_retained_fields(

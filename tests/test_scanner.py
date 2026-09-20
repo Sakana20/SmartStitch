@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
+from collections import Counter
 
-from smartstitch.models import AppConfig, MediaProbe
+import pytest
 import smartstitch.scanner as scanner_module
+from smartstitch.database import SQLiteStore
+from smartstitch.models import AppConfig, MediaProbe
+from smartstitch.probe_cache import MediaProbeCache
 from smartstitch.scanner import scan_config, scan_visual_border
 
 
@@ -242,3 +248,124 @@ def test_generic_scan_parses_naming_metadata_and_reports_bad_filename(tmp_path, 
     assert parsed.naming_metadata.talent == "张三"
     assert parsed.naming_metadata.restriction_date == "2026-10-31"
     assert any(invalid.name in error and "识别达人名和限制日期" in error for error in result.errors)
+
+
+def _probe_test_config(tmp_path, *, concurrency=8, cache_enabled=True):
+    source = tmp_path / "source"
+    source.mkdir(exist_ok=True)
+    return AppConfig.model_validate(
+        {
+            "schema_version": 3,
+            "workflow_type": "generic",
+            "id": "probe-performance",
+            "name": "探测性能测试",
+            "source_root": str(tmp_path),
+            "timeline": ["pool_1"],
+            "sources": {
+                "pool_1": {
+                    "label": "主素材",
+                    "mode": "required",
+                    "directory": "source",
+                    "extensions": [".mp4"],
+                }
+            },
+            "benefit_overlays": {"mode": "disabled", "file": ""},
+            "output": {"directory": str(tmp_path / "out")},
+            "scanner": {
+                "probe_cache_enabled": cache_enabled,
+                "probe_concurrency": concurrency,
+            },
+        }
+    )
+
+
+def test_scan_reuses_persistent_probe_cache_and_invalidates_changed_file(
+    tmp_path, monkeypatch
+):
+    config = _probe_test_config(tmp_path)
+    first = tmp_path / "source" / "first.mp4"
+    second = tmp_path / "source" / "second.mp4"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    calls = []
+
+    def fake_probe(path, *_args, **_kwargs):
+        calls.append(path)
+        return MediaProbe(duration=1, width=720, height=1280)
+
+    monkeypatch.setattr(scanner_module, "probe_media", fake_probe)
+    cache = MediaProbeCache(SQLiteStore(tmp_path / "data" / "smartstitch.db"))
+
+    initial = scan_config(config, probe_cache=cache)
+    warm = scan_config(config, probe_cache=cache)
+
+    assert initial.ok and warm.ok
+    assert len(calls) == 2
+
+    first.write_bytes(b"first-updated")
+    changed = scan_config(config, probe_cache=cache)
+
+    assert changed.ok
+    assert Counter(calls) == Counter({first.resolve(): 2, second.resolve(): 1})
+
+
+def test_scan_limits_concurrent_ffprobe_processes(tmp_path, monkeypatch):
+    config = _probe_test_config(tmp_path, concurrency=3, cache_enabled=False)
+    for index in range(8):
+        (tmp_path / "source" / f"{index}.mp4").write_bytes(b"video")
+
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    def fake_probe(*_args, **_kwargs):
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return MediaProbe(duration=1, width=720, height=1280)
+
+    monkeypatch.setattr(scanner_module, "probe_media", fake_probe)
+
+    result = scan_config(config)
+
+    assert result.ok
+    assert 2 <= maximum_active <= 3
+
+
+def test_scan_temporarily_caches_probe_failures(tmp_path, monkeypatch):
+    config = _probe_test_config(tmp_path)
+    (tmp_path / "source" / "broken.mp4").write_bytes(b"broken")
+    calls = 0
+
+    def fake_probe(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise ValueError("媒体损坏")
+
+    monkeypatch.setattr(scanner_module, "probe_media", fake_probe)
+    cache = MediaProbeCache(SQLiteStore(tmp_path / "data" / "smartstitch.db"))
+
+    first = scan_config(config, probe_cache=cache)
+    second = scan_config(config, probe_cache=cache)
+
+    assert not first.ok and not second.ok
+    assert calls == 1
+    assert first.assets["pool_1"][0].error == "媒体损坏"
+    assert second.assets["pool_1"][0].error == "媒体损坏"
+
+
+def test_probe_media_reports_timeout(monkeypatch, tmp_path):
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="ffprobe", timeout=3)
+
+    monkeypatch.setattr(scanner_module.subprocess, "run", timeout)
+
+    with pytest.raises(ValueError, match=r"ffprobe 超时（3 秒）"):
+        scanner_module.probe_media(
+            tmp_path / "slow.mp4",
+            timeout_seconds=3,
+        )

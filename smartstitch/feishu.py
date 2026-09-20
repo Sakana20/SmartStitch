@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import tempfile
 import threading
 import time
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+import truststore
 
 from .database import SQLiteStore
 
@@ -180,11 +182,15 @@ class FeishuBaseClient:
         app_secret: str,
         *,
         opener: Callable[..., Any] | None = None,
+        ssl_context: ssl.SSLContext | None = None,
         timeout: float = 15,
     ):
         self.app_id = app_id
         self.app_secret = app_secret
         self.opener = opener or urllib.request.urlopen
+        self.ssl_context = ssl_context or truststore.SSLContext(
+            ssl.PROTOCOL_TLS_CLIENT
+        )
         self.timeout = timeout
         self._token = ""
         self._token_expires_at = 0.0
@@ -503,7 +509,11 @@ class FeishuBaseClient:
 
     def _open_json(self, request: urllib.request.Request) -> dict[str, Any]:
         try:
-            response = self.opener(request, timeout=self.timeout)
+            response = self.opener(
+                request,
+                timeout=self.timeout,
+                context=self.ssl_context,
+            )
             with response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
