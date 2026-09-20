@@ -15,7 +15,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260920-68"/,
+  /href="\/styles\.css\?v=20260920-69"/,
   "ffprobe 扫描配置更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -26,6 +26,26 @@ assert.match(
   css,
   /html\s*\{[^}]*scrollbar-gutter:\s*stable/,
   "页面必须预留稳定滚动条槽位，避免异步内容加载时固定队列横向跳动",
+);
+assert.match(
+  css,
+  /select\s*\{[^}]*-webkit-appearance:\s*none[^}]*appearance:\s*none[^}]*background-image:[^}]*background-position:\s*right 14px center/,
+  "下拉框必须禁用 WKWebView 原生双箭头并使用统一的自定义箭头",
+);
+assert.match(
+  css,
+  /input\[type="number"\]::-webkit-inner-spin-button[^}]*-webkit-appearance:\s*none/,
+  "数字输入框必须隐藏与单位文字冲突的 WKWebView 原生步进器",
+);
+assert.match(
+  css,
+  /\.number-wrap i\s*\{[^}]*top:\s*50%[^}]*transform:\s*translateY\(-50%\)[^}]*pointer-events:\s*none/,
+  "数字输入框单位必须垂直居中且不拦截输入操作",
+);
+assert.match(
+  css,
+  /\.segment-type-select\s*\{[^}]*min-height:\s*34px[^}]*background-color:\s*#fff[^}]*background-position:\s*right 10px center/,
+  "片段类型下拉框必须保留统一箭头并使用紧凑对齐",
 );
 assert.match(
   html,
