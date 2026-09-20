@@ -1,0 +1,32 @@
+#!/bin/bash
+set -euo pipefail
+
+# Minimal, deterministic pkg-config interface for the one external library built
+# by build_ffmpeg.sh. Other optional FFmpeg libraries deliberately report absent.
+PREFIX="${SMARTSTITCH_X264_PREFIX:?SMARTSTITCH_X264_PREFIX is required}"
+arguments=" $* "
+
+if [[ "${arguments}" == *" --version "* ]]; then
+  echo "smartstitch-x264-pkg-config 1"
+  exit 0
+fi
+
+package="${*: -1}"
+if [[ "${package}" != "x264" ]]; then
+  exit 1
+fi
+
+if [[ "${arguments}" == *" --exists "* ]]; then
+  test -f "${PREFIX}/include/x264.h"
+  test -f "${PREFIX}/lib/libx264.a"
+elif [[ "${arguments}" == *" --variable=includedir "* ]]; then
+  echo "${PREFIX}/include"
+elif [[ "${arguments}" == *" --cflags-only-I "* ]]; then
+  echo "-I${PREFIX}/include"
+elif [[ "${arguments}" == *" --cflags "* ]]; then
+  echo "-I${PREFIX}/include"
+elif [[ "${arguments}" == *" --libs "* ]]; then
+  echo "-L${PREFIX}/lib -lx264 -lpthread -lm"
+else
+  exit 1
+fi

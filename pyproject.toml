@@ -20,6 +20,9 @@ dev = [
   "httpx>=0.28,<1",
   "pytest>=8.3,<9",
 ]
+release = [
+  "pyinstaller==6.16.0",
+]
 
 [project.scripts]
 smartstitch = "smartstitch.cli:main"
@@ -30,4 +33,3 @@ packages = ["smartstitch"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-

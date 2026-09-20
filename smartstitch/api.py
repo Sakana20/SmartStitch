@@ -70,6 +70,14 @@ from .models import (
     WeightUpdateRequest,
 )
 from .planner import PlanError, build_plan
+from .runtime import (
+    configure_bundled_media_tools,
+    is_frozen,
+    resource_root,
+    seed_packaged_configs,
+    writable_config_directory,
+    writable_data_directory,
+)
 from .scanner import probe_config_audio, scan_config
 from .slice_jobs import SliceJobManager
 from .slicer import SliceConflictError, SliceError, TimelineSlicer
@@ -141,15 +149,29 @@ def canonical_config_directory(directory: Path) -> Path:
 def create_app(
     base_directory: Path | None = None,
     config_directory: Path | None = None,
+    data_directory: Path | None = None,
 ) -> FastAPI:
-    root = (base_directory or Path(__file__).resolve().parent.parent).resolve()
-    resolved_config_directory = (
-        config_directory.expanduser().resolve()
-        if config_directory is not None
-        else resolve_config_directory(
-            root,
-            allow_shared_default=base_directory is None,
-        )
+    root = (base_directory or resource_root()).resolve()
+    configure_bundled_media_tools(root)
+    local_config_directory = writable_config_directory(root)
+    if config_directory is not None:
+        resolved_config_directory = config_directory.expanduser().resolve()
+    else:
+        try:
+            resolved_config_directory = resolve_config_directory(
+                root,
+                allow_shared_default=base_directory is None,
+            )
+        except SharedConfigUnavailableError:
+            if not is_frozen():
+                raise
+            resolved_config_directory = local_config_directory
+    if resolved_config_directory == local_config_directory:
+        seed_packaged_configs(root / "config", resolved_config_directory)
+    resolved_data_directory = (
+        data_directory.expanduser().resolve()
+        if data_directory is not None
+        else writable_data_directory(root)
     )
     config_store = ConfigStore(
         resolved_config_directory,
@@ -157,28 +179,29 @@ def create_app(
             resolved_config_directory
         ),
     )
-    user_profiles = UserProfileStore(root / "data")
+    user_profiles = UserProfileStore(resolved_data_directory)
     config_leases = ConfigLeaseManager(config_store)
     library_service = LibraryService(config_store)
     visual_border_library = VisualBorderLibrary(config_store.directory)
-    database_store = SQLiteStore(root / "data" / "smartstitch.db")
+    database_store = SQLiteStore(resolved_data_directory / "smartstitch.db")
     job_manager = JobManager(
         config_store,
-        root / "data",
+        resolved_data_directory,
         database_store,
         visual_border_library=visual_border_library,
     )
-    feishu_settings = FeishuSettingsStore(root / "data")
+    feishu_settings = FeishuSettingsStore(resolved_data_directory)
     feishu_sync_manager = FeishuSyncManager(
         database_store, feishu_settings, job_manager.get_job
     )
     job_manager.output_sync_manager = feishu_sync_manager
     feishu_sync_manager.resume_interrupted()
-    timeline_analyzer = TimelineAnalyzer(root / "data" / "timelines")
+    timeline_analyzer = TimelineAnalyzer(resolved_data_directory / "timelines")
     timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
     slice_job_manager = SliceJobManager(timeline_slicer, database_store)
     app = FastAPI(title="SmartStitch", version=__version__)
     app.state.root = root
+    app.state.data_directory = resolved_data_directory
     app.state.config_store = config_store
     app.state.user_profiles = user_profiles
     app.state.config_leases = config_leases
@@ -228,7 +251,7 @@ def create_app(
             "canonical_config_directory": str(
                 config_store.canonical_directory
             ),
-            "shared_config": config_store.directory != root / "config",
+            "shared_config": config_store.directory != local_config_directory,
             "config_path_mapped": config_store.has_path_alias,
         }
 
@@ -840,7 +863,7 @@ def create_app(
             requested_path = Path(request.asset_path).expanduser().resolve()
             probe_config_audio(config, requested_path)
             preview_path = create_audio_preview(
-                request, requested_path, root / "data" / "previews"
+                request, requested_path, resolved_data_directory / "previews"
             )
             return FileResponse(
                 preview_path,

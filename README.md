@@ -38,6 +38,17 @@ smartstitch
 
 也可以双击 macOS 下的 `start.command`，它会自动创建虚拟环境和安装依赖。
 
+正式发布的 `SmartStitch.app` 自带 Python、Python 依赖、FFmpeg 和 ffprobe，普通用户不需要安装上述开发工具。应用启动后会在 `127.0.0.1:8766` 启动本地服务并自动打开默认浏览器。发布版的本机运行数据保存在：
+
+```text
+~/Library/Application Support/SmartStitch/
+├── config/   # NAS 未挂载时使用；首次启动从应用内置模板初始化
+├── data/     # SQLite、任务、时间线、用户和集成设置
+└── logs/     # 应用启动日志
+```
+
+应用包内的 `frontend`、默认配置和媒体工具都是只读资源，不会在 `.app` 内写入数据。任务临时成片仍写在用户选择的输出目录旁，上传和分析临时文件使用 macOS 的系统临时目录。
+
 macOS 复制文件或文件夹路径时可能附带一对单引号或双引号。路径输入框会在粘贴时自动移除最外层引号，中文、空格和 `#` 等文件名字符保持不变。
 
 ### NAS 共享配置
@@ -52,7 +63,7 @@ smartstitch --config-directory /自定义/NAS/Smartstitch
 SMARTSTITCH_CONFIG_DIRECTORY=/自定义/NAS/Smartstitch smartstitch
 ```
 
-共享配置被编辑时，旧版本会备份到共享目录下的 `backups`。多台电脑应避免同时编辑同一个配置文件；扫描和生成可以各自在本机运行。
+共享配置被编辑时，旧版本会备份到共享目录下的 `backups`。多台电脑应避免同时编辑同一个配置文件；扫描和生成可以各自在本机运行。源码开发启动仍保持“NAS 未挂载就停止”的现有行为；正式 `.app` 在没有 NAS 时会回退到上述 Application Support 配置目录，确保应用仍能启动并使用 Web UI。
 
 ## 首次使用
 
@@ -91,3 +102,26 @@ JSON 同时记录机器候选依据、人工确认断点以及由断点形成的
 source .venv/bin/activate
 pytest
 ```
+
+## macOS arm64 正式发布
+
+正式发布只由属于 `main` 历史的 `v*` Tag 触发。GitHub Actions 使用标准 Apple Silicon `macos-15` runner，在干净环境中安装锁定依赖、从固定且经过 SHA-256 校验的源码构建 FFmpeg/x264、运行测试、构建并签名 `SmartStitch.app`、完成 Apple 公证、生成 DMG，最后创建带自动 Release Notes 的 GitHub Release。
+
+仓库需要预先配置以下 GitHub Actions Secrets：
+
+- `MACOS_CERTIFICATE_P12_BASE64`：Developer ID Application 证书（`.p12`）的 Base64 内容。
+- `MACOS_CERTIFICATE_PASSWORD`：该 `.p12` 的密码。
+- `APPLE_ID`：用于公证的 Apple ID。
+- `APPLE_APP_SPECIFIC_PASSWORD`：该 Apple ID 的 app-specific password。
+- `APPLE_TEAM_ID`：Apple Developer Team ID。
+
+发布前应先把 `pyproject.toml` 和 `smartstitch/__init__.py` 中的版本更新为同一个版本并合入 `main`；Tag 必须与 `pyproject.toml` 完全一致。之后执行：
+
+```bash
+git switch main
+git pull --ff-only
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+成功后 Release 附件名为 `SmartStitch-v0.1.0-macOS-arm64.dmg`。工作流会拒绝非 `main` 历史的 Tag、非 arm64 runner、版本不匹配、缺少签名/公证凭据或包含 Homebrew 本地动态库依赖的构建。

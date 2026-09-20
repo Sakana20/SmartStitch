@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from smartstitch.runtime import configure_bundled_media_tools, seed_packaged_configs
+
+
+def test_bundled_media_tools_take_precedence(tmp_path, monkeypatch):
+    binary_directory = tmp_path / "bin"
+    binary_directory.mkdir()
+    for name in ("ffmpeg", "ffprobe"):
+        path = binary_directory / name
+        path.write_text("binary", encoding="utf-8")
+        path.chmod(0o755)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    selected = configure_bundled_media_tools(tmp_path)
+
+    assert selected == binary_directory
+    assert os.environ["PATH"].split(os.pathsep)[0] == str(binary_directory.resolve())
+
+
+def test_seed_packaged_configs_never_overwrites_user_files(tmp_path):
+    source = tmp_path / "resources" / "config"
+    destination = tmp_path / "support" / "config"
+    source.mkdir(parents=True)
+    destination.mkdir(parents=True)
+    (source / "template.commented.yaml").write_text("new", encoding="utf-8")
+    (source / "default.yaml").write_text("default", encoding="utf-8")
+    (destination / "template.commented.yaml").write_text("user", encoding="utf-8")
+
+    seed_packaged_configs(source, destination)
+
+    assert (destination / "template.commented.yaml").read_text("utf-8") == "user"
+    assert (destination / "default.yaml").read_text("utf-8") == "default"
+
+
+def test_frozen_app_falls_back_to_seeded_writable_directories(tmp_path, monkeypatch):
+    from smartstitch import api
+
+    resources = tmp_path / "bundle-resources"
+    (resources / "config").mkdir(parents=True)
+    (resources / "config" / "template.commented.yaml").write_text(
+        "template", encoding="utf-8"
+    )
+    support = tmp_path / "Application Support" / "SmartStitch"
+
+    monkeypatch.setattr(api, "resource_root", lambda: resources)
+    monkeypatch.setattr(api, "is_frozen", lambda: True)
+    monkeypatch.setattr(
+        api,
+        "writable_config_directory",
+        lambda _root: support / "config",
+    )
+    monkeypatch.setattr(
+        api,
+        "writable_data_directory",
+        lambda _root: support / "data",
+    )
+    monkeypatch.setattr(
+        api,
+        "resolve_config_directory",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            api.SharedConfigUnavailableError("missing NAS")
+        ),
+    )
+
+    application = api.create_app()
+
+    assert application.state.config_store.directory == support / "config"
+    assert application.state.data_directory == support / "data"
+    assert (support / "config" / "template.commented.yaml").read_text("utf-8") == "template"
+    assert (support / "data" / "smartstitch.db").is_file()

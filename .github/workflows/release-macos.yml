@@ -1,0 +1,249 @@
+name: Release macOS arm64
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-macos-arm64:
+    name: Build, notarize, and release macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      SMARTSTITCH_FFMPEG_PREFIX: ${{ github.workspace }}/build/ffmpeg-arm64
+      UV_VERSION: "0.11.7"
+
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify runner, tag version, and main ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == "arm64" ]]
+          [[ "${GITHUB_REF_TYPE}" == "tag" ]]
+          [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          tag_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          git merge-base --is-ancestor "${tag_commit}" refs/remotes/origin/main || {
+            echo "Release tag commit is not part of origin/main history." >&2
+            exit 1
+          }
+          project_version="$(python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          package_version="$(python3 -c 'from smartstitch import __version__; print(__version__)')"
+          [[ "${project_version}" == "${package_version}" ]] || {
+            echo "pyproject.toml and smartstitch.__version__ do not match." >&2
+            exit 1
+          }
+          [[ "${GITHUB_REF_NAME}" == "v${project_version}" ]] || {
+            echo "Tag ${GITHUB_REF_NAME} does not match project version v${project_version}." >&2
+            exit 1
+          }
+
+      - name: Require Apple release credentials
+        shell: bash
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for variable in CERTIFICATE CERTIFICATE_PASSWORD APPLE_ID APPLE_APP_PASSWORD APPLE_TEAM_ID; do
+            [[ -n "${!variable}" ]] || {
+              echo "Missing required release secret: ${variable}" >&2
+              exit 1
+            }
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          architecture: arm64
+          cache: pip
+
+      - name: Install locked Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install "uv==${UV_VERSION}"
+          uv sync --frozen --python 3.12 --extra dev --extra release
+
+      - name: Build bundled FFmpeg and ffprobe
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x packaging/*.sh
+          packaging/build_ffmpeg.sh "${SMARTSTITCH_FFMPEG_PREFIX}"
+          echo "${SMARTSTITCH_FFMPEG_PREFIX}/bin" >> "${GITHUB_PATH}"
+
+      - name: Run test suite with bundled media tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run pytest
+          node tests/timeline_math_test.js
+          node tests/frontend_layout_test.js
+          node tests/path_input_test.js
+
+      - name: Import Developer ID certificate
+        shell: bash
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          certificate_path="${RUNNER_TEMP}/developer-id.p12"
+          keychain_path="${RUNNER_TEMP}/smartstitch-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          printf '%s' "${CERTIFICATE}" | base64 --decode > "${certificate_path}"
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security import "${certificate_path}" \
+            -P "${CERTIFICATE_PASSWORD}" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "${keychain_path}"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "${keychain_password}" \
+            "${keychain_path}"
+          security list-keychains -d user -s "${keychain_path}"
+          identity="$(security find-identity -v -p codesigning "${keychain_path}" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)"
+          [[ -n "${identity}" ]] || {
+            echo "No Developer ID Application identity found in certificate." >&2
+            exit 1
+          }
+          echo "SMARTSTITCH_CODESIGN_IDENTITY=${identity}" >> "${GITHUB_ENV}"
+          echo "SMARTSTITCH_SIGNING_KEYCHAIN=${keychain_path}" >> "${GITHUB_ENV}"
+
+      - name: Build and sign SmartStitch.app
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run packaging/build_app.sh "${GITHUB_REF_NAME}"
+          codesign -d --verbose=4 dist/SmartStitch.app
+          codesign --verify --deep --strict --verbose=2 dist/SmartStitch.app
+
+      - name: Smoke-test packaged application
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_root="${RUNNER_TEMP}/smartstitch-smoke"
+          SMARTSTITCH_DATA_DIRECTORY="${smoke_root}" \
+          SMARTSTITCH_CONFIG_DIRECTORY="${smoke_root}/config" \
+          SMARTSTITCH_PORT=18766 \
+          SMARTSTITCH_NO_BROWSER=1 \
+            dist/SmartStitch.app/Contents/MacOS/SmartStitch &
+          app_pid=$!
+          trap 'kill "${app_pid}" 2>/dev/null || true' EXIT
+          for attempt in {1..100}; do
+            if curl --fail --silent --noproxy '*' \
+              http://127.0.0.1:18766/api/v1/system/health \
+              > "${RUNNER_TEMP}/health.json"; then
+              break
+            fi
+            sleep 0.1
+          done
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = json.loads(Path(os.environ["RUNNER_TEMP"] + "/health.json").read_text())
+          assert payload["ok"] is True
+          assert "/SmartStitch.app/Contents/" in payload["ffmpeg"]
+          assert "/SmartStitch.app/Contents/" in payload["ffprobe"]
+          PY
+          curl --fail --silent --noproxy '*' http://127.0.0.1:18766/ \
+            | grep -q '<title>SmartStitch'
+          test -f "${smoke_root}/data/smartstitch.db"
+          kill "${app_pid}"
+          wait "${app_pid}" || true
+          trap - EXIT
+
+      - name: Notarize and staple application
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          app_zip="${RUNNER_TEMP}/SmartStitch.app.zip"
+          ditto -c -k --keepParent dist/SmartStitch.app "${app_zip}"
+          xcrun notarytool submit "${app_zip}" \
+            --apple-id "${APPLE_ID}" \
+            --password "${APPLE_APP_PASSWORD}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --wait
+          xcrun stapler staple dist/SmartStitch.app
+          xcrun stapler validate dist/SmartStitch.app
+          spctl --assess --type execute --verbose=2 dist/SmartStitch.app
+
+      - name: Create, sign, and notarize DMG
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          packaging/create_dmg.sh "${GITHUB_REF_NAME}"
+          dmg="dist/SmartStitch-${GITHUB_REF_NAME}-macOS-arm64.dmg"
+          codesign --force \
+            --timestamp \
+            --sign "${SMARTSTITCH_CODESIGN_IDENTITY}" \
+            "${dmg}"
+          codesign --verify --verbose=2 "${dmg}"
+          xcrun notarytool submit "${dmg}" \
+            --apple-id "${APPLE_ID}" \
+            --password "${APPLE_APP_PASSWORD}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --wait
+          xcrun stapler staple "${dmg}"
+          xcrun stapler validate "${dmg}"
+          spctl --assess --type open \
+            --context context:primary-signature \
+            --verbose=2 \
+            "${dmg}"
+
+      - name: Create GitHub Release and upload DMG
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dmg="dist/SmartStitch-${GITHUB_REF_NAME}-macOS-arm64.dmg"
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${dmg}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${dmg}" \
+              --verify-tag \
+              --generate-notes \
+              --title "SmartStitch ${GITHUB_REF_NAME}"
+          fi
+
+      - name: Remove temporary signing keychain
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${SMARTSTITCH_SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "${SMARTSTITCH_SIGNING_KEYCHAIN}" || true
+          fi

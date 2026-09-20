@@ -11,3 +11,5 @@ config/backups/
 # 本机业务配置包含真实素材路径，只在本地使用，不提交到 Git。
 config/taobao-xingguang.yaml
 output/
+build/
+dist/
