@@ -49,5 +49,38 @@ if grep -E '/opt/homebrew|/usr/local' "${dependency_report}"; then
   exit 1
 fi
 
+while IFS= read -r -d '' bundled_file; do
+  if file "${bundled_file}" | grep -q 'Mach-O'; then
+    codesign --force --sign - --timestamp=none "${bundled_file}"
+  fi
+done < <(find "${APP}/Contents" -type f -print0)
+
+# Sign nested code containers from the inside out before sealing the top-level app.
+while IFS= read -r -d '' code_container; do
+  codesign --force --sign - --timestamp=none "${code_container}"
+done < <(
+  find -d "${APP}/Contents" -type d \
+    \( -name '*.framework' -o -name '*.bundle' -o -name '*.app' -o -name '*.xpc' \) \
+    -print0
+)
+
+codesign --force \
+  --sign - \
+  --timestamp=none \
+  --entitlements "${PROJECT_ROOT}/packaging/entitlements.plist" \
+  "${APP}"
+
+codesign --verify --strict --verbose=2 "${APP}/Contents/Resources/bin/ffmpeg"
+codesign --verify --strict --verbose=2 "${APP}/Contents/Resources/bin/ffprobe"
 codesign --verify --deep --strict --verbose=2 "${APP}"
+for signed_target in \
+  "${APP}" \
+  "${APP}/Contents/Resources/bin/ffmpeg" \
+  "${APP}/Contents/Resources/bin/ffprobe"; do
+  signature_details="$(codesign -d --verbose=4 "${signed_target}" 2>&1)"
+  grep -q '^Signature=adhoc$' <<< "${signature_details}" || {
+    echo "Expected ad-hoc signature: ${signed_target}" >&2
+    exit 1
+  }
+done
 echo "Built ${APP}"

@@ -19,7 +19,7 @@ if not ffmpeg.is_file() or not ffprobe.is_file():
     )
 
 version = os.environ.get("SMARTSTITCH_BUILD_VERSION", "0.1.0").removeprefix("v")
-signing_identity = os.environ.get("SMARTSTITCH_CODESIGN_IDENTITY") or None
+signing_identity = "-"
 
 def data_tree(source, destination):
     source = Path(source)

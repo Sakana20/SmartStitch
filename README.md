@@ -103,17 +103,13 @@ source .venv/bin/activate
 pytest
 ```
 
-## macOS arm64 正式发布
+## macOS arm64 内部发布
 
-正式发布只由属于 `main` 历史的 `v*` Tag 触发。GitHub Actions 使用标准 Apple Silicon `macos-15` runner，在干净环境中安装锁定依赖、从固定且经过 SHA-256 校验的源码构建 FFmpeg/x264、运行测试、构建并签名 `SmartStitch.app`、完成 Apple 公证、生成 DMG，最后创建带自动 Release Notes 的 GitHub Release。
+发布只由属于 `main` 历史的 `v*` Tag 触发。GitHub Actions 使用标准 Apple Silicon `macos-15` runner，在干净环境中安装锁定依赖、从固定且经过 SHA-256 校验的源码构建 FFmpeg/x264、运行测试、用 ad-hoc 签名构建 `SmartStitch.app`、执行打包后黑盒测试、生成并校验 DMG，最后创建带自动 Release Notes 的 GitHub Release。
 
-仓库需要预先配置以下 GitHub Actions Secrets：
+这是公司内部使用的未公证版本，不包含 Developer ID Application 签名，也不会提交 Apple notarization。首次在其他 Mac 打开时可能受到 macOS Gatekeeper 提示。确认 DMG 来自公司的 GitHub Release 后，可以在 Finder 中按住 Control 点按应用并选择“打开”，或在“系统设置 → 隐私与安全性”中选择“仍要打开”。
 
-- `MACOS_CERTIFICATE_P12_BASE64`：Developer ID Application 证书（`.p12`）的 Base64 内容。
-- `MACOS_CERTIFICATE_PASSWORD`：该 `.p12` 的密码。
-- `APPLE_ID`：用于公证的 Apple ID。
-- `APPLE_APP_SPECIFIC_PASSWORD`：该 Apple ID 的 app-specific password。
-- `APPLE_TEAM_ID`：Apple Developer Team ID。
+工作流不需要配置任何 Apple Developer GitHub Secrets。创建 Release 和上传 DMG 使用 GitHub Actions 自动提供的 `GITHUB_TOKEN`。
 
 发布前应先把 `pyproject.toml` 和 `smartstitch/__init__.py` 中的版本更新为同一个版本并合入 `main`；Tag 必须与 `pyproject.toml` 完全一致。之后执行：
 
@@ -124,4 +120,4 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-成功后 Release 附件名为 `SmartStitch-v0.1.0-macOS-arm64.dmg`。工作流会拒绝非 `main` 历史的 Tag、非 arm64 runner、版本不匹配、缺少签名/公证凭据或包含 Homebrew 本地动态库依赖的构建。
+成功后 Release 附件名为 `SmartStitch-v0.1.0-macOS-arm64.dmg`。工作流会拒绝非 `main` 历史的 Tag、非 arm64 runner、版本不匹配、签名验证失败或包含 Homebrew 本地动态库依赖的构建。
