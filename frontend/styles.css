@@ -488,6 +488,8 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .simple-feishu-actions .button { flex: none; }
 .simple-feishu-actions span.ok { color: var(--green); font-weight: 700; }
 .simple-feishu-actions small { flex-basis: 100%; line-height: 1.5; }
+.feishu-connection-error { flex-basis: 100%; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 12px; color: #9c3d2a; background: #fce4dd; border-radius: 10px; font-size: 11px; line-height: 1.55; }
+.feishu-connection-error a { flex: none; color: #7f2e20; font-weight: 750; }
 .simple-setting-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px; align-items: end; }
 .simple-setting-grid .wide { grid-column: 1 / -1; }
 .simple-setting-grid.one-line { grid-template-columns: minmax(260px, 1fr) auto; align-items: end; }

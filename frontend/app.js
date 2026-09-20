@@ -21,6 +21,7 @@ const state = {
   feishuSettingsDraft: { app_id: "", app_secret_configured: false },
   feishuSecretDraft: "",
   feishuConnection: null,
+  feishuConnectionError: null,
   feishuSync: null,
   feishuSyncTimer: null,
   user: null,
@@ -265,6 +266,43 @@ function renderConfigLeaseBanner(lost = false, message = "") {
   $("#saveConfigBtn").disabled = lost;
 }
 
+function clearConfigLeaseTimers(lease) {
+  if (!lease) return;
+  if (lease.heartbeatTimer) clearInterval(lease.heartbeatTimer);
+  if (lease.expiryTimer) clearTimeout(lease.expiryTimer);
+  lease.heartbeatTimer = null;
+  lease.expiryTimer = null;
+}
+
+function scheduleConfigLeaseExpiry(lease) {
+  if (!lease || state.configLease !== lease) return;
+  if (lease.expiryTimer) clearTimeout(lease.expiryTimer);
+  const configuredSeconds = Number(lease.owner?.lease_seconds);
+  const leaseSeconds = Number.isFinite(configuredSeconds) && configuredSeconds > 0
+    ? configuredSeconds
+    : 120;
+  lease.expiresAt = Date.now() + leaseSeconds * 1000;
+  lease.expiryTimer = setTimeout(() => expireConfigLease(lease), leaseSeconds * 1000);
+}
+
+function isTerminalConfigLeaseError(error) {
+  if (error?.status !== 423 || error.detail?.code !== "lease_invalid") return false;
+  return /已过期|已属于其他会话|不存在或无法读取|不是配置锁持有者/.test(error.message || "");
+}
+
+async function expireConfigLease(lease = state.configLease) {
+  if (!lease || state.configLease !== lease || lease.expirationHandled) return false;
+  lease.expirationHandled = true;
+  lease.lost = true;
+  clearConfigLeaseTimers(lease);
+  state.configLease = null;
+  await closeConfig({ skipConfirm: true, releaseLease: false });
+  state.configDraft = state.config ? structuredClone(state.config) : null;
+  if ($("#yamlEditor")) $("#yamlEditor").value = state.yaml;
+  window.alert("配置编辑已超时过期，配置未保存");
+  return true;
+}
+
 async function acquireConfigLease(configId) {
   if (!ensureCurrentUser()) return null;
   const payload = { browser_session_id: browserSessionId() };
@@ -295,7 +333,7 @@ async function acquireConfigLease(configId) {
 }
 
 function installConfigLease(configId, acquired) {
-  if (state.configLease?.heartbeatTimer) clearInterval(state.configLease.heartbeatTimer);
+  clearConfigLeaseTimers(state.configLease);
   state.configLease = {
     configId,
     leaseToken: acquired.lease_token,
@@ -304,8 +342,12 @@ function installConfigLease(configId, acquired) {
     heartbeatFailures: 0,
     lost: false,
     heartbeatTimer: null,
+    expiryTimer: null,
+    expiresAt: null,
+    expirationHandled: false,
   };
   state.configLease.heartbeatTimer = setInterval(renewConfigLease, 15000);
+  scheduleConfigLeaseExpiry(state.configLease);
   renderConfigLeaseBanner(false);
 }
 
@@ -323,9 +365,14 @@ async function renewConfigLease() {
     if (state.configLease !== lease) return;
     lease.owner = renewed.owner;
     lease.heartbeatFailures = 0;
+    scheduleConfigLeaseExpiry(lease);
     renderConfigLeaseBanner(false);
   } catch (error) {
     if (state.configLease !== lease) return;
+    if (isTerminalConfigLeaseError(error)) {
+      await expireConfigLease(lease);
+      return;
+    }
     lease.heartbeatFailures += 1;
     const lost = error.status === 423 || lease.heartbeatFailures >= 3;
     renderConfigLeaseBanner(lost, lost ? "无法续租，已停止保存" : "NAS 连接不稳定，正在重试续租");
@@ -335,7 +382,7 @@ async function renewConfigLease() {
 
 async function releaseConfigLease(lease = state.configLease, { silent = false } = {}) {
   if (!lease) return;
-  if (lease.heartbeatTimer) clearInterval(lease.heartbeatTimer);
+  clearConfigLeaseTimers(lease);
   if (state.configLease === lease) state.configLease = null;
   try {
     await api(`/configs/${lease.configId}/lock/release`, {
@@ -2954,6 +3001,7 @@ async function openConfig() {
     state.feishuSettingsDraft = structuredClone(state.feishuSettings);
     state.feishuSecretDraft = "";
     state.feishuConnection = null;
+    state.feishuConnectionError = null;
     $("#yamlEditor").value = state.yaml;
     restoreConfigUiPreferences();
     document.body.classList.add("config-modal-open");
@@ -2973,7 +3021,7 @@ function configEditorIsDirty() {
   try { return JSON.stringify(currentStructuredDraft()) !== JSON.stringify(state.config); }
   catch (_) { return true; }
 }
-async function closeConfig({ skipConfirm = false } = {}) {
+async function closeConfig({ skipConfirm = false, releaseLease = true } = {}) {
   if (!skipConfirm && configEditorIsDirty() && !window.confirm("放弃未保存的修改并释放配置吗？")) return false;
   saveConfigUiPreferences();
   const audio = $("#loudnessPreviewAudio");
@@ -2982,10 +3030,11 @@ async function closeConfig({ skipConfirm = false } = {}) {
   state.previewAudioCleanup = null;
   state.feishuSecretDraft = "";
   state.feishuConnection = null;
+  state.feishuConnectionError = null;
   $("#configModal").classList.remove("open");
   $("#configModal").setAttribute("aria-hidden","true");
   document.body.classList.remove("config-modal-open");
-  await releaseConfigLease();
+  if (releaseLease) await releaseConfigLease();
   return true;
 }
 
@@ -3141,6 +3190,15 @@ function feishuConnectionStatus() {
   return `已连接，识别到 ${state.feishuConnection.tables.length} 个数据表`;
 }
 
+function feishuConnectionErrorMarkup() {
+  const error = state.feishuConnectionError;
+  if (!error) return "";
+  const link = error.console_url
+    ? `<a href="${escapeHtml(error.console_url)}" target="_blank" rel="noopener noreferrer">打开飞书权限配置</a>`
+    : "";
+  return `<div class="feishu-connection-error"><span>${escapeHtml(error.message || "飞书连接失败")}</span>${link}</div>`;
+}
+
 async function testFeishuConnection(prefix) {
   if (state.configMode === "advanced") state.configDraft = collectVisualConfig();
   const appId = $(`#${prefix}FeishuAppId`)?.value.trim() || state.feishuSettingsDraft.app_id;
@@ -3170,6 +3228,7 @@ async function testFeishuConnection(prefix) {
       }),
     });
     state.feishuConnection = result;
+    state.feishuConnectionError = null;
     if (!sync.table_id || !result.tables.some(table => table.table_id === sync.table_id)) {
       sync.table_id = result.selected_table_id || "";
     }
@@ -3180,6 +3239,11 @@ async function testFeishuConnection(prefix) {
     toast("飞书多维表格连接成功");
   } catch (error) {
     state.feishuConnection = null;
+    state.feishuConnectionError = error.detail || { message: error.message };
+    const scrollTop = configEditorScrollTop();
+    if (state.configMode === "advanced") renderVisualConfig();
+    else renderSimpleConfig();
+    restoreActiveConfigScroll(scrollTop);
     toast(error.message, true);
   } finally {
     const current = $(`#${prefix}TestFeishuBtn`);
@@ -3206,6 +3270,7 @@ function bindFeishuControls(prefix) {
     sync.base_url = event.target.value.trim();
     sync.table_id = "";
     state.feishuConnection = null;
+    state.feishuConnectionError = null;
   });
   $(`#${prefix}FeishuTable`)?.addEventListener("change", event => {
     sync.table_id = event.target.value;
@@ -3369,7 +3434,7 @@ function renderSimpleConfig() {
           <label class="simple-large-field simple-feishu-url"><span>多维表格链接</span><input id="simpleFeishuUrl" value="${escapeHtml(feishu.base_url)}" placeholder="支持 /wiki/... 或 /base/... 链接" ${feishu.enabled ? "" : "disabled"}></label>
           <label class="simple-large-field"><span>数据表</span><select id="simpleFeishuTable" ${feishu.enabled ? "" : "disabled"}>${feishuTableOptions(feishu.table_id)}</select></label>
         </div>
-        <div class="simple-feishu-actions"><button id="simpleTestFeishuBtn" class="button secondary small" type="button" ${feishu.enabled ? "" : "disabled"}>测试连接</button><span class="${state.feishuConnection ? "ok" : ""}">${escapeHtml(feishuConnectionStatus())}</span><small>Secret 仅保存在本机，不会进入成片任务快照。</small></div>
+        <div class="simple-feishu-actions"><button id="simpleTestFeishuBtn" class="button secondary small" type="button" ${feishu.enabled ? "" : "disabled"}>测试连接</button><span class="${state.feishuConnection ? "ok" : ""}">${escapeHtml(feishuConnectionStatus())}</span><small>Secret 仅保存在本机，不会进入成片任务快照。</small>${feishuConnectionErrorMarkup()}</div>
       </div>
     </section>`;
   const outputChoices = [
@@ -3806,7 +3871,7 @@ function renderVisualConfig() {
         <div class="config-field"><label>数据表</label><select id="advancedFeishuTable" data-config-path="output.feishu_base_sync.table_id" data-config-type="string">${feishuTableOptions(feishu.table_id)}</select></div>
         ${configSelect("同步条目", "output.feishu_base_sync.row_scope", feishu.row_scope, [["all_items", "成功与失败都同步"], ["succeeded_only", "只同步成功成片"]])}
         <div class="config-field"><label>写入方式</label><code class="managed-pool-path">upsert · 稳定键去重</code></div>
-        <div class="config-field wide simple-feishu-actions"><button id="advancedTestFeishuBtn" class="button secondary small" type="button">测试连接</button><span class="${state.feishuConnection ? "ok" : ""}">${escapeHtml(feishuConnectionStatus())}</span><small>Secret 仅保存在本机 data/integrations.yaml。</small></div>
+        <div class="config-field wide simple-feishu-actions"><button id="advancedTestFeishuBtn" class="button secondary small" type="button">测试连接</button><span class="${state.feishuConnection ? "ok" : ""}">${escapeHtml(feishuConnectionStatus())}</span><small>Secret 仅保存在本机 data/integrations.yaml。</small>${feishuConnectionErrorMarkup()}</div>
       </div>
     </details>`;
   const batch = config.batch;
@@ -4383,6 +4448,11 @@ async function cloneConfig() {
 async function saveConfig() {
   const button = $("#saveConfigBtn"); button.disabled = true; button.textContent = "校验中…";
   try {
+    const lease = state.configLease;
+    if (lease?.expiresAt && Date.now() >= lease.expiresAt) {
+      await expireConfigLease(lease);
+      return;
+    }
     if (state.configMode !== "yaml") {
       const sync = ensureFeishuBaseSync(currentStructuredDraft());
       if (sync.enabled) {
@@ -4424,7 +4494,9 @@ async function saveConfig() {
     await closeConfig({ skipConfirm: true });
     toast("配置已保存并备份");
     await loadConfigs(state.configId);
-  } catch (error) { toast(error.message, true); }
+  } catch (error) {
+    if (!isTerminalConfigLeaseError(error) || !await expireConfigLease()) toast(error.message, true);
+  }
   finally { button.disabled = Boolean(state.configLease?.lost); button.textContent = "校验并保存"; }
 }
 

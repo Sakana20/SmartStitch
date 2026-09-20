@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,29 +21,29 @@ from .database import SQLiteStore
 
 
 FEISHU_API_BASE = "https://open.feishu.cn/open-apis"
+MEDIA_UPLOAD_DIRECT_LIMIT = 20 * 1024 * 1024
+MEDIA_UPLOAD_PART_DELAY = 0.22
 SYNC_FIELDS = [
-    "_smartstitch_key",
-    "同步时间",
-    "批次 ID",
-    "批次短 ID",
-    "项目 ID",
-    "项目名称",
-    "任务序号",
-    "状态",
-    "输出文件名",
-    "输出路径",
-    "产品",
+    "日期",
+    "单选",
+    "文本",
+    "文件",
+    "命名",
+    "当日文件夹路径",
     "利益点",
     "达人",
     "限制日期",
-    "素材组合",
-    "预计时长",
-    "实际时长",
-    "尝试次数",
-    "错误",
-    "任务开始时间",
-    "任务结束时间",
+    "_smartstitch_key",
 ]
+SMARTSTITCH_TEXT_FIELDS = ["利益点", "达人", "限制日期", "_smartstitch_key"]
+USER_FIELD_TYPES: dict[str, set[int | str]] = {
+    "日期": {5, "date", "datetime"},
+    "单选": {3, "select", "single_select"},
+    "文本": {1, "text"},
+    "文件": {17, "attachment"},
+    "命名": {1, "text"},
+    "当日文件夹路径": {1, "text"},
+}
 
 
 def _now() -> str:
@@ -55,10 +57,34 @@ class FeishuError(RuntimeError):
         *,
         code: int | str | None = None,
         retryable: bool = False,
+        required_scopes: list[str] | None = None,
+        console_url: str | None = None,
     ):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.required_scopes = required_scopes or []
+        self.console_url = console_url
+
+
+def _feishu_error_details(message: str) -> tuple[str, list[str], str | None]:
+    scopes = sorted(
+        set(re.findall(r"\b(?:base|wiki|bitable|docs|drive):[a-z0-9:._-]+\b", message))
+    )
+    url_match = re.search(r"https://open\.feishu\.cn/[^\s]+", message)
+    console_url = url_match.group(0).rstrip("。；;,)") if url_match else None
+    if not scopes:
+        return f"飞书请求失败: {message}", [], console_url
+    labels = {
+        "base:table:read": "读取多维表格数据表",
+        "base:field:delete": "删除多维表格字段",
+        "base:record:delete": "删除多维表格记录",
+        "docs:document.media:upload": "上传云文档附件",
+        "wiki:wiki:readonly": "读取知识库节点",
+    }
+    scope_text = "、".join(f"{labels.get(scope, '所需权限')}（{scope}）" for scope in scopes)
+    friendly = f"飞书应用缺少权限：{scope_text}。请在开放平台开通并发布后重新测试连接。"
+    return friendly, scopes, console_url
 
 
 class FeishuSettingsStore:
@@ -180,13 +206,24 @@ class FeishuBaseClient:
 
     def list_tables(self, base_token: str) -> list[dict[str, object]]:
         items = self._list_all(f"/base/v3/bases/{base_token}/tables", 300)
-        return [
-            {
-                "table_id": str(item.get("table_id") or item.get("id") or ""),
-                "name": str(item.get("name") or ""),
-            }
-            for item in items
-        ]
+        return [self._normalize_table(item) for item in items]
+
+    def get_table(self, base_token: str, table_id: str) -> dict[str, object]:
+        data = self._request(
+            "GET", f"/base/v3/bases/{base_token}/tables/{table_id}"
+        )
+        item = data.get("table") if isinstance(data.get("table"), dict) else data
+        table = self._normalize_table(item)
+        if not table["table_id"]:
+            table["table_id"] = table_id
+        return table
+
+    @staticmethod
+    def _normalize_table(item: dict[str, Any]) -> dict[str, object]:
+        return {
+            "table_id": str(item.get("table_id") or item.get("id") or ""),
+            "name": str(item.get("name") or item.get("title") or ""),
+        }
 
     def list_fields(self, base_token: str, table_id: str) -> list[dict[str, object]]:
         return self._list_all(
@@ -214,6 +251,23 @@ class FeishuBaseClient:
                 {"name": field_name, "type": "text"},
             )
             existing[field_name] = {"name": field_name, "type": "text"}
+
+    def ensure_sync_schema(self, base_token: str, table_id: str) -> None:
+        fields = {
+            str(field.get("name") or field.get("field_name") or ""): field
+            for field in self.list_fields(base_token, table_id)
+        }
+        missing = [name for name in USER_FIELD_TYPES if name not in fields]
+        if missing:
+            raise FeishuError(
+                "目标数据表缺少需要由用户预先创建的字段：" + "、".join(missing)
+            )
+        for name, accepted_types in USER_FIELD_TYPES.items():
+            field_type = fields[name].get("type")
+            normalized = field_type.casefold() if isinstance(field_type, str) else field_type
+            if normalized not in accepted_types:
+                raise FeishuError(f"目标数据表字段“{name}”的类型不正确")
+        self.ensure_text_fields(base_token, table_id, SMARTSTITCH_TEXT_FIELDS)
 
     def list_records(self, base_token: str, table_id: str) -> list[dict[str, Any]]:
         return self._list_all(
@@ -248,13 +302,123 @@ class FeishuBaseClient:
                 },
             )
 
+    def delete_field(self, base_token: str, table_id: str, field_id: str) -> None:
+        self._request(
+            "DELETE",
+            f"/bitable/v1/apps/{base_token}/tables/{table_id}/fields/{field_id}",
+        )
+
+    def batch_delete_records(
+        self, base_token: str, table_id: str, record_ids: list[str]
+    ) -> None:
+        for offset in range(0, len(record_ids), 500):
+            self._request(
+                "POST",
+                f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/batch_delete",
+                {"records": record_ids[offset : offset + 500]},
+            )
+
+    def upload_attachment(self, base_token: str, file_path: str | Path) -> str:
+        path = Path(file_path)
+        if not path.is_file():
+            raise FeishuError(f"待上传的成片不存在：{path}")
+        size = path.stat().st_size
+        common: dict[str, object] = {
+            "file_name": path.name,
+            "parent_type": "bitable_file",
+            "parent_node": base_token,
+            "size": size,
+            "extra": json.dumps(
+                {"drive_route_token": base_token}, ensure_ascii=False
+            ),
+        }
+        if size <= MEDIA_UPLOAD_DIRECT_LIMIT:
+            data = self._multipart_request(
+                "/drive/v1/medias/upload_all", common, path.read_bytes()
+            )
+        else:
+            prepared = self._request(
+                "POST", "/drive/v1/medias/upload_prepare", common
+            )
+            upload_id = str(prepared.get("upload_id") or "")
+            block_size = int(prepared.get("block_size") or 0)
+            block_num = int(prepared.get("block_num") or 0)
+            if not upload_id or block_size <= 0 or block_num <= 0:
+                raise FeishuError("飞书未返回有效的分片上传策略")
+            with path.open("rb") as handle:
+                for seq in range(block_num):
+                    chunk = handle.read(block_size)
+                    if not chunk:
+                        raise FeishuError("读取成片分片时提前结束")
+                    self._multipart_request(
+                        "/drive/v1/medias/upload_part",
+                        {
+                            "upload_id": upload_id,
+                            "seq": seq,
+                            "size": len(chunk),
+                        },
+                        chunk,
+                    )
+                    if seq + 1 < block_num:
+                        time.sleep(MEDIA_UPLOAD_PART_DELAY)
+            data = self._request(
+                "POST",
+                "/drive/v1/medias/upload_finish",
+                {"upload_id": upload_id, "block_num": block_num},
+            )
+        file_token = str(data.get("file_token") or "")
+        if not file_token:
+            raise FeishuError("飞书附件上传成功但未返回 file_token")
+        return file_token
+
+    def _multipart_request(
+        self, path: str, fields: dict[str, object], file_bytes: bytes
+    ) -> dict[str, Any]:
+        boundary = f"----SmartStitch{uuid.uuid4().hex}"
+        body = bytearray()
+        for name, value in fields.items():
+            body.extend(f"--{boundary}\r\n".encode())
+            body.extend(
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+            )
+            body.extend(str(value).encode("utf-8"))
+            body.extend(b"\r\n")
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(b'Content-Disposition: form-data; name="file"; filename="blob"\r\n')
+        body.extend(b"Content-Type: application/octet-stream\r\n\r\n")
+        body.extend(file_bytes)
+        body.extend(f"\r\n--{boundary}--\r\n".encode())
+        request = urllib.request.Request(
+            f"{FEISHU_API_BASE}{path}",
+            data=bytes(body),
+            headers={
+                "Authorization": f"Bearer {self._tenant_token()}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+            method="POST",
+        )
+        return self._open_json(request)
+
     def _list_all(self, path: str, page_size: int) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         offset = 0
         while True:
             query = urllib.parse.urlencode({"limit": page_size, "offset": offset})
             data = self._request("GET", f"{path}?{query}")
-            page_items = data.get("items") or []
+            if all(
+                isinstance(data.get(key), list)
+                for key in ("data", "fields", "record_id_list")
+            ):
+                page_items = self._columnar_records(data)
+            else:
+                page_items = (
+                    data.get("items")
+                    or data.get("tables")
+                    or data.get("fields")
+                    or data.get("records")
+                    or data.get("blocks")
+                    or []
+                )
             if not isinstance(page_items, list):
                 raise FeishuError("飞书多维表格返回的数据格式不正确")
             items.extend(item for item in page_items if isinstance(item, dict))
@@ -264,6 +428,38 @@ class FeishuBaseClient:
                 return items
             if isinstance(total, int) and offset >= total:
                 return items
+
+    @staticmethod
+    def _columnar_records(data: dict[str, Any]) -> list[dict[str, Any]]:
+        """Normalize Base v3's fields + record_id_list + data response."""
+        rows = data.get("data")
+        fields = data.get("fields")
+        record_ids = data.get("record_id_list")
+        if not all(isinstance(value, list) for value in (rows, fields, record_ids)):
+            return []
+        if len(rows) != len(record_ids):
+            raise FeishuError("飞书多维表格返回的记录行数不一致")
+        field_names = [
+            str(field.get("name") or field.get("field_name") or "")
+            if isinstance(field, dict)
+            else str(field)
+            for field in fields
+        ]
+        records: list[dict[str, Any]] = []
+        for record_id, row in zip(record_ids, rows, strict=True):
+            if not isinstance(row, list):
+                raise FeishuError("飞书多维表格返回的记录格式不正确")
+            records.append(
+                {
+                    "record_id": str(record_id),
+                    "fields": {
+                        field_name: value
+                        for field_name, value in zip(field_names, row)
+                        if field_name
+                    },
+                }
+            )
+        return records
 
     def _tenant_token(self) -> str:
         with self._lock:
@@ -303,6 +499,9 @@ class FeishuBaseClient:
         request = urllib.request.Request(
             f"{FEISHU_API_BASE}{path}", data=body, headers=headers, method=method
         )
+        return self._open_json(request)
+
+    def _open_json(self, request: urllib.request.Request) -> dict[str, Any]:
         try:
             response = self.opener(request, timeout=self.timeout)
             with response:
@@ -314,10 +513,13 @@ class FeishuBaseClient:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 error_payload = {}
             message = error_payload.get("msg") or error_payload.get("message") or str(exc)
+            friendly, scopes, console_url = _feishu_error_details(str(message))
             raise FeishuError(
-                f"飞书请求失败: {message}",
+                friendly,
                 code=error_payload.get("code"),
                 retryable=exc.code == 429 or exc.code >= 500,
+                required_scopes=scopes,
+                console_url=console_url,
             ) from exc
         except (OSError, TimeoutError) as exc:
             raise FeishuError(f"无法连接飞书: {exc}", retryable=True) from exc
@@ -329,8 +531,9 @@ class FeishuBaseClient:
         if code != 0:
             message = str(response_payload.get("msg") or "未知错误")
             normalized_message = message.casefold()
+            friendly, scopes, console_url = _feishu_error_details(message)
             raise FeishuError(
-                f"飞书请求失败: {message}",
+                friendly,
                 code=code,
                 retryable=(
                     code in {1254290, 1254291, 99991400}
@@ -343,6 +546,8 @@ class FeishuBaseClient:
                     or "频率" in message
                     or "字段不存在" in message
                 ),
+                required_scopes=scopes,
+                console_url=console_url,
             )
         data = response_payload.get("data")
         return data if isinstance(data, dict) else response_payload
@@ -432,6 +637,8 @@ class FeishuSyncManager:
             selected = next(
                 (table for table in tables if table["table_id"] == table_id), None
             )
+            if selected is None and table_id:
+                selected = client.get_table(base_token, table_id)
             if selected is None:
                 raise FeishuError("配置的飞书多维表格数据表不存在，请重新测试连接")
             counts = self._sync_records(client, base_token, table_id, job, target)
@@ -500,22 +707,34 @@ class FeishuSyncManager:
         items = list(job.get("items") or [])
         if target.get("row_scope") == "succeeded_only":
             items = [item for item in items if item.get("status") == "succeeded"]
-        rows = [self._build_fields(job, item) for item in items]
-        client.ensure_text_fields(base_token, table_id, SYNC_FIELDS)
+        client.ensure_sync_schema(base_token, table_id)
         existing = client.list_records(base_token, table_id)
         key_records = {
-            self._cell_text((record.get("fields") or {}).get("_smartstitch_key")): str(
-                record.get("record_id") or ""
-            )
+            self._cell_text((record.get("fields") or {}).get("_smartstitch_key")): record
             for record in existing
             if isinstance(record.get("fields"), dict)
             and self._cell_text((record.get("fields") or {}).get("_smartstitch_key"))
         }
         updates: list[tuple[str, dict[str, Any]]] = []
         additions: list[dict[str, Any]] = []
-        for fields in rows:
-            record_id = key_records.get(str(fields["_smartstitch_key"]))
-            if record_id:
+        rows: list[dict[str, Any]] = []
+        for item in items:
+            fields = self._build_fields(job, item)
+            existing_record = key_records.get(str(fields["_smartstitch_key"]))
+            existing_fields = (
+                existing_record.get("fields")
+                if isinstance(existing_record, dict)
+                and isinstance(existing_record.get("fields"), dict)
+                else {}
+            )
+            if not self._attachment_tokens(existing_fields.get("文件")):
+                output_path = str(item.get("output_path") or "")
+                if item.get("status") == "succeeded" and output_path:
+                    file_token = client.upload_attachment(base_token, output_path)
+                    fields["文件"] = [{"file_token": file_token}]
+            rows.append(fields)
+            if existing_record:
+                record_id = str(existing_record.get("record_id") or "")
                 updates.append((record_id, fields))
             else:
                 additions.append(fields)
@@ -542,30 +761,45 @@ class FeishuSyncManager:
         }
 
     @staticmethod
-    def _build_fields(job: dict[str, Any], item: dict[str, Any]) -> dict[str, str]:
+    def _build_fields(job: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
         naming = item.get("naming") or {}
-        selections = []
-        labels = job.get("pool_labels") or {}
-        for category in job.get("timeline") or item.get("selections", {}).keys():
-            asset = (item.get("selections") or {}).get(category)
-            if asset:
-                selections.append(f"{labels.get(category, category)}：{asset.get('name') or Path(asset['path']).name}")
-        values = [
-            f"{job['id']}:{item['index']}", _now(), job["id"],
-            job.get("short_id", ""), job.get("config_id", ""),
-            job.get("config_name", ""), item.get("index"), item.get("status", ""),
-            item.get("output_name", ""), item.get("output_path", ""),
-            naming.get("product", ""), naming.get("benefit", ""),
-            "+".join(naming.get("talents") or []),
-            naming.get("restriction_date", ""), " | ".join(selections),
-            item.get("estimated_duration"), item.get("actual_duration"),
-            item.get("attempts", 0), item.get("error") or "",
-            job.get("started_at") or "", job.get("finished_at") or "",
-        ]
+        output_path = str(item.get("output_path") or "")
+        completed_at = item.get("finished_at") or job.get("finished_at") or _now()
         return {
-            field_name: "" if value is None else str(value)
-            for field_name, value in zip(SYNC_FIELDS, values, strict=True)
+            "日期": FeishuSyncManager._timestamp_ms(completed_at),
+            "单选": "待审核",
+            "文本": str(naming.get("product") or ""),
+            "命名": str(item.get("output_name") or Path(output_path).name),
+            "当日文件夹路径": str(Path(output_path).parent) if output_path else "",
+            "利益点": str(naming.get("benefit") or ""),
+            "达人": "+".join(str(value) for value in naming.get("talents") or []),
+            "限制日期": str(naming.get("restriction_date") or ""),
+            "_smartstitch_key": f"{job['id']}:{item['index']}",
         }
+
+    @staticmethod
+    def _timestamp_ms(value: Any) -> int:
+        if isinstance(value, (int, float)):
+            number = float(value)
+            return int(number if number >= 10_000_000_000 else number * 1000)
+        text = str(value or "").strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            parsed = datetime.now().astimezone()
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return int(parsed.timestamp() * 1000)
+
+    @staticmethod
+    def _attachment_tokens(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [
+            str(item.get("file_token") or "")
+            for item in value
+            if isinstance(item, dict) and item.get("file_token")
+        ]
 
     @staticmethod
     def _cell_text(value: Any) -> str:

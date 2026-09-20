@@ -245,6 +245,10 @@ def create_app(
             client = app.state.feishu_client_factory(app_id, app_secret)
             base_token, linked_table_id = client.resolve_base_url(request.base_url)
             tables = client.list_tables(base_token)
+            if linked_table_id and not any(
+                table["table_id"] == linked_table_id for table in tables
+            ):
+                tables.append(client.get_table(base_token, linked_table_id))
             selected_table_id = linked_table_id
             if selected_table_id and not any(
                 table["table_id"] == selected_table_id for table in tables
@@ -261,7 +265,13 @@ def create_app(
             }
         except FeishuError as exc:
             raise HTTPException(
-                422, {"code": exc.code, "message": str(exc)}
+                422,
+                {
+                    "code": exc.code,
+                    "message": str(exc),
+                    "required_scopes": exc.required_scopes,
+                    "console_url": exc.console_url,
+                },
             ) from exc
 
     @app.get("/api/v1/users/me")

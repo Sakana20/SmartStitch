@@ -15,8 +15,8 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260918-62"/,
-  "飞书多维表格 Wiki 链接支持更新后必须刷新静态资源缓存版本",
+  /href="\/styles\.css\?v=20260920-64"/,
+  "配置租约超时关闭更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
@@ -71,6 +71,16 @@ assert.match(
   app,
   /lock\/acquire[\s\S]*lock\/takeover[\s\S]*setInterval\(renewConfigLease, 15000\)[\s\S]*lock\/release/,
   "配置编辑器必须获取、续租、接管并释放 NAS 编辑锁",
+);
+assert.match(
+  app,
+  /function scheduleConfigLeaseExpiry\(lease\)[\s\S]*setTimeout\(\(\) => expireConfigLease\(lease\)[\s\S]*function expireConfigLease[\s\S]*closeConfig\(\{ skipConfirm: true, releaseLease: false \}\)[\s\S]*配置编辑已超时过期，配置未保存/,
+  "配置租约到期后必须自动关闭编辑页并提示配置未保存",
+);
+assert.match(
+  app,
+  /async function saveConfig\(\)[\s\S]*isTerminalConfigLeaseError\(error\)[\s\S]*expireConfigLease\(\)/,
+  "保存时发现租约已失效也必须立即关闭配置编辑页",
 );
 assert.match(
   app,
@@ -172,6 +182,11 @@ assert.match(
   app,
   /function renderFeishuSyncPanel\(job\)[\s\S]*立即同步 \/ 重试[\s\S]*function loadJobFeishuSync\(job\)/,
   "成片任务详情必须显示飞书同步状态并支持失败后重试",
+);
+assert.match(
+  app,
+  /function feishuConnectionErrorMarkup\(\)[\s\S]*console_url[\s\S]*打开飞书权限配置/,
+  "飞书权限不足时必须在配置卡片中提供开放平台权限入口",
 );
 assert.match(
   app,
