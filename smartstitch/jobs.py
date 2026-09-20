@@ -126,6 +126,11 @@ class JobManager:
                         for category, asset in planned.selections.items()
                     },
                     "overlay": planned.overlay.model_dump(mode="json") if planned.overlay else None,
+                    "visual_border": (
+                        planned.visual_border.model_dump(mode="json")
+                        if planned.visual_border
+                        else None
+                    ),
                     "naming": planned.naming.model_dump(mode="json") if planned.naming else None,
                 }
             )
@@ -151,6 +156,7 @@ class JobManager:
             "warnings": plan.warnings,
             "output_directory": str(batch_directory),
             "config_snapshot_path": str(snapshot_path),
+            "visual_dedup": config.visual_dedup.model_dump(mode="json"),
             "feishu_base_sync": config.output.feishu_base_sync.model_dump(mode="json"),
             "concurrency": request.concurrency or config.batch.concurrency,
             "retry_count": config.batch.retry_count,
@@ -280,6 +286,11 @@ class JobManager:
                 for category, asset in item_data["selections"].items()
             },
             overlay=Asset.model_validate(item_data["overlay"]) if item_data["overlay"] else None,
+            visual_border=(
+                Asset.model_validate(item_data["visual_border"])
+                if item_data.get("visual_border")
+                else None
+            ),
             output_name=item_data["output_name"],
             estimated_duration=item_data["estimated_duration"],
         )
@@ -384,6 +395,7 @@ class JobManager:
                     *naming_columns,
                     *category_columns.values(),
                     "benefit_overlay",
+                    "visual_border",
                     "output_path",
                     "error",
                 ],
@@ -394,6 +406,11 @@ class JobManager:
                     "index": item["index"],
                     "status": item["status"],
                     "benefit_overlay": item["overlay"]["path"] if item["overlay"] else "",
+                    "visual_border": (
+                        item["visual_border"]["path"]
+                        if item.get("visual_border")
+                        else ""
+                    ),
                     "output_path": item["output_path"],
                     "error": item["error"] or "",
                 }

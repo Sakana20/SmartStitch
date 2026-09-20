@@ -5,7 +5,87 @@ import subprocess
 
 from smartstitch.models import AppConfig, MediaProbe
 import smartstitch.scanner as scanner_module
-from smartstitch.scanner import scan_config
+from smartstitch.scanner import scan_config, scan_visual_border
+
+
+def generate_qtrle_border(path, *, alpha=True, width=180, height=320):
+    pixel_format = "argb" if alpha else "rgb24"
+    source = f"color=c=black@0.0:s={width}x{height}:r=12:d=0.4,format={pixel_format}"
+    if alpha:
+        source += ",drawbox=x=0:y=0:w=iw:h=20:color=red@1:t=fill:replace=1"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", source,
+            "-c:v", "qtrle", "-pix_fmt", pixel_format, str(path),
+        ],
+        check=True,
+    )
+
+
+def visual_border_config(tmp_path, border_path):
+    return AppConfig.model_validate(
+        {
+            "id": "visual-border",
+            "name": "视觉边框",
+            "source_root": str(tmp_path),
+            "timeline": ["hook", "benefit_1", "ending"],
+            "sources": {
+                category: {"directory": category}
+                for category in ("hook", "benefit_1", "ending")
+            },
+            "benefit_overlays": {"mode": "disabled", "file": ""},
+            "visual_dedup": {
+                "enabled": True,
+                "border_overlay": {
+                    "mode": "required",
+                    "file": str(border_path),
+                    "scale_mode": "exact",
+                },
+            },
+            "output": {
+                "directory": str(tmp_path / "out"),
+                "width": 180,
+                "height": 320,
+            },
+        }
+    )
+
+
+def test_visual_border_accepts_transparent_qtrle_and_rejects_opaque_qtrle(tmp_path):
+    transparent = tmp_path / "transparent.mov"
+    generate_qtrle_border(transparent, alpha=True)
+    assets, errors, warnings = scan_visual_border(
+        visual_border_config(tmp_path, transparent)
+    )
+
+    assert errors == []
+    assert warnings == []
+    assert assets[0].valid
+    assert assets[0].probe.video_codec == "qtrle"
+    assert assets[0].probe.pixel_format == "argb"
+    assert assets[0].probe.has_alpha is True
+
+    opaque = tmp_path / "opaque.mov"
+    generate_qtrle_border(opaque, alpha=False)
+    assets, errors, _warnings = scan_visual_border(
+        visual_border_config(tmp_path, opaque)
+    )
+    assert not assets[0].valid
+    assert "不含 Alpha" in errors[0]
+
+
+def test_visual_border_exact_mode_rejects_wrong_dimensions(tmp_path):
+    border = tmp_path / "small.mov"
+    generate_qtrle_border(border, alpha=True, width=90, height=160)
+
+    assets, errors, _warnings = scan_visual_border(
+        visual_border_config(tmp_path, border)
+    )
+
+    assert not assets[0].valid
+    assert "90x160" in errors[0]
+    assert "180x320" in errors[0]
 
 
 def test_missing_required_directory_is_error(tmp_path):

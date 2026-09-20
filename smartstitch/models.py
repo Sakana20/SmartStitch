@@ -124,6 +124,42 @@ class BenefitOverlayConfig(BaseModel):
         return self
 
 
+class VisualDedupForegroundConfig(BaseModel):
+    scale: float = Field(default=0.9, ge=0.7, le=1.0)
+
+
+class VisualDedupBackgroundConfig(BaseModel):
+    mode: Literal["gaussian_blur"] = "gaussian_blur"
+    sigma: float = Field(default=20.0, ge=0, le=100)
+    steps: int = Field(default=2, ge=1, le=6)
+    brightness: float = Field(default=0.0, ge=-1, le=1)
+
+
+class VisualBorderOverlayConfig(BaseModel):
+    mode: SourceMode = SourceMode.DISABLED
+    file: str = ""
+    media_kind: Literal["auto"] = "auto"
+    scale_mode: Literal["exact", "stretch"] = "exact"
+    playback: Literal["loop"] = "loop"
+    opacity: float = Field(default=1.0, ge=0, le=1)
+    alpha_mode: Literal["straight", "premultiplied"] = "straight"
+
+    _normalize_file = field_validator("file", mode="before")(normalize_path_input)
+
+
+class VisualDedupConfig(BaseModel):
+    enabled: bool = False
+    foreground: VisualDedupForegroundConfig = Field(
+        default_factory=VisualDedupForegroundConfig
+    )
+    background: VisualDedupBackgroundConfig = Field(
+        default_factory=VisualDedupBackgroundConfig
+    )
+    border_overlay: VisualBorderOverlayConfig = Field(
+        default_factory=VisualBorderOverlayConfig
+    )
+
+
 class MatchingConfig(BaseModel):
     enabled: bool = False
     strategy: Literal["product_tag"] = "product_tag"
@@ -365,6 +401,7 @@ class AppConfig(BaseModel):
     )
     sources: dict[str, SourceGroupConfig]
     benefit_overlays: BenefitOverlayConfig
+    visual_dedup: VisualDedupConfig = Field(default_factory=VisualDedupConfig)
     matching: MatchingConfig = Field(default_factory=MatchingConfig)
     randomization: RandomizationConfig = Field(default_factory=RandomizationConfig)
     output: OutputConfig
@@ -559,6 +596,8 @@ class MediaProbe(BaseModel):
     height: int | None = None
     fps: float | None = None
     video_codec: str | None = None
+    pixel_format: str | None = None
+    has_alpha: bool = False
     has_audio: bool = False
     audio_codec: str | None = None
     sample_rate: int | None = None
@@ -622,6 +661,7 @@ class PlanItem(BaseModel):
     index: int
     selections: dict[str, Asset | None]
     overlay: Asset | None = None
+    visual_border: Asset | None = None
     output_name: str
     estimated_duration: float
     naming: PlanNamingMetadata | None = None

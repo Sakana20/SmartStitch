@@ -78,6 +78,7 @@ const categoryNames = {
   ending: "结尾",
   end_card: "尾帧",
   benefit_overlay: "风险提示语图片",
+  visual_border: "视觉去重边框",
 };
 const benefitCategoryPattern = /^benefit_([1-9][0-9]*)$/;
 function isBenefitCategory(category) { return benefitCategoryPattern.test(category); }
@@ -2476,19 +2477,19 @@ function renderAssetTabs() {
 
 function renderAssets() {
   const assets = state.scan?.assets[state.assetCategory] || [];
-  const fixedOverlay = state.assetCategory === "benefit_overlay";
+  const fixedAsset = ["benefit_overlay", "visual_border"].includes(state.assetCategory);
   const total = assets.filter(asset => asset.enabled && asset.valid).reduce((sum, asset) => sum + Number(asset.weight), 0);
   $("#assetTable").innerHTML = assets.length ? assets.map(asset => {
     const probe = asset.probe;
     const meta = probe ? (asset.media_type === "image" ? `${probe.width}×${probe.height} · 图片` : `${probe.width}×${probe.height} · ${formatDuration(probe.duration)} · ${probe.fps ? probe.fps.toFixed(2) + "fps" : "—"}`) : "无法读取";
     const percent = asset.enabled && asset.valid && total ? (asset.weight / total * 100).toFixed(1) : "0.0";
     return `<tr data-id="${asset.id}">
-      <td>${fixedOverlay ? '<span class="valid">固定</span>' : `<input class="check asset-enabled" type="checkbox" ${asset.enabled ? "checked" : ""}>`}</td>
+      <td>${fixedAsset ? '<span class="valid">固定</span>' : `<input class="check asset-enabled" type="checkbox" ${asset.enabled ? "checked" : ""}>`}</td>
       <td><div class="file-name" title="${escapeHtml(asset.name)}">${escapeHtml(asset.name)}</div><div class="file-path" title="${escapeHtml(asset.path)}">${escapeHtml(asset.path)}</div></td>
       <td><span class="media-meta">${escapeHtml(meta)}</span></td>
-      <td>${fixedOverlay ? "—" : `<input class="tags-input asset-tags" value="${escapeHtml(asset.tags.join(","))}" placeholder="通用">`}</td>
-      <td>${fixedOverlay ? "不参与随机" : `<input class="weight-input asset-weight" type="number" min="0" step="0.1" value="${asset.weight}">`}</td>
-      <td>${fixedOverlay ? "100%" : `${percent}%`}</td>
+      <td>${fixedAsset ? "—" : `<input class="tags-input asset-tags" value="${escapeHtml(asset.tags.join(","))}" placeholder="通用">`}</td>
+      <td>${fixedAsset ? "不参与随机" : `<input class="weight-input asset-weight" type="number" min="0" step="0.1" value="${asset.weight}">`}</td>
+      <td>${fixedAsset ? "100%" : `${percent}%`}</td>
       <td><span class="${asset.valid ? "valid" : "invalid"}" title="${escapeHtml(asset.error || "")}">${asset.valid ? "可用" : "异常"}</span></td>
     </tr>`;
   }).join("") : `<tr><td colspan="7" style="text-align:center;padding:50px;color:var(--muted)">此类别当前没有素材</td></tr>`;
@@ -2497,7 +2498,7 @@ function renderAssets() {
 
 function syncVisibleAssetValues(rerender = true) {
   if (!state.scan?.assets[state.assetCategory]) return;
-  if (state.assetCategory === "benefit_overlay") return;
+  if (["benefit_overlay", "visual_border"].includes(state.assetCategory)) return;
   const assets = state.scan.assets[state.assetCategory];
   $$("#assetTable tr[data-id]").forEach(row => {
     const asset = assets.find(item => item.id === row.dataset.id);
@@ -2512,7 +2513,7 @@ async function saveWeights() {
   if (!state.scan) return;
   syncVisibleAssetValues(false);
   const items = Object.entries(state.scan.assets)
-    .filter(([category]) => category !== "benefit_overlay")
+    .filter(([category]) => !["benefit_overlay", "visual_border"].includes(category))
     .flatMap(([category, assets]) => assets.map(asset => ({ category, path: asset.path, enabled: asset.enabled, weight: Number(asset.weight), tags: asset.tags })));
   try {
     const saved = await withTemporaryConfigLease((lease, configHash) => api(`/configs/${state.configId}/weights`, {
@@ -3119,6 +3120,41 @@ function simpleQualityPreset(output) {
   return "recommended";
 }
 
+function ensureVisualDedup(config) {
+  if (!config.visual_dedup) config.visual_dedup = {};
+  const visual = config.visual_dedup;
+  if (typeof visual.enabled !== "boolean") visual.enabled = false;
+  visual.foreground ||= { scale: 0.9 };
+  visual.background ||= { mode: "gaussian_blur", sigma: 20, steps: 2, brightness: 0 };
+  visual.border_overlay ||= {
+    mode: "disabled",
+    file: "",
+    media_kind: "auto",
+    scale_mode: "exact",
+    playback: "loop",
+    opacity: 1,
+    alpha_mode: "straight",
+  };
+  return visual;
+}
+
+function simpleVisualDedupPreset(visual) {
+  const presets = {
+    light: [0.94, 12, 2, 0],
+    standard: [0.9, 20, 2, 0],
+    strong: [0.86, 28, 2, 0],
+  };
+  const current = [
+    Number(visual.foreground.scale),
+    Number(visual.background.sigma),
+    Number(visual.background.steps),
+    Number(visual.background.brightness),
+  ];
+  return Object.entries(presets).find(([, values]) =>
+    values.every((value, index) => Math.abs(value - current[index]) < 1e-9)
+  )?.[0] || "custom";
+}
+
 function simpleOverlayDirectory() {
   const root = state.library?.root_path || state.configDraft?.source_root || "";
   return `${String(root).replace(/\/+$/, "")}/风险提示语图片`;
@@ -3399,6 +3435,19 @@ function renderSimpleConfig() {
     : state.library.health === "healthy" ? "项目目录正常" : "请检查项目目录";
   const outputPreset = simpleOutputPreset(config.output);
   const qualityPreset = simpleQualityPreset(config.output);
+  const visual = ensureVisualDedup(config);
+  const visualPreset = simpleVisualDedupPreset(visual);
+  const visualBorderEnabled = visual.border_overlay.mode !== "disabled";
+  const visualBorderAsset = (state.scan?.assets?.visual_border || []).find(asset => asset.valid);
+  const visualBorderInvalid = (state.scan?.assets?.visual_border || []).find(asset => !asset.valid);
+  const visualBorderName = visualBorderAsset?.name
+    || visualBorderInvalid?.name
+    || (visual.border_overlay.file ? visual.border_overlay.file.split("/").pop() : "尚未选择边框");
+  const visualBorderStatus = visualBorderInvalid
+    ? visualBorderInvalid.error
+    : visualBorderAsset
+      ? (visualBorderAsset.media_type === "video" ? "动态边框可用" : "静态边框可用")
+      : visualBorderEnabled ? "已开启，请选择透明边框" : "当前不使用边框";
   const naming = generic ? ensureOutputNaming(config) : null;
   const feishu = ensureFeishuBaseSync(config);
   const namingErrors = generic
@@ -3406,7 +3455,7 @@ function renderSimpleConfig() {
     : [];
   const namingCard = generic ? `
     <section class="simple-config-card simple-wide-card simple-naming-card">
-      <header><span class="simple-card-number">04</span><div><h3>命名设置</h3><p>填写产品和利益点，达人与限制日期由系统从剧情素材中提取。</p></div></header>
+      <header><span class="simple-card-number">05</span><div><h3>命名设置</h3><p>填写产品和利益点，达人与限制日期由系统从剧情素材中提取。</p></div></header>
       <div class="simple-card-body simple-naming-card-body">
         <label class="simple-toggle-row compact"><span><b>按业务信息命名</b><small>使用产品-利益点-达人-限制日期生成文件名</small></span><input id="simpleNamingEnabled" class="switch-input" type="checkbox" ${naming.enabled ? "checked" : ""}></label>
         <div id="simpleNamingFields" class="simple-naming-fields ${naming.enabled ? "" : "hidden"}">
@@ -3420,7 +3469,7 @@ function renderSimpleConfig() {
         </div>
       </div>
     </section>` : "";
-  const feishuCardNumber = generic ? "06" : "05";
+  const feishuCardNumber = generic ? "07" : "06";
   const feishuSecretHint = state.feishuSettings.app_secret_configured
     ? "已配置，留空则不修改"
     : "填写企业自建应用 App Secret";
@@ -3446,7 +3495,7 @@ function renderSimpleConfig() {
 
   $("#simpleConfigEditor").innerHTML = `
     <div class="simple-mode-banner">
-      <div><strong>简单模式</strong><p>按下面 ${generic ? "6" : "5"} 步完成设置；没有显示的高级参数会原样保留。</p></div>
+      <div><strong>简单模式</strong><p>按下面 ${generic ? "7" : "6"} 步完成设置；没有显示的高级参数会原样保留。</p></div>
       <span class="simple-safe-badge">高级参数已保护</span>
       <button class="text-btn" type="button" data-open-advanced>进入高级模式 →</button>
     </div>
@@ -3488,10 +3537,27 @@ function renderSimpleConfig() {
       </div>
     </section>
 
+    <section class="simple-config-card simple-wide-card ${visual.enabled ? "is-accent" : ""}">
+      <header><span class="simple-card-number">04</span><div><h3>视觉去重</h3><p>缩小清晰画面，以同一画面的模糊版本补满四周，并可叠加透明边框。</p></div><label class="simple-header-switch"><span>${visual.enabled ? "已启用" : "未启用"}</span><input id="simpleVisualDedupEnabled" class="switch-input" type="checkbox" ${visual.enabled ? "checked" : ""}></label></header>
+      <div class="simple-card-body simple-visual-dedup-body ${visual.enabled ? "" : "is-disabled"}">
+        <div class="simple-setting-group"><div class="simple-setting-label">效果强度</div>${simpleChoiceButtons("visualDedup", [
+          ["light", "轻度", "保留更多主画面"],
+          ["standard", "标准", "推荐"],
+          ["strong", "强化", "边框区域更明显"],
+          ...(visualPreset === "custom" ? [["custom", "自定义", "由高级模式设置", true]] : []),
+        ], visualPreset)}</div>
+        <label class="simple-toggle-row compact"><span><b>使用透明边框</b><small>边框位于主画面之上，风险提示语之下</small></span><input id="simpleVisualBorderEnabled" class="switch-input" type="checkbox" ${visualBorderEnabled ? "checked" : ""}></label>
+        <div class="simple-overlay-row ${visualBorderEnabled ? "" : "hidden"}">
+          <div class="simple-overlay-status ${visualBorderAsset ? "has-file" : ""}"><i></i><div><strong>${escapeHtml(visualBorderName)}</strong><span>${escapeHtml(visualBorderStatus)}</span></div></div>
+          <div class="simple-overlay-actions"><label class="button secondary ${state.library?.managed ? "" : "disabled"}">${visualBorderAsset ? "更换边框" : "选择边框"}<input id="simpleVisualBorderFile" type="file" accept=".mov,.png,.webp" ${state.library?.managed ? "" : "disabled"}></label></div>
+        </div>
+      </div>
+    </section>
+
     ${namingCard}
 
     <section class="simple-config-card simple-wide-card">
-      <header><span class="simple-card-number">${generic ? "05" : "04"}</span><div><h3>输出设置</h3><p>选择常用方案即可，编码和码率由系统自动处理。</p></div></header>
+      <header><span class="simple-card-number">${generic ? "06" : "05"}</span><div><h3>输出设置</h3><p>选择常用方案即可，编码和码率由系统自动处理。</p></div></header>
       <div class="simple-card-body simple-finish-settings">
         <div class="simple-setting-group"><div class="simple-setting-label">画面方向</div>${simpleChoiceButtons("output", outputChoices, outputPreset)}</div>
         <div class="simple-setting-group"><div class="simple-setting-label">生成速度与画质</div>${simpleChoiceButtons("quality", [["fast", "快速生成", "速度优先"], ["recommended", "清晰画质", "推荐"], ["high", "高清优先", "耗时更长"]], qualityPreset)}</div>
@@ -3617,6 +3683,16 @@ function bindSimpleConfigControls() {
     state.configDraft.benefit_overlays.mode = event.target.checked ? "required" : "disabled";
     renderSimpleConfig();
   });
+  $("#simpleVisualDedupEnabled")?.addEventListener("change", event => {
+    ensureVisualDedup(state.configDraft).enabled = event.target.checked;
+    renderSimpleConfig();
+  });
+  $("#simpleVisualBorderEnabled")?.addEventListener("change", event => {
+    ensureVisualDedup(state.configDraft).border_overlay.mode = event.target.checked
+      ? "required"
+      : "disabled";
+    renderSimpleConfig();
+  });
   $$('[data-simple-choice]').forEach(button => button.addEventListener("click", () => {
     const choice = button.dataset.simpleChoice;
     const value = button.dataset.simpleValue;
@@ -3638,6 +3714,21 @@ function bindSimpleConfigControls() {
       state.configDraft.output.rate_control = "crf";
     } else if (choice === "duplicate") {
       state.configDraft.randomization.duplicate_policy = value;
+    } else if (choice === "visualDedup") {
+      const presets = {
+        light: { scale: 0.94, sigma: 12, steps: 2, brightness: 0 },
+        standard: { scale: 0.9, sigma: 20, steps: 2, brightness: 0 },
+        strong: { scale: 0.86, sigma: 28, steps: 2, brightness: 0 },
+      };
+      if (presets[value]) {
+        const visual = ensureVisualDedup(state.configDraft);
+        visual.foreground.scale = presets[value].scale;
+        Object.assign(visual.background, {
+          sigma: presets[value].sigma,
+          steps: presets[value].steps,
+          brightness: presets[value].brightness,
+        });
+      }
     }
     renderSimpleConfig();
   }));
@@ -3648,6 +3739,7 @@ function bindSimpleConfigControls() {
     state.configDraft.benefit_overlays.timing.end_seconds = event.target.value === "" ? null : Number(event.target.value);
   });
   $("#simpleOverlayFile")?.addEventListener("change", event => uploadOverlayImage(event.target.files?.[0], event.target));
+  $("#simpleVisualBorderFile")?.addEventListener("change", event => uploadVisualBorder(event.target.files?.[0], event.target));
 
   $("#simpleLoudnessEnabled")?.addEventListener("change", event => {
     state.configDraft.output.loudness.enabled = event.target.checked;
@@ -3741,6 +3833,39 @@ async function uploadOverlayImage(file, input) {
   }
 }
 
+async function uploadVisualBorder(file, input) {
+  if (!file) return;
+  if (file.size > 500 * 1024 * 1024) {
+    toast("视觉去重边框不能超过 500 MB", true);
+    input.value = "";
+    return;
+  }
+  input.disabled = true;
+  try {
+    const saved = await api(`/configs/${state.configId}/structured`, {
+      method: "PUT",
+      headers: configLeaseHeaders(),
+      body: JSON.stringify({ config: currentStructuredDraft() }),
+    });
+    state.configHash = saved.content_hash;
+    const result = await api(`/configs/${state.configId}/visual-border`, {
+      method: "POST",
+      headers: {
+        ...configLeaseHeaders(state.configLease, saved.content_hash),
+        "Content-Type": "application/octet-stream",
+        "X-SmartStitch-Filename": encodeURIComponent(file.name),
+      },
+      body: file,
+    });
+    await refreshConfigEditor($("#simpleConfigEditor").scrollTop);
+    toast(`视觉去重边框已更换为 ${result.filename}`);
+  } catch (error) {
+    toast(error.message, true);
+    input.disabled = false;
+    input.value = "";
+  }
+}
+
 function configInput(label, path, value, options = {}) {
   const { type = "text", hint = "", wide = false, placeholder = "", className = "", pathInput = false } = options;
   const dataType = type === "number" ? "number" : type === "nullable-number" ? "nullable-number" : type === "list" ? "list" : "string";
@@ -3825,6 +3950,9 @@ function renderVisualConfig() {
   }).join("");
 
   const overlay = config.benefit_overlays;
+  const visual = ensureVisualDedup(config);
+  const visualBorderAsset = (state.scan?.assets?.visual_border || [])[0];
+  const visualBorderProbe = visualBorderAsset?.probe;
   const output = config.output;
   const loudness = output.loudness || {
     enabled: false,
@@ -3900,6 +4028,30 @@ function renderVisualConfig() {
         ${configInput("自定义结束", "benefit_overlays.timing.end_seconds", overlay.timing.end_seconds, { type: "nullable-number", hint: "留空到片尾" })}
       </div>
     </details>`;
+  const visualDedupSection = `
+    <details class="config-section" data-config-section="visual-dedup" open>
+      <summary>视觉去重 <small>模糊背景、缩小前景与透明边框</small></summary>
+      <div class="config-section-body config-form-grid three">
+        ${configSwitch("启用视觉去重", "visual_dedup.enabled", visual.enabled, "功能状态")}
+        ${configInput("前景缩放比例", "visual_dedup.foreground.scale", visual.foreground.scale, { type: "number", hint: "0.70～1.00" })}
+        ${configSelect("背景处理", "visual_dedup.background.mode", visual.background.mode, [["gaussian_blur", "高斯模糊"]])}
+        ${configInput("模糊 Sigma", "visual_dedup.background.sigma", visual.background.sigma, { type: "number", hint: "0～100" })}
+        ${configInput("模糊步数", "visual_dedup.background.steps", visual.background.steps, { type: "number", hint: "1～6" })}
+        ${configInput("背景亮度", "visual_dedup.background.brightness", visual.background.brightness, { type: "number", hint: "-1～1" })}
+        ${configSelect("边框使用方式", "visual_dedup.border_overlay.mode", visual.border_overlay.mode, modeChoices)}
+        ${configInput("边框文件", "visual_dedup.border_overlay.file", visual.border_overlay.file, { wide: true, pathInput: true, hint: "受管项目可留空自动识别", placeholder: "/路径/透明边框.mov" })}
+        ${configSelect("边框素材类型", "visual_dedup.border_overlay.media_kind", visual.border_overlay.media_kind, [["auto", "自动识别"]])}
+        ${configSelect("边框尺寸", "visual_dedup.border_overlay.scale_mode", visual.border_overlay.scale_mode, [["exact", "必须与画布一致"], ["stretch", "拉伸铺满画布"]])}
+        ${configSelect("播放方式", "visual_dedup.border_overlay.playback", visual.border_overlay.playback, [["loop", "循环到成片结束"]])}
+        ${configInput("边框透明度", "visual_dedup.border_overlay.opacity", visual.border_overlay.opacity, { type: "number", hint: "0～1" })}
+        ${configSelect("Alpha 模式", "visual_dedup.border_overlay.alpha_mode", visual.border_overlay.alpha_mode, [["straight", "直通 Alpha"], ["premultiplied", "预乘 Alpha（黑边时尝试）"]])}
+        <div class="config-field wide"><label>边框预检 <small>由后端 FFmpeg 统一检查</small></label><code class="managed-pool-path">${escapeHtml(visualBorderAsset
+          ? (visualBorderAsset.valid
+            ? `${visualBorderAsset.name} · ${visualBorderProbe?.video_codec || "未知编码"} · ${visualBorderProbe?.pixel_format || "未知像素格式"} · ${visualBorderProbe?.width || "?"}×${visualBorderProbe?.height || "?"} · ${visualBorderProbe?.fps || "静态"} fps · ${visualBorderProbe?.duration || "?"} s${visualBorderProbe?.has_audio ? " · 含音轨（将忽略）" : ""}`
+            : `${visualBorderAsset.name} · ${visualBorderAsset.error || "不可用"}`)
+          : "尚未识别到边框素材")}</code></div>
+      </div>
+    </details>`;
   const previewAssets = Object.entries(state.scan?.assets || {}).flatMap(([category, assets]) =>
     assets
       .filter(asset => asset.media_type === "video" && asset.valid && asset.probe?.has_audio)
@@ -3930,6 +4082,8 @@ function renderVisualConfig() {
     </details>
 
     ${overlaySection}
+
+    ${visualDedupSection}
 
     <details class="config-section randomization-section" data-config-section="randomization">
       <summary>随机组合 <small>仅用于视频片段和尾帧</small></summary>

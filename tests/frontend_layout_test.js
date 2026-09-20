@@ -15,7 +15,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260920-64"/,
+  /href="\/styles\.css\?v=20260920-66"/,
   "配置租约超时关闭更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -155,6 +155,36 @@ assert.match(
 );
 assert.match(
   app,
+  /function renderSimpleConfig\(\)[\s\S]*视觉去重[\s\S]*simpleChoiceButtons\("visualDedup"[\s\S]*simpleVisualBorderFile/,
+  "视觉去重必须沿用简单模式卡片、大选项和文件选择结构",
+);
+assert.match(
+  app + css,
+  /simple-visual-dedup-body[\s\S]*\.simple-visual-dedup-body\s*\{[^}]*display:\s*grid[^}]*gap:\s*16px/,
+  "视觉去重卡片各设置组之间必须保留与其他卡片一致的纵向留白",
+);
+assert.match(
+  app,
+  /function renderVisualConfig\(\)[\s\S]*data-config-section="visual-dedup"[\s\S]*visual_dedup\.foreground\.scale[\s\S]*visual_dedup\.border_overlay\.alpha_mode/,
+  "视觉去重复杂参数必须进入现有高级配置与 data-config-path 架构",
+);
+assert.match(
+  app,
+  /\["benefit_overlay", "visual_border"\]\.includes\(state\.assetCategory\)[\s\S]*!\["benefit_overlay", "visual_border"\]\.includes\(category\)/,
+  "视觉边框必须沿用固定素材规则，不得进入权重与标签编辑",
+);
+assert.match(
+  app,
+  /function ensureVisualDedup\(config\)[\s\S]*config\.visual_dedup[\s\S]*function currentStructuredDraft\(\)/,
+  "视觉去重必须复用现有 configDraft，不得创建平行状态架构",
+);
+assert.doesNotMatch(
+  html,
+  /iframe|id="visualDedupApp"|id="visual-dedup-app"/,
+  "视觉去重不得创建 iframe 或独立前端应用容器",
+);
+assert.match(
+  app,
   /workflow_type === "generic"[\s\S]*id="simpleNamingEnabled"[\s\S]*id="simpleNamingProduct"[\s\S]*id="simpleNamingBenefit"[\s\S]*id="simpleNamingPreview"/,
   "通用项目简单模式必须提供动态命名开关、产品、利益点和文件名预览",
 );
@@ -166,12 +196,12 @@ assert.match(
 assert.match(
   app,
   /id="simpleNamingSequenceStart"[^>]*min="1"[^>]*max="999999"[\s\S]*sequence_start = value/,
-  "04 命名设置必须允许用户填写成片序号起点",
+  "05 命名设置必须允许用户填写成片序号起点",
 );
 assert.match(
   app,
-  /simple-card-number">04<\/span><div><h3>命名设置<\/h3>[\s\S]*\$\{namingCard\}[\s\S]*simple-card-number">\$\{generic \? "05" : "04"\}<\/span><div><h3>输出设置<\/h3>/,
-  "通用项目必须将命名设置独立为 04 卡片，并把输出设置顺延为 05",
+  /simple-card-number">05<\/span><div><h3>命名设置<\/h3>[\s\S]*\$\{namingCard\}[\s\S]*simple-card-number">\$\{generic \? "06" : "05"\}<\/span><div><h3>输出设置<\/h3>/,
+  "通用项目必须将命名设置独立为 05 卡片，并把输出设置顺延为 06",
 );
 assert.match(
   app,

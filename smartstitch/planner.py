@@ -320,6 +320,19 @@ def build_plan(
     elif overlay_required:
         raise PlanError("风险提示语图片为必需，但没有可用图片")
 
+    border_assets = _selectable(scan, "visual_border")
+    visual_borders: list[Asset | None] = [None] * count
+    border_required = (
+        config.visual_dedup.enabled
+        and config.visual_dedup.border_overlay.mode == SourceMode.REQUIRED
+    )
+    if border_assets:
+        if len(border_assets) != 1:
+            raise PlanError("每个配置必须且只能有一个视觉去重边框")
+        visual_borders = [border_assets[0]] * count
+    elif border_required:
+        raise PlanError("视觉去重边框为必需，但没有可用素材")
+
     warnings = list(scan.warnings)
     signatures: set[tuple[str | None, ...]] = set()
     duplicate_count = 0
@@ -356,6 +369,7 @@ def build_plan(
                 index=index + 1,
                 selections=selections,
                 overlay=overlays[index],
+                visual_border=visual_borders[index],
                 output_name=output_name,
                 estimated_duration=round(duration, 3),
                 naming=naming,
@@ -369,6 +383,10 @@ def build_plan(
     for category, sequence in sequences.items():
         distribution[category] = dict(Counter(asset.name for asset in sequence if asset))
     distribution["benefit_overlay"] = dict(Counter(asset.name for asset in overlays if asset))
+    if config.visual_dedup.enabled:
+        distribution["visual_border"] = dict(
+            Counter(asset.name for asset in visual_borders if asset)
+        )
     return BatchPlan(
         config_id=config.id,
         config_name=config.name,

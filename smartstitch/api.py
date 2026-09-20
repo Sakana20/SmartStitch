@@ -5,6 +5,8 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
+import urllib.parse
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -31,7 +33,13 @@ from .feishu import (
     FeishuSyncManager,
 )
 from .jobs import JobManager, TERMINAL_STATES
-from .library import LibraryConflictError, LibraryError, LibraryService, pick_directory
+from .library import (
+    MAX_VISUAL_BORDER_BYTES,
+    LibraryConflictError,
+    LibraryError,
+    LibraryService,
+    pick_directory,
+)
 from .media import DisconnectSafeFileResponse
 from .models import (
     AddBenefitRequest,
@@ -444,6 +452,62 @@ def create_app(
             raise HTTPException(409, str(exc)) from exc
         except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/configs/{config_id}/visual-border")
+    async def replace_visual_border(
+        config_id: str,
+        http_request: Request,
+    ) -> dict[str, object]:
+        encoded_filename = http_request.headers.get(
+            "X-SmartStitch-Filename", ""
+        ).strip()
+        filename = urllib.parse.unquote(encoded_filename)
+        if not filename:
+            raise HTTPException(422, "缺少边框文件名")
+        content_length = http_request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > MAX_VISUAL_BORDER_BYTES:
+                    raise HTTPException(413, "视觉去重边框不能超过 500 MB")
+            except ValueError as exc:
+                raise HTTPException(422, "上传文件大小无效") from exc
+
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="smartstitch-visual-border-",
+            suffix=Path(filename).suffix.lower(),
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary_name)
+        total = 0
+        try:
+            with temporary_path.open("wb") as handle:
+                async for chunk in http_request.stream():
+                    total += len(chunk)
+                    if total > MAX_VISUAL_BORDER_BYTES:
+                        raise HTTPException(413, "视觉去重边框不能超过 500 MB")
+                    handle.write(chunk)
+            if total == 0:
+                raise HTTPException(422, "视觉去重边框不能为空")
+            try:
+                with config_leases.write_guard(
+                    config_id,
+                    request_lease_token(http_request),
+                    request_config_hash(http_request),
+                ):
+                    return library_service.replace_visual_border(
+                        config_id,
+                        filename=filename,
+                        uploaded_path=temporary_path,
+                        current_config_hash=request_config_hash(http_request),
+                    )
+            except CollaborationError as exc:
+                raise collaboration_http_error(exc) from exc
+            except LibraryConflictError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            except (LibraryError, ConfigError, FileNotFoundError, OSError) as exc:
+                raise HTTPException(422, str(exc)) from exc
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
     @app.get("/api/v1/configs")
     def list_configs() -> list[dict[str, object]]:

@@ -169,9 +169,17 @@ def build_ffmpeg_command(
                 command.extend(["-hwaccel", "videotoolbox"])
             command.extend(["-i", asset.path])
 
+    visual_border_index: int | None = None
+    if config.visual_dedup.enabled and item.visual_border is not None:
+        visual_border_index = len(timeline)
+        if item.visual_border.media_type == "image":
+            command.extend(["-loop", "1", "-i", item.visual_border.path])
+        else:
+            command.extend(["-stream_loop", "-1", "-i", item.visual_border.path])
+
     overlay_index: int | None = None
     if item.overlay is not None:
-        overlay_index = len(timeline)
+        overlay_index = len(timeline) + (1 if visual_border_index is not None else 0)
         command.extend(["-loop", "1", "-i", item.overlay.path])
 
     filters: list[str] = []
@@ -182,6 +190,52 @@ def build_ffmpeg_command(
     filters.append(f"{concat_inputs}concat=n={len(timeline)}:v=1:a=1[basev][outa]")
 
     video_map = "[basev]"
+    if config.visual_dedup.enabled:
+        visual = config.visual_dedup
+        foreground_width = max(
+            2, int(config.output.width * visual.foreground.scale / 2) * 2
+        )
+        foreground_height = max(
+            2, int(config.output.height * visual.foreground.scale / 2) * 2
+        )
+        filters.append("[basev]split=2[dedup_bg_src][dedup_fg_src]")
+        background_filters = [
+            f"gblur=sigma={visual.background.sigma:.6f}:steps={visual.background.steps}"
+        ]
+        if visual.background.brightness != 0:
+            background_filters.append(
+                f"eq=brightness={visual.background.brightness:.6f}"
+            )
+        filters.append(
+            f"[dedup_bg_src]{','.join(background_filters)}[dedup_bg]"
+        )
+        filters.append(
+            f"[dedup_fg_src]scale={foreground_width}:{foreground_height}[dedup_fg]"
+        )
+        filters.append(
+            "[dedup_bg][dedup_fg]overlay=x=(W-w)/2:y=(H-h)/2:"
+            "format=auto[dedupv]"
+        )
+        video_map = "[dedupv]"
+
+    if visual_border_index is not None:
+        border = config.visual_dedup.border_overlay
+        border_scale = (
+            f"scale={config.output.width}:{config.output.height}"
+            if border.scale_mode == "stretch"
+            else "null"
+        )
+        filters.append(
+            f"[{visual_border_index}:v]{border_scale},fps={config.output.fps},"
+            "setpts=PTS-STARTPTS,format=rgba,"
+            f"colorchannelmixer=aa={border.opacity:.6f}[visual_border]"
+        )
+        filters.append(
+            f"{video_map}[visual_border]overlay=x=0:y=0:shortest=1:"
+            f"eof_action=pass:format=auto:alpha={border.alpha_mode}[framedv]"
+        )
+        video_map = "[framedv]"
+
     if overlay_index is not None:
         placement = config.benefit_overlays.placement
         if placement.scale_mode == "stretch":
@@ -211,7 +265,7 @@ def build_ffmpeg_command(
             else f"between(t,{start:.6f},{end:.6f})"
         )
         filters.append(
-            f"[basev][overlay]overlay=x='{x}':y='{y}':"
+            f"{video_map}[overlay]overlay=x='{x}':y='{y}':"
             f"enable='{enable}':eof_action=pass[outv]"
         )
         video_map = "[outv]"

@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -46,6 +47,7 @@ STANDARD_DIRECTORIES = (
     Path("切片素材/尾帧"),
     Path("切片素材/未归类"),
     Path("风险提示语图片"),
+    Path("视觉去重边框"),
     Path("成片输出"),
     Path("工作记录/切片清单"),
     Path("工作记录/生成清单"),
@@ -56,6 +58,7 @@ GENERIC_DIRECTORIES = (
     Path("视频库"),
     Path("未归类"),
     Path("风险提示语图片"),
+    Path("视觉去重边框"),
     Path("成片输出"),
     Path("工作记录/切片清单"),
     Path("工作记录/生成清单"),
@@ -64,6 +67,8 @@ GENERIC_DIRECTORIES = (
 INVALID_FOLDER_CHARACTERS = re.compile(r'[<>:"/\\|?*\x00]')
 OVERLAY_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 MAX_OVERLAY_IMAGE_BYTES = 20 * 1024 * 1024
+VISUAL_BORDER_EXTENSIONS = {".mov", ".png", ".webp"}
+MAX_VISUAL_BORDER_BYTES = 500 * 1024 * 1024
 IGNORABLE_SELECTED_ROOT_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 
@@ -164,6 +169,7 @@ def _marker_payload(request: CreateLibraryRequest) -> dict[str, Any]:
                 "pools": "视频库",
                 "unclassified": "未归类",
                 "overlays": "风险提示语图片",
+                "visual_borders": "视觉去重边框",
                 "outputs": "成片输出",
                 "records": "工作记录",
             },
@@ -182,6 +188,7 @@ def _marker_payload(request: CreateLibraryRequest) -> dict[str, Any]:
             "slices": "切片素材",
             "benefits": "切片素材/利益点",
             "overlays": "风险提示语图片",
+            "visual_borders": "视觉去重边框",
             "outputs": "成片输出",
             "records": "工作记录",
         },
@@ -379,6 +386,9 @@ class LibraryService:
                     config.benefit_overlays.mode = SourceMode.OPTIONAL
                     config.benefit_overlays.timing.scope = "full"
                     self.config_store.save_config(config_id, config)
+            visual_border_layout_upgraded = self._ensure_visual_border_layout(
+                root, marker
+            )
         except (OSError, json.JSONDecodeError, LibraryError) as exc:
             return {
                 "managed": True,
@@ -406,7 +416,9 @@ class LibraryService:
             "workflow_type": config.workflow_type,
             "next_benefit_number": marker.get("next_benefit_number"),
             "next_pool_number": marker.get("next_pool_number"),
-            "config_updated": overlay_layout_upgraded,
+            "config_updated": (
+                overlay_layout_upgraded or visual_border_layout_upgraded
+            ),
             "missing_directories": missing,
         }
 
@@ -730,6 +742,108 @@ class LibraryService:
                 "content_hash": self.config_store.content_hash(config_id),
             }
 
+    def replace_visual_border(
+        self,
+        config_id: str,
+        *,
+        filename: str,
+        uploaded_path: Path,
+        current_config_hash: str,
+    ) -> dict[str, Any]:
+        with self._lock, self.config_store.lock:
+            config = self.config_store.load(config_id)
+            self._check_hash(config_id, current_config_hash)
+            root = Path(config.source_root).expanduser().resolve()
+            marker = self._load_marker(root)
+            self._ensure_visual_border_layout(root, marker)
+            paths = marker.get("paths")
+            relative_value = (
+                paths.get("visual_borders") if isinstance(paths, dict) else None
+            )
+            if not isinstance(relative_value, str) or not relative_value.strip():
+                raise LibraryError("项目库没有视觉去重边框目录")
+
+            clean_name = filename.strip()
+            if (
+                Path(clean_name).name != clean_name
+                or INVALID_FOLDER_CHARACTERS.search(clean_name)
+            ):
+                raise LibraryError("边框文件名包含非法字符")
+            extension = Path(clean_name).suffix.lower()
+            if extension not in VISUAL_BORDER_EXTENSIONS:
+                raise LibraryError("边框仅支持 MOV、PNG 或 WebP")
+            try:
+                size = uploaded_path.stat().st_size
+            except OSError as exc:
+                raise LibraryError("无法读取上传的边框文件") from exc
+            if size <= 0 or size > MAX_VISUAL_BORDER_BYTES:
+                raise LibraryError("视觉去重边框不能为空且不能超过 500 MB")
+
+            relative = Path(relative_value)
+            border_directory = root / relative
+            if (
+                relative.is_absolute()
+                or not _within(root, border_directory)
+                or border_directory.is_symlink()
+            ):
+                raise LibraryError("视觉去重边框目录无效或越过项目库边界")
+            border_directory.mkdir(parents=True, exist_ok=True)
+            target = border_directory / clean_name
+            if target.is_symlink() or not _within(root, target):
+                raise LibraryError("视觉去重边框目标无效")
+
+            staged = border_directory / f".{uuid.uuid4().hex}.upload{extension}"
+            shutil.copyfile(uploaded_path, staged)
+            try:
+                from .scanner import scan_visual_border
+
+                candidate = config.model_copy(deep=True)
+                candidate.visual_dedup.enabled = True
+                candidate.visual_dedup.border_overlay.mode = SourceMode.REQUIRED
+                candidate.visual_dedup.border_overlay.file = str(staged)
+                assets, errors, _warnings = scan_visual_border(candidate)
+                if errors or not assets or not assets[0].valid:
+                    detail = errors[0] if errors else "边框不可用"
+                    raise LibraryError(detail)
+            except Exception:
+                staged.unlink(missing_ok=True)
+                raise
+
+            existing = [
+                path
+                for path in border_directory.iterdir()
+                if path.is_file()
+                and not path.name.startswith(".")
+                and path.suffix.lower() in VISUAL_BORDER_EXTENSIONS
+            ]
+            backup_paths: list[str] = []
+            if existing:
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+                backup_directory = (
+                    root / ".smartstitch" / "visual-border-backups" / stamp
+                )
+                backup_directory.mkdir(parents=True, exist_ok=False)
+                for previous in existing:
+                    destination = backup_directory / previous.name
+                    previous.replace(destination)
+                    backup_paths.append(str(destination))
+            staged.replace(target)
+
+            updated = config.model_copy(deep=True)
+            updated.visual_dedup.enabled = True
+            updated.visual_dedup.border_overlay.mode = SourceMode.REQUIRED
+            updated.visual_dedup.border_overlay.file = ""
+            self.config_store.save_config(config_id, updated)
+            return {
+                "ok": True,
+                "filename": clean_name,
+                "directory": str(border_directory),
+                "path": str(target),
+                "backups": backup_paths,
+                "config": updated.model_dump(mode="json"),
+                "content_hash": self.config_store.content_hash(config_id),
+            }
+
     def slice_targets(self, config_id: str) -> list[dict[str, str]]:
         config = self.config_store.load(config_id)
         root = Path(config.source_root).expanduser().resolve()
@@ -842,6 +956,7 @@ class LibraryService:
         if marker.get("layout_version") != GENERIC_LAYOUT_VERSION:
             raise LibraryError("通用项目标记版本不正确")
         self._ensure_generic_overlay_layout(root, marker)
+        self._ensure_visual_border_layout(root, marker)
         return config, root, marker
 
     def _ensure_generic_overlay_layout(
@@ -861,6 +976,25 @@ class LibraryService:
         upgraded = paths.get("overlays") != str(relative)
         if upgraded:
             paths["overlays"] = str(relative)
+            _write_json_atomic(root / MARKER_PATH, marker)
+        return upgraded
+
+    def _ensure_visual_border_layout(
+        self, root: Path, marker: dict[str, Any]
+    ) -> bool:
+        paths = marker.get("paths")
+        if not isinstance(paths, dict):
+            raise LibraryError("视频库标记缺少路径定义")
+        relative = Path(str(paths.get("visual_borders") or "视觉去重边框"))
+        target = root / relative
+        if relative.is_absolute() or not _within(root, target) or target.is_symlink():
+            raise LibraryError("视觉去重边框目录无效或越过项目库边界")
+        if target.exists() and not target.is_dir():
+            raise LibraryError(f"视觉去重边框目标不是文件夹: {target}")
+        target.mkdir(parents=True, exist_ok=True)
+        upgraded = paths.get("visual_borders") != str(relative)
+        if upgraded:
+            paths["visual_borders"] = str(relative)
             _write_json_atomic(root / MARKER_PATH, marker)
         return upgraded
 

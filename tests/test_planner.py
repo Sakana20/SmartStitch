@@ -100,6 +100,41 @@ def test_every_item_contains_core_categories(tmp_path):
     assert all(all(item.selections[category] for category in config.timeline) for item in plan.items)
 
 
+def test_visual_border_is_fixed_in_plan_and_not_randomized(tmp_path):
+    config = make_config(tmp_path)
+    config.visual_dedup.enabled = True
+    config.visual_dedup.border_overlay.mode = "required"
+    border = Asset(
+        id="visual-border",
+        category="visual_border",
+        path="/border.mov",
+        name="border.mov",
+        media_type="video",
+        probe=MediaProbe(
+            duration=1,
+            width=720,
+            height=1280,
+            fps=30,
+            video_codec="qtrle",
+            pixel_format="argb",
+            has_alpha=True,
+        ),
+    )
+    scan = ScanResult(
+        config_id=config.id,
+        assets={
+            category: [asset(category, category)]
+            for category in config.timeline
+        }
+        | {"benefit_overlay": [], "visual_border": [border]},
+    )
+
+    plan = build_plan(config, scan, 3, seed=10)
+
+    assert all(item.visual_border == border for item in plan.items)
+    assert plan.distribution["visual_border"] == {"border.mov": 3}
+
+
 def test_generic_plan_uses_dynamic_timeline_order(tmp_path):
     config = make_generic_config(tmp_path)
     scan = ScanResult(

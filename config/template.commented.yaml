@@ -82,6 +82,31 @@ benefit_overlays:
     start_seconds: 0
     end_seconds: null
 
+# 视觉去重：模糊背景→缩小前景→透明边框→风险提示语。
+# 旧配置未填写本段时默认关闭。
+visual_dedup:
+  enabled: false
+  foreground:
+    # 0.70～1.00；简单模式“标准”为 0.90。
+    scale: 0.90
+  background:
+    mode: gaussian_blur
+    sigma: 20.0
+    steps: 2
+    brightness: 0.0
+  border_overlay:
+    # disabled=不叠加；optional=无文件时允许生成；required=缺失时阻止生成。
+    mode: disabled
+    # 受管项目可留空，自动识别“视觉去重边框”目录中的唯一素材。
+    file: ""
+    media_kind: auto
+    # exact=要求与输出画布同尺寸；stretch=拉伸铺满。
+    scale_mode: exact
+    playback: loop
+    opacity: 1.0
+    # 边缘出现黑边时可在高级模式尝试 premultiplied。
+    alpha_mode: straight
+
 matching:
   # 预留的素材标签匹配设置；固定风险提示语图片不使用此项。
   enabled: false

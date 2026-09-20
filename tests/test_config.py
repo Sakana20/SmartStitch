@@ -34,6 +34,39 @@ def config_data(tmp_path) -> dict[str, Any]:
     }
 
 
+def test_visual_dedup_defaults_are_backward_compatible(tmp_path):
+    config = AppConfig.model_validate(config_data(tmp_path))
+
+    assert config.visual_dedup.enabled is False
+    assert config.visual_dedup.foreground.scale == 0.9
+    assert config.visual_dedup.background.sigma == 20
+    assert config.visual_dedup.border_overlay.mode == "disabled"
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("foreground", "scale"), 0.69),
+        (("background", "sigma"), 101),
+        (("background", "steps"), 0),
+        (("background", "brightness"), 1.01),
+        (("border_overlay", "opacity"), -0.01),
+    ],
+)
+def test_visual_dedup_rejects_out_of_range_values(tmp_path, path, value):
+    data = config_data(tmp_path)
+    data["visual_dedup"] = {
+        "foreground": {"scale": 0.9},
+        "background": {"sigma": 20, "steps": 2, "brightness": 0},
+        "border_overlay": {"opacity": 1},
+    }
+    section, field = path
+    data["visual_dedup"][section][field] = value
+
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(data)
+
+
 def test_generic_schema_accepts_empty_project_and_dynamic_pool_names(tmp_path):
     empty = AppConfig.model_validate(
         {

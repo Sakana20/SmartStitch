@@ -57,6 +57,9 @@ class ConfigStore:
         remapped.benefit_overlays.file = self._replace_path_prefix(
             remapped.benefit_overlays.file, source, target
         )
+        remapped.visual_dedup.border_overlay.file = self._replace_path_prefix(
+            remapped.visual_dedup.border_overlay.file, source, target
+        )
         for group in remapped.sources.values():
             group.directory = self._replace_path_prefix(
                 group.directory, source, target

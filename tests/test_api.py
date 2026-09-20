@@ -5,6 +5,7 @@ import json
 import struct
 import subprocess
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 import yaml
@@ -405,6 +406,56 @@ def test_managed_library_can_replace_overlay_image(tmp_path):
     assert len(replaced.json()["backups"]) == 1
     assert not (storage / "风险图项目库" / "风险提示语图片" / image.name).exists()
     assert (storage / "风险图项目库" / "风险提示语图片" / replacement.name).is_file()
+
+
+def test_managed_library_streams_and_replaces_visual_border(tmp_path):
+    (tmp_path / "config").mkdir()
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    client = TestClient(create_app(tmp_path))
+    created = client.post(
+        "/api/v1/libraries",
+        json={
+            "new_id": "visual-border-library",
+            "new_name": "视觉边框项目",
+            "parent_directory": str(storage),
+            "folder_name": "视觉边框项目库",
+            "workflow_type": "generic",
+            "client_request_id": "visual-border-request",
+        },
+    ).json()
+    border = tmp_path / "动态边框.mov"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i",
+            (
+                "color=c=black@0.0:s=720x1280:r=2:d=0.5,format=argb,"
+                "drawbox=x=0:y=0:w=iw:h=40:color=red@1:t=fill:replace=1"
+            ),
+            "-c:v", "qtrle", "-pix_fmt", "argb", str(border),
+        ],
+        check=True,
+    )
+
+    _lease, headers = acquire_edit_lease(client, "visual-border-library")
+    response = client.post(
+        "/api/v1/configs/visual-border-library/visual-border",
+        content=border.read_bytes(),
+        headers={
+            **headers,
+            "X-SmartStitch-Filename": quote(border.name),
+            "X-SmartStitch-Config-Hash": created["content_hash"],
+            "Content-Type": "application/octet-stream",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    target = storage / "视觉边框项目库" / "视觉去重边框" / border.name
+    assert target.is_file()
+    assert payload["config"]["visual_dedup"]["enabled"] is True
+    assert payload["config"]["visual_dedup"]["border_overlay"]["mode"] == "required"
 
 
 def test_directory_picker_api_returns_selected_path(tmp_path, monkeypatch):

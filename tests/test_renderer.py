@@ -21,6 +21,21 @@ def generate_clip(path: Path, color: str, duration: float = 0.35) -> None:
     )
 
 
+def generate_qtrle_border(path: Path, duration: float = 0.2) -> None:
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i",
+            (
+                f"color=c=black@0.0:s=180x320:r=12:d={duration},format=argb,"
+                "drawbox=x=0:y=0:w=iw:h=20:color=red@1:t=fill:replace=1"
+            ),
+            "-c:v", "qtrle", "-pix_fmt", "argb", str(path),
+        ],
+        check=True,
+    )
+
+
 def test_render_three_part_timeline(tmp_path):
     assets = {}
     for category, color in [("hook", "red"), ("benefit_1", "green"), ("ending", "blue")]:
@@ -62,6 +77,9 @@ def test_render_three_part_timeline(tmp_path):
         assert result["hardware_acceleration"] is False
         assert result["encoder_fallback_reason"]
     hardware_command, _ = build_ffmpeg_command(config, item, tmp_path / "hardware.mp4")
+    filter_complex = hardware_command[hardware_command.index("-filter_complex") + 1]
+    assert "[basev]split=2" not in filter_complex
+    assert "[visual_border]" not in filter_complex
     assert hardware_command.count("-hwaccel") == 3
     assert hardware_command[hardware_command.index("-c:v") + 1] == "h264_videotoolbox"
     assert hardware_command[hardware_command.index("-q:v") + 1] == "65"
@@ -203,3 +221,119 @@ def test_render_with_highest_layer_overlay(tmp_path):
     filter_complex = command[command.index("-filter_complex") + 1]
     assert "enable='gte(t,0.000000)'" in filter_complex
     assert "enable='between(t,0.000000" not in filter_complex
+
+
+def test_visual_dedup_renders_border_below_risk_overlay(tmp_path):
+    source_path = tmp_path / "source.mp4"
+    generate_clip(source_path, "blue", duration=0.5)
+    source = Asset(
+        id="source",
+        category="pool_1",
+        path=str(source_path),
+        name=source_path.name,
+        media_type="video",
+        probe=probe_media(source_path),
+    )
+    border_path = tmp_path / "border.mov"
+    generate_qtrle_border(border_path)
+    border = Asset(
+        id="border",
+        category="visual_border",
+        path=str(border_path),
+        name=border_path.name,
+        media_type="video",
+        probe=probe_media(border_path),
+    )
+    risk_path = tmp_path / "risk.png"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=green:s=40x40",
+            "-frames:v", "1", str(risk_path),
+        ],
+        check=True,
+    )
+    risk = Asset(
+        id="risk",
+        category="benefit_overlay",
+        path=str(risk_path),
+        name=risk_path.name,
+        media_type="image",
+        probe=probe_media(risk_path),
+    )
+    config = AppConfig.model_validate(
+        {
+            "schema_version": 3,
+            "workflow_type": "generic",
+            "id": "visual-render",
+            "name": "视觉去重渲染",
+            "source_root": str(tmp_path),
+            "timeline": ["pool_1"],
+            "sources": {"pool_1": {"label": "主素材", "directory": "."}},
+            "benefit_overlays": {
+                "mode": "required",
+                "file": str(risk_path),
+                "timing": {"scope": "full"},
+            },
+            "visual_dedup": {
+                "enabled": True,
+                "foreground": {"scale": 0.9},
+                "background": {"sigma": 12, "steps": 2},
+                "border_overlay": {
+                    "mode": "required",
+                    "file": str(border_path),
+                    "scale_mode": "exact",
+                },
+            },
+            "output": {
+                "directory": str(tmp_path / "out"),
+                "width": 180,
+                "height": 320,
+                "fps": 24,
+                "video_codec": "libx264",
+                "video_preset": "ultrafast",
+            },
+        }
+    )
+    item = PlanItem(
+        index=1,
+        selections={"pool_1": source},
+        overlay=risk,
+        visual_border=border,
+        output_name="visual.mp4",
+        estimated_duration=source.probe.duration,
+    )
+
+    command, _duration = build_ffmpeg_command(config, item, tmp_path / "command.mp4")
+    filter_complex = command[command.index("-filter_complex") + 1]
+    assert filter_complex.index("[basev]split=2") < filter_complex.index(
+        "[dedupv][visual_border]"
+    )
+    assert filter_complex.index("[dedupv][visual_border]") < filter_complex.index(
+        "[framedv][overlay]"
+    )
+    assert "-stream_loop" in command
+
+    output = tmp_path / "visual.mp4"
+    render_item(config, item, output, threading.Event())
+    assert output.exists()
+    assert probe_media(output).width == 180
+    assert probe_media(output).height == 320
+
+    def pixel(x, y):
+        result = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", "0.1",
+                "-i", str(output), "-frames:v", "1", "-vf",
+                f"crop=2:2:{x}:{y},scale=1:1",
+                "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+            ],
+            capture_output=True,
+            check=True,
+        )
+        return tuple(result.stdout[:3])
+
+    risk_pixel = pixel(5, 5)
+    border_pixel = pixel(100, 5)
+    assert risk_pixel[1] > risk_pixel[0]
+    assert border_pixel[0] > border_pixel[1]

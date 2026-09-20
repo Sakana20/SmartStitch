@@ -397,6 +397,7 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .simple-config-card > header > div { min-width: 0; flex: 1; }
 .simple-config-card h3 { margin: 0; font-size: 16px; line-height: 1.3; }
 .simple-config-card header p { margin: 3px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.simple-config-card .simple-card-body.is-disabled { opacity: .62; }
 .simple-card-number { display: grid; place-items: center; flex: none; width: 34px; height: 34px; border-radius: 10px; background: var(--green); color: white; font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .simple-card-body { padding: 18px; }
 .simple-basic-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
@@ -476,6 +477,7 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .simple-finish-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .simple-setting-group:nth-child(3), .simple-finish-settings > .simple-toggle-row { grid-column: 1 / -1; }
 .simple-naming-card-body { display: grid; gap: 12px; }
+.simple-visual-dedup-body { display: grid; gap: 16px; }
 .simple-naming-fields { display: grid; gap: 10px; }
 .simple-naming-inputs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px; }
 .simple-naming-help { color: var(--muted); font-size: 10px; line-height: 1.55; }
