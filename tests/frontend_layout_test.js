@@ -15,7 +15,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260920-69"/,
+  /href="\/styles\.css\?v=20260921-70"/,
   "ffprobe 扫描配置更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]

@@ -11,6 +11,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from smartstitch import __version__
 import smartstitch.api as api_module
 from smartstitch.api import (
     SharedConfigUnavailableError,
@@ -93,7 +94,7 @@ def test_update_endpoints_use_application_release_checker(tmp_path):
     opened = client.post("/api/v1/system/updates/open")
 
     assert update.status_code == 200
-    assert update.json()["current_version"] == "0.1.2"
+    assert update.json()["current_version"] == __version__
     assert update.json()["update_available"] is True
     assert opened.json()["opened"] is True
 

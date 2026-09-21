@@ -111,13 +111,21 @@ pytest
 
 工作流不需要配置任何 Apple Developer GitHub Secrets。创建 Release 和上传 DMG 使用 GitHub Actions 自动提供的 `GITHUB_TOKEN`。
 
-发布前应先把 `pyproject.toml` 和 `smartstitch/__init__.py` 中的版本更新为同一个版本并合入 `main`；Tag 必须与 `pyproject.toml` 完全一致。之后执行：
+发布前运行版本脚本，它会自动递增补丁版本（例如 `0.1.3` → `0.1.4`），并一次性更新 `pyproject.toml`、`smartstitch/__init__.py` 和 `uv.lock`：
+
+```bash
+packaging/bump_version.py
+```
+
+需要升级次版本或主版本时，可以显式指定，例如 `packaging/bump_version.py 0.2.0`。指定版本接受带或不带 `v` 的格式，并且必须高于当前版本。
+
+检查并提交脚本产生的三个文件，将提交合入 `main`；Tag 必须与项目版本完全一致。之后执行：
 
 ```bash
 git switch main
 git pull --ff-only
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.4
+git push origin v0.1.4
 ```
 
-成功后 Release 附件名为 `SmartStitch-v0.1.0-macOS-arm64.dmg`。工作流会拒绝非 `main` 历史的 Tag、非 arm64 runner、版本不匹配、签名验证失败或包含 Homebrew 本地动态库依赖的构建。
+成功后 Release 附件名为 `SmartStitch-v0.1.4-macOS-arm64.dmg`。工作流会拒绝非 `main` 历史的 Tag、非 arm64 runner、版本不匹配、签名验证失败或包含 Homebrew 本地动态库依赖的构建。
