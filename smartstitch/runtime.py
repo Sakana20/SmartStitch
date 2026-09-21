@@ -1,13 +1,78 @@
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import shutil
+import socket
 import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
+from typing import IO
 
 
 APP_NAME = "SmartStitch"
 DATA_DIRECTORY_ENV = "SMARTSTITCH_DATA_DIRECTORY"
+
+
+class ApplicationInstanceAlreadyRunningError(RuntimeError):
+    """Raised before app initialization when another process owns the data directory."""
+
+
+class ApplicationInstanceLock:
+    """Process-scoped advisory lock guarding one writable SmartStitch data directory."""
+
+    def __init__(self, data_directory: Path):
+        self.data_directory = data_directory
+        self.path = data_directory / "smartstitch.instance.lock"
+        self.handle: IO[str] | None = None
+        self.instance_id = uuid.uuid4().hex
+
+    def acquire(self) -> None:
+        if self.handle is not None:
+            return
+        self.data_directory.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            handle.seek(0)
+            owner = handle.read().strip()
+            handle.close()
+            detail = f"（{owner}）" if owner else ""
+            raise ApplicationInstanceAlreadyRunningError(
+                f"SmartStitch 已在使用该数据目录运行{detail}"
+            ) from exc
+
+        payload = {
+            "schema_version": 1,
+            "instance_id": self.instance_id,
+            "pid": os.getpid(),
+            "host": socket.gethostname() or "unknown",
+            "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        handle.seek(0)
+        handle.truncate()
+        json.dump(payload, handle, ensure_ascii=False)
+        handle.flush()
+        self.handle = handle
+
+    def release(self) -> None:
+        handle = self.handle
+        if handle is None:
+            return
+        self.handle = None
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+    def __del__(self) -> None:
+        try:
+            self.release()
+        except Exception:
+            pass
 
 
 def is_frozen() -> bool:

@@ -5,7 +5,26 @@ from pathlib import Path
 
 import pytest
 
-from smartstitch.runtime import configure_bundled_media_tools, seed_packaged_configs
+from smartstitch.runtime import (
+    ApplicationInstanceAlreadyRunningError,
+    ApplicationInstanceLock,
+    configure_bundled_media_tools,
+    seed_packaged_configs,
+)
+
+
+def test_application_instance_lock_rejects_same_data_directory(tmp_path):
+    first = ApplicationInstanceLock(tmp_path / "data")
+    second = ApplicationInstanceLock(tmp_path / "data")
+    first.acquire()
+    try:
+        with pytest.raises(ApplicationInstanceAlreadyRunningError, match="已在使用"):
+            second.acquire()
+    finally:
+        first.release()
+
+    second.acquire()
+    second.release()
 
 
 def test_bundled_media_tools_take_precedence(tmp_path, monkeypatch):
@@ -113,3 +132,27 @@ def test_create_app_uses_explicit_isolated_directories(tmp_path, monkeypatch):
     assert application.state.config_store.directory == config_directory.resolve()
     assert application.state.data_directory == data_directory.resolve()
     assert (data_directory / "smartstitch.db").is_file()
+
+
+def test_duplicate_app_start_does_not_interrupt_active_job(tmp_path):
+    from smartstitch import api
+
+    (tmp_path / "config").mkdir()
+    application = api.create_app(tmp_path)
+    active_job = {
+        "id": "active-job",
+        "status": "running",
+        "finished_at": None,
+    }
+    application.state.database_store.save("jobs", active_job)
+
+    try:
+        with pytest.raises(ApplicationInstanceAlreadyRunningError):
+            api.create_app(tmp_path)
+
+        persisted = application.state.database_store.get("jobs", "active-job")
+        assert persisted is not None
+        assert persisted["status"] == "running"
+        assert persisted["finished_at"] is None
+    finally:
+        application.state.instance_lock.release()

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import urllib.parse
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -72,6 +73,7 @@ from .models import (
 from .planner import PlanError, build_plan
 from .probe_cache import MediaProbeCache
 from .runtime import (
+    ApplicationInstanceLock,
     configure_bundled_media_tools,
     is_frozen,
     resource_root,
@@ -175,42 +177,58 @@ def create_app(
         if data_directory is not None
         else writable_data_directory(root)
     )
-    config_store = ConfigStore(
-        resolved_config_directory,
-        canonical_directory=canonical_config_directory(
-            resolved_config_directory
-        ),
-    )
-    user_profiles = UserProfileStore(resolved_data_directory)
-    config_leases = ConfigLeaseManager(config_store)
-    library_service = LibraryService(config_store)
-    visual_border_library = VisualBorderLibrary(config_store.directory)
-    database_store = SQLiteStore(resolved_data_directory / "smartstitch.db")
-    media_probe_cache = MediaProbeCache(database_store)
     try:
-        media_probe_cache.prune()
+        instance_lock = ApplicationInstanceLock(resolved_data_directory)
+        instance_lock.acquire()
+        config_store = ConfigStore(
+            resolved_config_directory,
+            canonical_directory=canonical_config_directory(
+                resolved_config_directory
+            ),
+        )
+        user_profiles = UserProfileStore(resolved_data_directory)
+        config_leases = ConfigLeaseManager(config_store)
+        library_service = LibraryService(config_store)
+        visual_border_library = VisualBorderLibrary(config_store.directory)
+        database_store = SQLiteStore(resolved_data_directory / "smartstitch.db")
+        media_probe_cache = MediaProbeCache(database_store)
+        try:
+            media_probe_cache.prune()
+        except Exception:
+            pass
+        job_manager = JobManager(
+            config_store,
+            resolved_data_directory,
+            database_store,
+            visual_border_library=visual_border_library,
+            media_probe_cache=media_probe_cache,
+        )
+        feishu_settings = FeishuSettingsStore(resolved_data_directory)
+        feishu_sync_manager = FeishuSyncManager(
+            database_store, feishu_settings, job_manager.get_job
+        )
+        job_manager.output_sync_manager = feishu_sync_manager
+        feishu_sync_manager.resume_interrupted()
+        timeline_analyzer = TimelineAnalyzer(resolved_data_directory / "timelines")
+        timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
+        slice_job_manager = SliceJobManager(timeline_slicer, database_store)
+        release_checker = GitHubReleaseChecker()
+
+        @asynccontextmanager
+        async def lifespan(_app: FastAPI):
+            try:
+                yield
+            finally:
+                instance_lock.release()
+
+        app = FastAPI(title="SmartStitch", version=__version__, lifespan=lifespan)
     except Exception:
-        pass
-    job_manager = JobManager(
-        config_store,
-        resolved_data_directory,
-        database_store,
-        visual_border_library=visual_border_library,
-        media_probe_cache=media_probe_cache,
-    )
-    feishu_settings = FeishuSettingsStore(resolved_data_directory)
-    feishu_sync_manager = FeishuSyncManager(
-        database_store, feishu_settings, job_manager.get_job
-    )
-    job_manager.output_sync_manager = feishu_sync_manager
-    feishu_sync_manager.resume_interrupted()
-    timeline_analyzer = TimelineAnalyzer(resolved_data_directory / "timelines")
-    timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
-    slice_job_manager = SliceJobManager(timeline_slicer, database_store)
-    release_checker = GitHubReleaseChecker()
-    app = FastAPI(title="SmartStitch", version=__version__)
+        if "instance_lock" in locals():
+            instance_lock.release()
+        raise
     app.state.root = root
     app.state.data_directory = resolved_data_directory
+    app.state.instance_lock = instance_lock
     app.state.config_store = config_store
     app.state.user_profiles = user_profiles
     app.state.config_leases = config_leases
