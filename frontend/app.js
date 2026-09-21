@@ -3443,6 +3443,34 @@ function namingExample(config) {
   return naming.template.replace(/\{(product|benefit|talents|restriction_date|sequence)(?::[^}]*)?\}/g, (_, key) => values[key]);
 }
 
+function globalVisualBordersForDraft(config) {
+  const border = ensureVisualDedup(config).border_overlay;
+  const allowed = new Set(border.enabled_asset_ids || []);
+  const scannedById = new Map(
+    (state.scan?.assets?.visual_border || []).map(asset => [asset.id, asset])
+  );
+  return (state.visualBorderLibrary?.assets || [])
+    .filter(asset => asset.enabled && (!allowed.size || allowed.has(asset.asset_id)))
+    .map(asset => {
+      const scanned = scannedById.get(asset.asset_id);
+      const probe = asset.probe || {};
+      let error = scanned && !scanned.valid ? scanned.error : null;
+      if (!error && border.scale_mode === "exact" && (
+        Number(probe.width) !== Number(config.output.width)
+        || Number(probe.height) !== Number(config.output.height)
+      )) {
+        error = `边框尺寸 ${probe.width || "?"}x${probe.height || "?"} 与输出画布 ${config.output.width}x${config.output.height} 不一致`;
+      }
+      return {
+        ...asset,
+        id: asset.asset_id,
+        name: asset.display_name,
+        valid: !error,
+        error,
+      };
+    });
+}
+
 function renderSimpleConfig() {
   const config = state.configDraft;
   if (!config) return;
@@ -3502,12 +3530,13 @@ function renderSimpleConfig() {
   const visual = ensureVisualDedup(config);
   const visualPreset = simpleVisualDedupPreset(visual);
   const visualBorderEnabled = visual.border_overlay.mode !== "disabled";
-  const compatibleVisualBorders = (state.scan?.assets?.visual_border || []).filter(asset => asset.valid);
+  const draftVisualBorders = globalVisualBordersForDraft(config);
+  const compatibleVisualBorders = draftVisualBorders.filter(asset => asset.valid);
   const visualBorderAsset = compatibleVisualBorders.find(asset =>
     visual.border_overlay.selection_mode !== "fixed"
       || asset.id === visual.border_overlay.fixed_asset_id
   );
-  const visualBorderInvalid = (state.scan?.assets?.visual_border || []).find(asset => !asset.valid);
+  const visualBorderInvalid = draftVisualBorders.find(asset => !asset.valid);
   const globalBorderCount = (state.visualBorderLibrary?.assets || []).filter(asset => asset.enabled).length;
   const visualBorderName = visual.border_overlay.selection_mode === "fixed"
     ? (visualBorderAsset?.name || visualBorderInvalid?.name || "尚未选择固定边框")

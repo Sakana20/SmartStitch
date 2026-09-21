@@ -15,7 +15,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260921-70"/,
+  /href="\/styles\.css\?v=20260921-71"/,
   "ffprobe 扫描配置更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -187,6 +187,11 @@ assert.match(
   app,
   /loadVisualBorderLibrary[\s\S]*\/global-assets\/visual-borders[\s\S]*添加到全局库[\s\S]*visualBorderSelection/,
   "视觉边框必须从全局库读取，并在简单模式支持随机或固定选择",
+);
+assert.match(
+  app,
+  /function globalVisualBordersForDraft\(config\)[\s\S]*state\.visualBorderLibrary[\s\S]*config\.output\.width[\s\S]*const draftVisualBorders = globalVisualBordersForDraft\(config\)/,
+  "简单模式必须按当前草稿计算全局边框兼容数，不能依赖保存前的扫描结果",
 );
 assert.match(
   app,
