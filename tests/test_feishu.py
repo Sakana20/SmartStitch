@@ -19,6 +19,9 @@ from smartstitch.feishu import (
     FeishuSyncManager,
     SMARTSTITCH_TEXT_FIELDS,
     SYNC_FIELDS,
+    TAOBAO_FLASH_FIELD_TYPES,
+    TAOBAO_FLASH_MATERIAL_FIELD,
+    TAOBAO_FLASH_SYNC_FIELDS,
     USER_FIELD_TYPES,
     _feishu_error_details,
     parse_base_url,
@@ -46,6 +49,9 @@ class FakeFeishuBaseClient:
 
     def ensure_sync_schema(self, _token, _table_id):
         self.fields.update(SMARTSTITCH_TEXT_FIELDS)
+
+    def ensure_taobao_flash_sync_schema(self, _token, _table_id):
+        self.fields = set(TAOBAO_FLASH_FIELD_TYPES)
 
     def upload_attachment(self, _token, file_path):
         self.uploaded.append(str(file_path))
@@ -396,6 +402,68 @@ def test_sync_manager_upserts_and_verifies_rows(tmp_path):
     assert record["inserted_count"] == 0
     assert len(fake_client.records) == 2
     assert fake_client.records[0]["fields"]["利益点"] == "更新利益点"
+    assert fake_client.uploaded == ["/output/demo-1.mp4"]
+
+
+def test_taobao_flash_sync_uses_existing_table_schema_and_daily_sequence(tmp_path):
+    job = make_job()
+    job["workflow_type"] = "taobao_flash"
+    fake_client = FakeFeishuBaseClient()
+    existing_timestamp = FeishuSyncManager._timestamp_ms(job["finished_at"])
+    fake_client.records.append(
+        {
+            "record_id": "rec-existing",
+            "fields": {
+                "出片日期": existing_timestamp,
+                TAOBAO_FLASH_MATERIAL_FIELD: "旧素材-0918-dq-4",
+                "_smartstitch_key": "old-job:1",
+            },
+        }
+    )
+    settings = FeishuSettingsStore(tmp_path)
+    settings.update("cli_demo", "secret-value")
+    manager = FeishuSyncManager(
+        SQLiteStore(tmp_path / "taobao.db"),
+        settings,
+        lambda _job_id: job,
+        client_factory=lambda _app_id, _app_secret: fake_client,
+    )
+
+    manager.start(str(job["id"]))
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        record = manager.get(str(job["id"]))
+        if record and record["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.01)
+
+    assert record["status"] == "succeeded"
+    assert fake_client.fields == set(TAOBAO_FLASH_SYNC_FIELDS)
+    first_fields = fake_client.records[1]["fields"]
+    second_fields = fake_client.records[2]["fields"]
+    assert first_fields[TAOBAO_FLASH_MATERIAL_FIELD] == "一口价二剪-0918-5"
+    assert second_fields[TAOBAO_FLASH_MATERIAL_FIELD] == "一口价二剪-0918-6"
+    assert first_fields["剪辑"] == ""
+    assert first_fields["审核"] == "待审核"
+    assert first_fields["视频"] == [{"file_token": "file-token-1"}]
+    assert set(first_fields) == set(TAOBAO_FLASH_SYNC_FIELDS)
+    assert set(second_fields) == set(TAOBAO_FLASH_SYNC_FIELDS) - {"视频"}
+
+    first_fields["剪辑"] = "dq"
+    first_fields["审核"] = ["过审可投稿"]
+    manager.start(str(job["id"]))
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        record = manager.get(str(job["id"]))
+        if record and record["status"] == "succeeded" and record["attempts"] == 2:
+            break
+        time.sleep(0.01)
+
+    assert record["inserted_count"] == 0
+    assert record["updated_count"] == 2
+    assert first_fields["剪辑"] == "dq"
+    assert first_fields["审核"] == ["过审可投稿"]
+    assert first_fields[TAOBAO_FLASH_MATERIAL_FIELD] == "一口价二剪-0918-5"
     assert fake_client.uploaded == ["/output/demo-1.mp4"]
 
 

@@ -73,6 +73,31 @@ def test_health_and_config_listing(tmp_path):
     assert client.get("/api/v1/configs").json() == []
 
 
+def test_update_endpoints_use_application_release_checker(tmp_path):
+    class FakeReleaseChecker:
+        def check(self, current_version):
+            return {
+                "current_version": current_version,
+                "latest_version": "9.0.0",
+                "update_available": True,
+            }
+
+        def open_latest_release(self):
+            return {"opened": True, "release_url": "https://github.com/release"}
+
+    app = create_app(tmp_path)
+    app.state.release_checker = FakeReleaseChecker()
+    client = TestClient(app)
+
+    update = client.get("/api/v1/system/updates")
+    opened = client.post("/api/v1/system/updates/open")
+
+    assert update.status_code == 200
+    assert update.json()["current_version"] == "0.1.2"
+    assert update.json()["update_available"] is True
+    assert opened.json()["opened"] is True
+
+
 def test_config_directory_prefers_mounted_shared_root_and_supports_override(
     tmp_path, monkeypatch
 ):

@@ -46,6 +46,23 @@ USER_FIELD_TYPES: dict[str, set[int | str]] = {
     "命名": {1, "text"},
     "当日文件夹路径": {1, "text"},
 }
+TAOBAO_FLASH_MATERIAL_FIELD = "素材（命名：利益点-形式-日期-剪辑-特殊标识-序列）"
+TAOBAO_FLASH_SYNC_FIELDS = [
+    "出片日期",
+    "剪辑",
+    "视频",
+    TAOBAO_FLASH_MATERIAL_FIELD,
+    "审核",
+    "_smartstitch_key",
+]
+TAOBAO_FLASH_FIELD_TYPES: dict[str, set[int | str]] = {
+    "出片日期": {5, "date", "datetime"},
+    "剪辑": {1, "text"},
+    "视频": {17, "attachment"},
+    TAOBAO_FLASH_MATERIAL_FIELD: {1, "text"},
+    "审核": {3, "select", "single_select"},
+    "_smartstitch_key": {1, "text"},
+}
 
 
 def _now() -> str:
@@ -259,21 +276,34 @@ class FeishuBaseClient:
             existing[field_name] = {"name": field_name, "type": "text"}
 
     def ensure_sync_schema(self, base_token: str, table_id: str) -> None:
+        self._ensure_field_types(base_token, table_id, USER_FIELD_TYPES)
+        self.ensure_text_fields(base_token, table_id, SMARTSTITCH_TEXT_FIELDS)
+
+    def ensure_taobao_flash_sync_schema(
+        self, base_token: str, table_id: str
+    ) -> None:
+        self._ensure_field_types(base_token, table_id, TAOBAO_FLASH_FIELD_TYPES)
+
+    def _ensure_field_types(
+        self,
+        base_token: str,
+        table_id: str,
+        required_types: dict[str, set[int | str]],
+    ) -> None:
         fields = {
             str(field.get("name") or field.get("field_name") or ""): field
             for field in self.list_fields(base_token, table_id)
         }
-        missing = [name for name in USER_FIELD_TYPES if name not in fields]
+        missing = [name for name in required_types if name not in fields]
         if missing:
             raise FeishuError(
                 "目标数据表缺少需要由用户预先创建的字段：" + "、".join(missing)
             )
-        for name, accepted_types in USER_FIELD_TYPES.items():
+        for name, accepted_types in required_types.items():
             field_type = fields[name].get("type")
             normalized = field_type.casefold() if isinstance(field_type, str) else field_type
             if normalized not in accepted_types:
                 raise FeishuError(f"目标数据表字段“{name}”的类型不正确")
-        self.ensure_text_fields(base_token, table_id, SMARTSTITCH_TEXT_FIELDS)
 
     def list_records(self, base_token: str, table_id: str) -> list[dict[str, Any]]:
         return self._list_all(
@@ -579,6 +609,7 @@ class FeishuSyncManager:
         self.client_factory = client_factory
         self.retry_delays = retry_delays
         self.lock = threading.RLock()
+        self.sync_lock = threading.Lock()
         self.running: set[str] = set()
         self.threads: dict[str, threading.Thread] = {}
         self.retry_timers: dict[str, threading.Timer] = {}
@@ -674,7 +705,8 @@ class FeishuSyncManager:
                 selected = client.get_table(base_token, table_id)
             if selected is None:
                 raise FeishuError("配置的飞书多维表格数据表不存在，请重新测试连接")
-            counts = self._sync_records(client, base_token, table_id, job, target)
+            with self.sync_lock:
+                counts = self._sync_records(client, base_token, table_id, job, target)
             record.update(
                 status="succeeded",
                 finished_at=_now(),
@@ -746,7 +778,11 @@ class FeishuSyncManager:
         items = list(job.get("items") or [])
         if target.get("row_scope") == "succeeded_only":
             items = [item for item in items if item.get("status") == "succeeded"]
-        client.ensure_sync_schema(base_token, table_id)
+        is_taobao_flash = job.get("workflow_type") == "taobao_flash"
+        if is_taobao_flash:
+            client.ensure_taobao_flash_sync_schema(base_token, table_id)
+        else:
+            client.ensure_sync_schema(base_token, table_id)
         existing = client.list_records(base_token, table_id)
         key_records = {
             self._cell_text((record.get("fields") or {}).get("_smartstitch_key")): record
@@ -757,20 +793,29 @@ class FeishuSyncManager:
         updates: list[tuple[str, dict[str, Any]]] = []
         additions: list[dict[str, Any]] = []
         rows: list[dict[str, Any]] = []
+        daily_sequences = self._daily_sequence_counters(existing)
         for item in items:
-            fields = self._build_fields(job, item)
-            existing_record = key_records.get(str(fields["_smartstitch_key"]))
+            smartstitch_key = f"{job['id']}:{item['index']}"
+            existing_record = key_records.get(smartstitch_key)
             existing_fields = (
                 existing_record.get("fields")
                 if isinstance(existing_record, dict)
                 and isinstance(existing_record.get("fields"), dict)
                 else {}
             )
-            if not self._attachment_tokens(existing_fields.get("文件")):
+            fields = (
+                self._build_taobao_flash_fields(
+                    job, item, existing_fields, daily_sequences
+                )
+                if is_taobao_flash
+                else self._build_fields(job, item)
+            )
+            attachment_field = "视频" if is_taobao_flash else "文件"
+            if not self._attachment_tokens(existing_fields.get(attachment_field)):
                 output_path = str(item.get("output_path") or "")
                 if item.get("status") == "succeeded" and output_path:
                     file_token = client.upload_attachment(base_token, output_path)
-                    fields["文件"] = [{"file_token": file_token}]
+                    fields[attachment_field] = [{"file_token": file_token}]
             rows.append(fields)
             if existing_record:
                 record_id = str(existing_record.get("record_id") or "")
@@ -815,6 +860,78 @@ class FeishuSyncManager:
             "限制日期": str(naming.get("restriction_date") or ""),
             "_smartstitch_key": f"{job['id']}:{item['index']}",
         }
+
+    @classmethod
+    def _build_taobao_flash_fields(
+        cls,
+        job: dict[str, Any],
+        item: dict[str, Any],
+        existing_fields: dict[str, Any],
+        daily_sequences: dict[str, int],
+    ) -> dict[str, Any]:
+        completed_at = item.get("finished_at") or job.get("finished_at") or _now()
+        completed = cls._datetime_value(completed_at)
+        day_key = completed.strftime("%Y%m%d")
+        material_name = cls._cell_text(
+            existing_fields.get(TAOBAO_FLASH_MATERIAL_FIELD)
+        )
+        if not material_name:
+            next_sequence = daily_sequences.get(day_key, 0) + 1
+            daily_sequences[day_key] = next_sequence
+            material_name = f"一口价二剪-{completed:%m%d}-{next_sequence}"
+
+        fields: dict[str, Any] = {
+            "出片日期": int(completed.timestamp() * 1000),
+            "剪辑": "",
+            TAOBAO_FLASH_MATERIAL_FIELD: material_name,
+            "审核": "待审核",
+            "_smartstitch_key": f"{job['id']}:{item['index']}",
+        }
+        for name in ("剪辑", "审核"):
+            if existing_fields.get(name) not in (None, "", []):
+                fields[name] = existing_fields[name]
+        return fields
+
+    @classmethod
+    def _daily_sequence_counters(
+        cls, records: list[dict[str, Any]]
+    ) -> dict[str, int]:
+        counters: dict[str, int] = {}
+        counts: dict[str, int] = {}
+        for record in records:
+            fields = record.get("fields") if isinstance(record, dict) else None
+            if not isinstance(fields, dict):
+                continue
+            date_value = fields.get("出片日期")
+            if date_value in (None, ""):
+                continue
+            completed = cls._datetime_value(date_value)
+            day_key = completed.strftime("%Y%m%d")
+            counts[day_key] = counts.get(day_key, 0) + 1
+            material_name = cls._cell_text(
+                fields.get(TAOBAO_FLASH_MATERIAL_FIELD)
+            )
+            match = re.search(r"-(\d+)$", material_name)
+            if match:
+                counters[day_key] = max(counters.get(day_key, 0), int(match.group(1)))
+        for day_key, count in counts.items():
+            counters[day_key] = max(counters.get(day_key, 0), count)
+        return counters
+
+    @staticmethod
+    def _datetime_value(value: Any) -> datetime:
+        if isinstance(value, (int, float)):
+            number = float(value)
+            timestamp = number / 1000 if number >= 10_000_000_000 else number
+            return datetime.fromtimestamp(timestamp).astimezone()
+        text = str(value or "").strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            parsed = datetime.now().astimezone()
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return parsed
 
     @staticmethod
     def _timestamp_ms(value: Any) -> int:

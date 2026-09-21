@@ -28,6 +28,7 @@ const state = {
   user: null,
   device: null,
   configLease: null,
+  availableUpdate: null,
   timeline: {
     sourceDirectory: "",
     sourceVideos: [],
@@ -207,6 +208,7 @@ function closeUserProfile() {
   }
   $("#userProfileModal").classList.remove("open");
   $("#userProfileModal").setAttribute("aria-hidden", "true");
+  showAvailableUpdate();
 }
 
 async function saveUserProfile(switchUser) {
@@ -453,9 +455,53 @@ async function init() {
   await loadConfigs();
   await Promise.all([loadJobs(), loadSliceJobs()]);
   connectSliceJobEvents();
+  checkForUpdates();
+}
+
+async function checkForUpdates() {
+  try {
+    const update = await api("/system/updates");
+    if (!update.update_available) return;
+    state.availableUpdate = update;
+    showAvailableUpdate();
+  } catch (_) {
+    // Update checks are best-effort and must never interrupt local workflows.
+  }
+}
+
+function showAvailableUpdate() {
+  const update = state.availableUpdate;
+  if (!update || $$(".modal.open").some(modal => modal.id !== "updateModal")) return;
+  $("#latestVersion").textContent = `v${update.latest_version}`;
+  $("#currentVersion").textContent = `v${update.current_version}`;
+  $("#updateModal").classList.add("open");
+  $("#updateModal").setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => $("#openUpdateBtn").focus());
+}
+
+function closeUpdateModal() {
+  state.availableUpdate = null;
+  $("#updateModal").classList.remove("open");
+  $("#updateModal").setAttribute("aria-hidden", "true");
+}
+
+async function openLatestRelease() {
+  const button = $("#openUpdateBtn");
+  button.disabled = true;
+  try {
+    await api("/system/updates/open", { method: "POST" });
+    closeUpdateModal();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function bindEvents() {
+  $("#laterUpdateBtn").addEventListener("click", closeUpdateModal);
+  $("[data-close-update]").addEventListener("click", closeUpdateModal);
+  $("#openUpdateBtn").addEventListener("click", openLatestRelease);
   document.addEventListener("paste", event => {
     const input = event.target.closest?.("[data-path-input]");
     if (!input) return;

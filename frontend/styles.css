@@ -361,6 +361,14 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .compact-modal-card { width: min(520px, calc(100vw - 40px)); margin-top: 14vh; }
 .compact-modal-card > p { line-height: 1.7; margin-bottom: 24px; }
 .compact-modal-card .actions .button { flex: none; }
+.update-card { overflow: hidden; padding: 36px; }
+.update-card::before { content: ""; position: absolute; width: 240px; height: 240px; top: -145px; right: -90px; border-radius: 50%; background: radial-gradient(circle, rgba(217,241,114,.55), rgba(217,241,114,0)); pointer-events: none; }
+.update-icon { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 24px; border-radius: 15px; color: white; background: var(--green); font-size: 22px; box-shadow: 0 12px 30px rgba(29,92,67,.22); }
+.update-card h2 { margin: 0 0 12px; font: 700 30px/1.2 Georgia, "Songti SC", serif; }
+.update-card > p:not(.eyebrow) { margin: 0 0 20px; font-size: 14px; line-height: 1.8; }
+.update-card > p strong { color: var(--green); }
+.update-note { padding: 14px 16px; border: 1px solid rgba(29,92,67,.1); border-radius: 13px; color: var(--muted); background: rgba(217,234,223,.45); font-size: 12px; line-height: 1.65; }
+.update-card .actions { margin-top: 24px; }
 .library-create-card { width: min(650px, calc(100vw - 40px)); margin-top: 7vh; max-height: 86vh; overflow: auto; }
 .directory-picker-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .directory-picker-row .button { min-width: 92px; white-space: nowrap; }

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260920-69" />
+    <link rel="stylesheet" href="/styles.css?v=20260921-70" />
   </head>
   <body>
     <div class="noise"></div>
@@ -377,8 +377,23 @@
       </div>
     </div>
 
+    <div id="updateModal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-update></div>
+      <div class="modal-card compact-modal-card update-card" role="dialog" aria-modal="true" aria-labelledby="updateTitle">
+        <div class="update-icon" aria-hidden="true">↗</div>
+        <p class="eyebrow">SOFTWARE UPDATE</p>
+        <h2 id="updateTitle">发现新版本</h2>
+        <p>SmartStitch <strong id="latestVersion">—</strong> 已发布，你正在使用 <span id="currentVersion">—</span>。</p>
+        <div class="update-note">点击“查看更新”将在系统浏览器中打开 GitHub Releases。下载并安装前，你可以先查看本次更新说明。</div>
+        <div class="actions right">
+          <button id="laterUpdateBtn" class="button secondary" type="button">稍后提醒</button>
+          <button id="openUpdateBtn" class="button primary" type="button">查看更新 <span>↗</span></button>
+        </div>
+      </div>
+    </div>
+
     <div id="toast" class="toast" role="status"></div>
     <script src="/timeline-math.js?v=20260920-69" defer></script>
-    <script src="/app.js?v=20260920-69" defer></script>
+    <script src="/app.js?v=20260921-70" defer></script>
   </body>
 </html>

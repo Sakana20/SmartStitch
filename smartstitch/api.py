@@ -83,6 +83,7 @@ from .scanner import probe_config_audio, scan_config
 from .slice_jobs import SliceJobManager
 from .slicer import SliceConflictError, SliceError, TimelineSlicer
 from .timeline import TimelineAnalyzer, TimelineError, list_source_videos
+from .updater import GitHubReleaseChecker, UpdateCheckError
 from .visual_borders import (
     VisualBorderLibrary,
     VisualBorderLibraryConflict,
@@ -206,6 +207,7 @@ def create_app(
     timeline_analyzer = TimelineAnalyzer(resolved_data_directory / "timelines")
     timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
     slice_job_manager = SliceJobManager(timeline_slicer, database_store)
+    release_checker = GitHubReleaseChecker()
     app = FastAPI(title="SmartStitch", version=__version__)
     app.state.root = root
     app.state.data_directory = resolved_data_directory
@@ -223,6 +225,7 @@ def create_app(
     app.state.timeline_analyzer = timeline_analyzer
     app.state.timeline_slicer = timeline_slicer
     app.state.slice_job_manager = slice_job_manager
+    app.state.release_checker = release_checker
 
     def collaboration_http_error(exc: CollaborationError) -> HTTPException:
         if isinstance(exc, ConfigLockHeldError):
@@ -262,6 +265,20 @@ def create_app(
             "shared_config": config_store.directory != local_config_directory,
             "config_path_mapped": config_store.has_path_alias,
         }
+
+    @app.get("/api/v1/system/updates")
+    def check_for_updates() -> dict[str, object]:
+        try:
+            return app.state.release_checker.check(__version__)
+        except UpdateCheckError as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+    @app.post("/api/v1/system/updates/open")
+    def open_latest_release() -> dict[str, object]:
+        try:
+            return app.state.release_checker.open_latest_release()
+        except UpdateCheckError as exc:
+            raise HTTPException(503, str(exc)) from exc
 
     @app.post("/api/v1/system/directory-picker")
     def directory_picker() -> dict[str, object]:

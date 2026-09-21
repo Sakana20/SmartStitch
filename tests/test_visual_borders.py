@@ -70,6 +70,38 @@ def test_global_visual_border_library_creates_shared_layout_and_deduplicates(tmp
     assert (tmp_path / "config" / stored).is_file()
 
 
+def test_global_visual_border_library_discovers_valid_files_copied_into_directory(
+    tmp_path,
+):
+    library = VisualBorderLibrary(tmp_path / "config")
+    initial = library.list()
+    copied = Path(initial["directory"]) / "手工放入.mov"
+    generate_border(copied)
+
+    discovered = library.list()
+
+    assert discovered["revision"] == 1
+    assert len(discovered["assets"]) == 1
+    assert discovered["assets"][0]["display_name"] == copied.name
+    assert discovered["assets"][0]["storage_path"] == str(
+        GLOBAL_BORDER_DIRECTORY / copied.name
+    )
+    assert library.list()["revision"] == 1
+
+
+def test_global_visual_border_library_ignores_invalid_files_copied_into_directory(
+    tmp_path,
+):
+    library = VisualBorderLibrary(tmp_path / "config")
+    initial = library.list()
+    (Path(initial["directory"]) / "无效.mov").write_bytes(b"not a movie")
+
+    refreshed = library.list()
+
+    assert refreshed["revision"] == 0
+    assert refreshed["assets"] == []
+
+
 def test_global_visual_border_library_uses_revision_and_project_compatibility(tmp_path):
     library = VisualBorderLibrary(tmp_path / "config")
     first_source = tmp_path / "红.mov"

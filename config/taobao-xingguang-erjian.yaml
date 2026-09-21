@@ -117,6 +117,13 @@ output:
   filename_template: '{config}_{date}_{batch}_{index:04d}.mp4'
   collision_policy: increment
   faststart: true
+  feishu_base_sync:
+    enabled: true
+    base_url: https://yiranmobi.feishu.cn/wiki/Z8gNwbkwoi8E7skbIK7cKvn1nve?table=tblmPvEDzwjzrt5N&view=vewE2qlljS
+    table_id: tblmPvEDzwjzrt5N
+    trigger: job_terminal
+    row_scope: all_items
+    write_mode: upsert
 batch:
   default_count: 10
   max_count: 1000

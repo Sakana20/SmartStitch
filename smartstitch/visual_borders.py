@@ -113,15 +113,76 @@ class VisualBorderLibrary:
             return self.directory / stored.name
         return self.root / stored
 
-    def list(self) -> dict[str, Any]:
-        self.ensure_layout()
-        with self._lock:
-            data = self._read_registry()
+    def _discover_unregistered(self, data: dict[str, Any]) -> bool:
+        """Register valid border files copied directly into the shared directory."""
+        registered_paths = {
+            self._storage_path(record).resolve()
+            for record in data["assets"]
+        }
+        registered_hashes = {
+            str(record.get("content_hash", ""))
+            for record in data["assets"]
+        }
+        changed = False
+        for path in sorted(
+            self.directory.iterdir(), key=lambda item: item.name.casefold()
+        ):
+            if (
+                path.name.startswith(".")
+                or path.is_symlink()
+                or not path.is_file()
+                or path.suffix.lower() not in VISUAL_BORDER_EXTENSIONS
+                or path.resolve() in registered_paths
+            ):
+                continue
+            try:
+                size = path.stat().st_size
+                if size <= 0 or size > MAX_VISUAL_BORDER_BYTES:
+                    continue
+                probe = validate_visual_border_media(path)
+                digest = _sha256(path)
+            except (OSError, ValueError):
+                # A file may still be copying, or may simply not be a valid transparent
+                # border. Leave it untouched so a later refresh can retry it.
+                continue
+            if digest in registered_hashes:
+                continue
+            record = {
+                "asset_id": f"visual-border-{digest[:16]}",
+                "display_name": path.name,
+                "storage_path": str(GLOBAL_BORDER_DIRECTORY / path.name),
+                "content_hash": digest,
+                "size_bytes": size,
+                "created_at": _now(),
+                "enabled": True,
+                "default_weight": 1.0,
+                "alpha_mode": "straight",
+                "media_type": (
+                    "image" if path.suffix.lower() in {".png", ".webp"} else "video"
+                ),
+                "probe": probe.model_dump(mode="json"),
+            }
+            data["assets"].append(record)
+            registered_paths.add(path.resolve())
+            registered_hashes.add(digest)
+            changed = True
+        return changed
+
+    def _snapshot(self, data: dict[str, Any]) -> dict[str, Any]:
         return {
             "directory": str(self.directory),
             "revision": data["revision"],
             "assets": [dict(asset) for asset in data["assets"]],
         }
+
+    def list(self) -> dict[str, Any]:
+        self.ensure_layout()
+        with self._write_lock():
+            data = self._read_registry()
+            if self._discover_unregistered(data):
+                data["revision"] += 1
+                self._write_registry(data)
+        return self._snapshot(data)
 
     def upload(
         self,
@@ -152,7 +213,11 @@ class VisualBorderLibrary:
                 None,
             )
             if existing is not None:
-                return {**self.list(), "asset": dict(existing), "deduplicated": True}
+                return {
+                    **self._snapshot(data),
+                    "asset": dict(existing),
+                    "deduplicated": True,
+                }
             staged = self.directory / f".{digest}.upload{extension}"
             shutil.copyfile(uploaded_path, staged)
             try:
@@ -176,7 +241,11 @@ class VisualBorderLibrary:
             data["assets"].append(record)
             data["revision"] += 1
             self._write_registry(data)
-            return {**self.list(), "asset": dict(record), "deduplicated": False}
+            return {
+                **self._snapshot(data),
+                "asset": dict(record),
+                "deduplicated": False,
+            }
 
     def update(
         self,
@@ -198,7 +267,7 @@ class VisualBorderLibrary:
             record.update({key: value for key, value in updates.items() if value is not None})
             data["revision"] += 1
             self._write_registry(data)
-            return {**self.list(), "asset": dict(record)}
+            return {**self._snapshot(data), "asset": dict(record)}
 
     def assets_for_config(self, config: AppConfig) -> list[Asset]:
         settings = config.visual_dedup.border_overlay
