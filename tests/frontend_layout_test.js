@@ -15,7 +15,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260922-74"/,
+  /href="\/styles\.css\?v=20260922-85"/,
   "ffprobe 扫描配置更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -31,6 +31,96 @@ assert.match(
   css,
   /\.asset-scope-notice\s*\{[^}]*background:\s*#edf4ef[^}]*color:\s*var\(--muted\)/,
   "素材权重说明必须沿用现有薄荷绿提示卡样式",
+);
+assert.doesNotMatch(
+  html,
+  /assetSelectionBar|assetBatchWeightActions|batchAssetWeightInput/,
+  "素材权重页不得在表格上方保留重复的批量权重操作栏",
+);
+assert.match(
+  app,
+  /function assetSortHeader[\s\S]*data-asset-sort[\s\S]*function renderAssetTableHead[\s\S]*selectAllAssets/,
+  "素材表头必须支持升降序，并支持全选当前素材库",
+);
+assert.match(
+  app,
+  /modified_at[\s\S]*文件日期[\s\S]*formatAssetDate/,
+  "素材权重表必须展示并允许按文件日期排序",
+);
+assert.match(
+  app,
+  /assetLastSelectedIndex[\s\S]*event\.shiftKey[\s\S]*displayedAssets\.slice/,
+  "素材选择必须支持 Shift 连续选择",
+);
+assert.match(
+  app + css,
+  /class="asset-enable-button[^\n]*data-enabled=[\s\S]*\.asset-enable-button\.enabled[\s\S]*\.asset-enable-button\.disabled/,
+  "素材启用状态必须使用明确的状态按钮，避免与素材选择框混淆",
+);
+assert.doesNotMatch(
+  app,
+  /<input class="check asset-enabled"/,
+  "素材启用状态不得继续使用复选框",
+);
+assert.match(
+  css,
+  /\.asset-enable-button\.disabled\s*\{[^}]*color:\s*#9c3d2a[^}]*background:\s*#fce4dd/,
+  "停用状态按钮必须使用现有主题的红色警示样式",
+);
+assert.match(
+  app + css,
+  /function bindAssetMarquee[\s\S]*pointerdown[\s\S]*pointermove[\s\S]*getBoundingClientRect[\s\S]*asset-selection-marquee[\s\S]*background:\s*rgba\(63,145,104,\.18\)/,
+  "素材表格必须支持 Windows 风格的浅绿色拖拽框选",
+);
+assert.match(
+  app,
+  /const originalSelection = new Set\(selected\)[\s\S]*selectionMode = originalSelection\.has\(startRow\.dataset\.id\) \? "remove" : "add"[\s\S]*selectionMode === "remove"[\s\S]*selected\.delete\(row\.dataset\.id\)[\s\S]*else selected\.add\(row\.dataset\.id\)/,
+  "框选必须根据起点进入追加或取消模式，未命中素材保持原选择状态",
+);
+assert.match(
+  app,
+  /const weightHelp = configHelp\("权重说明"[\s\S]*权重不是固定拼接次数[\s\S]*权重为 0[\s\S]*6、3、1[\s\S]*asset-weight-heading/,
+  "权重表头必须提供包含相对比例、零权重和分配示例的悬停说明",
+);
+assert.match(
+  css,
+  /\.asset-weight-heading \.field-help-popover\s*\{[^}]*left:\s*auto[^}]*right:\s*-10px[^}]*width:\s*clamp\(260px, 32vw, 420px\)[^}]*max-width:\s*calc\(100vw - 40px\)[^}]*white-space:\s*normal[^}]*overflow-wrap:\s*anywhere/,
+  "权重帮助提示必须向左展开、按视口缩放并允许换行，避免超出表格边框",
+);
+assert.match(
+  app,
+  /\.asset-weight"\)\.forEach\(input => input\.addEventListener\("keydown"[\s\S]*event\.key !== "Enter"[\s\S]*selected\.has\(asset\.id\)[\s\S]*assets\.filter\(item => selected\.has\(item\.id\)\)[\s\S]*item\.weight = weight/,
+  "在已选行的权重框输入并按回车必须批量更新全部选中素材",
+);
+assert.doesNotMatch(
+  html + app,
+  /applyBatchAssetWeightBtn|应用到选中/,
+  "批量权重不得保留与最终保存语义冲突的应用按钮",
+);
+assert.match(
+  app,
+  /selected\.has\(asset\.id\)[\s\S]*assets\.filter\(item => selected\.has\(item\.id\)\)[\s\S]*targets\.forEach\(item => \{ item\.enabled = nextEnabled; \}\)/,
+  "点击已选素材的状态按钮必须批量切换全部选中素材",
+);
+assert.match(
+  html,
+  /id="assetEditStatus"[^>]*>进入页面后获取编辑权[\s\S]*id="saveWeightsBtn"[^>]*>保存权重/,
+  "素材权重页必须恢复唯一的手动保存按钮并显示独占编辑状态",
+);
+assert.match(
+  app,
+  /async function openAssetWeightEditor[\s\S]*acquireConfigLease\(state\.configId\)[\s\S]*installConfigLease\(state\.configId, acquired, "assets"\)[\s\S]*async function closeAssetWeightEditor[\s\S]*releaseConfigLease/,
+  "进入素材权重页必须获取并持有与配置编辑器相同的独占锁，离开时释放",
+);
+assert.match(
+  app,
+  /async function saveWeights\(\)[\s\S]*state\.configLease\?\.context !== "assets"[\s\S]*headers: configLeaseHeaders\(\)[\s\S]*state\.assetEditSnapshot = assetWeightSnapshot\(\)/,
+  "素材权重只能使用当前页面持有的独占锁手动保存",
+);
+assert.doesNotMatch(
+  app,
+  /scheduleAssetAutoSave|flushAssetAutoSave|assetSavePromise|assetSaveQueued/,
+  "素材权重不得继续自动保存",
 );
 assert.match(
   css,

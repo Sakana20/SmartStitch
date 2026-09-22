@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260922-74" />
+    <link rel="stylesheet" href="/styles.css?v=20260922-85" />
   </head>
   <body>
     <div class="noise"></div>
@@ -248,8 +248,9 @@
           <div class="panel-heading">
             <div><span class="step">素材</span><h2>权重与状态</h2></div>
             <div class="inline-actions">
+              <span id="assetEditStatus" class="asset-save-status neutral">进入页面后获取编辑权</span>
               <button id="scanBtn" class="button secondary small">重新扫描</button>
-              <button id="saveWeightsBtn" class="button primary small">保存权重</button>
+              <button id="saveWeightsBtn" class="button primary small" disabled>保存权重</button>
             </div>
           </div>
           <div class="asset-scope-notice" role="note">
@@ -260,7 +261,7 @@
           <div id="assetTabs" class="asset-tabs"></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>启用</th><th>素材</th><th>媒体信息</th><th>标签</th><th>权重</th><th>组内占比</th><th>状态</th></tr></thead>
+              <thead id="assetTableHead"></thead>
               <tbody id="assetTable"></tbody>
             </table>
           </div>
@@ -397,7 +398,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260922-74" defer></script>
-    <script src="/app.js?v=20260922-74" defer></script>
+    <script src="/timeline-math.js?v=20260922-85" defer></script>
+    <script src="/app.js?v=20260922-85" defer></script>
   </body>
 </html>

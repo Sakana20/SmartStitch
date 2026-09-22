@@ -9,6 +9,11 @@ const state = {
   sourceInventory: null,
   visualBorderLibrary: null,
   assetCategory: "pre_roll",
+  assetSort: { key: "name", direction: "asc" },
+  assetSelections: {},
+  assetLastSelectedIndex: null,
+  assetEditing: false,
+  assetEditSnapshot: null,
   preview: null,
   jobs: [],
   sliceJobs: [],
@@ -301,6 +306,13 @@ async function expireConfigLease(lease = state.configLease) {
   lease.lost = true;
   clearConfigLeaseTimers(lease);
   state.configLease = null;
+  if (lease.context === "assets") {
+    state.assetEditing = false;
+    renderAssetEditStatus("素材编辑权已失效", "error");
+    renderAssets();
+    window.alert("素材编辑已超时过期，未保存的修改仍显示在页面中，但不能提交。请离开后重新进入素材权重页。");
+    return true;
+  }
   await closeConfig({ skipConfirm: true, releaseLease: false });
   state.configDraft = state.config ? structuredClone(state.config) : null;
   if ($("#yamlEditor")) $("#yamlEditor").value = state.yaml;
@@ -337,10 +349,11 @@ async function acquireConfigLease(configId) {
   }
 }
 
-function installConfigLease(configId, acquired) {
+function installConfigLease(configId, acquired, context = "config") {
   clearConfigLeaseTimers(state.configLease);
   state.configLease = {
     configId,
+    context,
     leaseToken: acquired.lease_token,
     browserSessionId: browserSessionId(),
     owner: acquired.owner,
@@ -372,6 +385,7 @@ async function renewConfigLease() {
     lease.heartbeatFailures = 0;
     scheduleConfigLeaseExpiry(lease);
     renderConfigLeaseBanner(false);
+    if (lease.context === "assets") renderAssetEditStatus("你正在独占编辑", "saved");
   } catch (error) {
     if (state.configLease !== lease) return;
     if (isTerminalConfigLeaseError(error)) {
@@ -381,6 +395,11 @@ async function renewConfigLease() {
     lease.heartbeatFailures += 1;
     const lost = error.status === 423 || lease.heartbeatFailures >= 3;
     renderConfigLeaseBanner(lost, lost ? "无法续租，已停止保存" : "NAS 连接不稳定，正在重试续租");
+    if (lease.context === "assets") {
+      state.assetEditing = !lost;
+      renderAssetEditStatus(lost ? "无法续租，已停止编辑" : "NAS 连接不稳定，正在重试", lost ? "error" : "pending");
+      renderAssets();
+    }
     if (lost) toast(error.message, true);
   }
 }
@@ -456,7 +475,7 @@ async function init() {
   await loadConfigs();
   await Promise.all([loadJobs(), loadSliceJobs()]);
   connectSliceJobEvents();
-  checkForUpdates();
+  // checkForUpdates(); // 暂停启动时通过 GitHub Releases 自动检查更新。
 }
 
 async function checkForUpdates() {
@@ -520,7 +539,7 @@ function bindEvents() {
   });
   $$(".section-tab").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
   $("#configSelect").addEventListener("change", () => selectConfig($("#configSelect").value));
-  $("#scanBtn").addEventListener("click", scanAssets);
+  $("#scanBtn").addEventListener("click", refreshAssetScan);
   $("#saveWeightsBtn").addEventListener("click", saveWeights);
   $("#previewBtn").addEventListener("click", previewPlan);
   $("#startBtn").addEventListener("click", startJob);
@@ -564,12 +583,99 @@ function bindEvents() {
   window.addEventListener("beforeunload", releaseConfigLeaseBeacon);
 }
 
-function switchView(view) {
+async function switchView(view) {
+  const previousView = $(".section-tab.active")?.dataset.view;
+  if (previousView === "assets" && view !== "assets") {
+    const closed = await closeAssetWeightEditor();
+    if (!closed) return;
+  }
   $$(".section-tab").forEach(button => button.classList.toggle("active", button.dataset.view === view));
   $$(".view").forEach(element => element.classList.toggle("active", element.id === `${view}View`));
   $("#timelineSliceQueue").classList.toggle("hidden", view !== "timeline");
+  if (view === "assets" && previousView !== "assets") await openAssetWeightEditor();
   if (view === "jobs") loadJobs();
   if (view === "timeline") refreshTimelineConfig();
+}
+
+function renderAssetEditStatus(message, status) {
+  const element = $("#assetEditStatus");
+  if (!element) return;
+  element.textContent = message;
+  element.className = `asset-save-status ${status}`;
+  $("#saveWeightsBtn").disabled = !state.assetEditing || Boolean(state.configLease?.lost);
+}
+
+function assetWeightSnapshot() {
+  if (!state.scan) return null;
+  return JSON.stringify(Object.entries(state.scan.assets)
+    .filter(([category]) => !["benefit_overlay", "visual_border"].includes(category))
+    .flatMap(([category, assets]) => assets.map(asset => ({
+      category,
+      path: asset.path,
+      enabled: asset.enabled,
+      weight: Number(asset.weight),
+      tags: asset.tags,
+    }))));
+}
+
+function assetWeightsDirty() {
+  if (!state.assetEditing || !state.assetEditSnapshot) return false;
+  syncVisibleAssetValues(false);
+  return assetWeightSnapshot() !== state.assetEditSnapshot;
+}
+
+async function openAssetWeightEditor() {
+  if (!state.configId) return;
+  renderAssetEditStatus("正在获取编辑权…", "pending");
+  try {
+    const acquired = await acquireConfigLease(state.configId);
+    if (!acquired) {
+      state.assetEditing = false;
+      renderAssetEditStatus("只读：配置正被占用", "error");
+      renderAssets();
+      return;
+    }
+    installConfigLease(state.configId, acquired, "assets");
+    const changed = acquired.content_hash !== state.configHash;
+    state.config = acquired.config;
+    state.configHash = acquired.content_hash;
+    state.yaml = acquired.yaml_text;
+    state.assetEditing = true;
+    if (changed) await scanAssets(false);
+    state.assetEditSnapshot = assetWeightSnapshot();
+    renderAssetEditStatus("你正在独占编辑", "saved");
+    renderAssets();
+  } catch (error) {
+    state.assetEditing = false;
+    renderAssetEditStatus("获取编辑权失败", "error");
+    renderAssets();
+    toast(error.message, true);
+  }
+}
+
+async function closeAssetWeightEditor({ skipConfirm = false } = {}) {
+  const dirty = assetWeightsDirty();
+  if (!skipConfirm && dirty && !window.confirm("放弃未保存的素材权重修改并释放配置吗？")) return false;
+  if (dirty) {
+    await scanAssets(false);
+    state.assetSelections = {};
+  }
+  state.assetEditing = false;
+  state.assetEditSnapshot = null;
+  if (state.configLease?.context === "assets") await releaseConfigLease();
+  renderAssetEditStatus("进入页面后获取编辑权", "neutral");
+  return true;
+}
+
+async function refreshAssetScan() {
+  const dirty = assetWeightsDirty();
+  if (dirty && !window.confirm("重新扫描会放弃尚未保存的素材权重修改，是否继续？")) return;
+  const scanned = await scanAssets();
+  if (scanned && state.assetEditing) {
+    state.assetSelections = {};
+    state.assetEditSnapshot = assetWeightSnapshot();
+    renderAssets();
+  }
 }
 
 function bindTimelineEvents() {
@@ -2420,7 +2526,9 @@ async function loadConfigs(preferredId = null) {
     $("#heroAssetCount").textContent = "新建配置后开始扫描";
     $("#scanSummary").textContent = "请先新建一个配置";
     $("#assetTabs").innerHTML = "";
-    $("#assetTable").innerHTML = '<tr><td colspan="7" style="text-align:center;padding:50px;color:var(--muted)">暂无配置</td></tr>';
+    $("#assetTableHead").innerHTML = "";
+    $("#assetTable").innerHTML = '<tr><td colspan="9" style="text-align:center;padding:50px;color:var(--muted)">暂无配置</td></tr>';
+    state.assetSelections = {};
     hideDeleteConfigConfirm();
     return;
   }
@@ -2431,6 +2539,8 @@ async function loadConfigs(preferredId = null) {
 
 async function selectConfig(id) {
   state.configId = id;
+  state.assetSelections = {};
+  state.assetLastSelectedIndex = null;
   $("#configSelect").value = id;
   try {
     const result = await api(`/configs/${id}`);
@@ -2549,29 +2659,234 @@ function renderAssetTabs() {
   }).join("");
   $$(".asset-tab").forEach(button => button.addEventListener("click", () => {
     syncVisibleAssetValues(false);
-    state.assetCategory = button.dataset.category; renderAssetTabs(); renderAssets();
+    state.assetCategory = button.dataset.category;
+    state.assetLastSelectedIndex = null;
+    renderAssetTabs(); renderAssets();
+  }));
+}
+
+function assetSelection(category = state.assetCategory) {
+  if (!state.assetSelections[category]) state.assetSelections[category] = new Set();
+  return state.assetSelections[category];
+}
+
+function assetSortValue(asset, key, total) {
+  if (key === "modified_at") return asset.modified_at == null ? null : Number(asset.modified_at);
+  if (key === "weight") return Number(asset.weight);
+  if (key === "percent") return asset.enabled && asset.valid && total ? Number(asset.weight) / total : 0;
+  if (key === "status") return asset.valid ? 1 : 0;
+  return String(asset.name || "");
+}
+
+function sortedAssets(assets, total) {
+  const { key, direction } = state.assetSort;
+  return [...assets].sort((left, right) => {
+    const leftValue = assetSortValue(left, key, total);
+    const rightValue = assetSortValue(right, key, total);
+    if (leftValue == null || rightValue == null) {
+      if (leftValue == null && rightValue == null) return left.name.localeCompare(right.name, "zh-CN", { numeric: true });
+      return leftValue == null ? 1 : -1;
+    }
+    const result = typeof leftValue === "string"
+      ? leftValue.localeCompare(rightValue, "zh-CN", { numeric: true, sensitivity: "base" })
+      : leftValue - rightValue;
+    return (result || left.name.localeCompare(right.name, "zh-CN", { numeric: true })) * (direction === "asc" ? 1 : -1);
+  });
+}
+
+function assetSortHeader(key, label) {
+  const active = state.assetSort.key === key;
+  const arrow = active ? (state.assetSort.direction === "asc" ? "↑" : "↓") : "↕";
+  const nextDirection = active && state.assetSort.direction === "asc" ? "降序" : "升序";
+  return `<button class="asset-sort-button ${active ? "active" : ""}" type="button" data-asset-sort="${key}" title="按${label}${nextDirection}">${label}<i>${arrow}</i></button>`;
+}
+
+function renderAssetTableHead(assets) {
+  const selected = assetSelection();
+  const allSelected = assets.length > 0 && assets.every(asset => selected.has(asset.id));
+  const someSelected = assets.some(asset => selected.has(asset.id));
+  const weightHelp = configHelp("权重说明", [
+    ["相对比例：", "权重不是固定拼接次数，只表示同一个素材库内的抽取比例。"],
+    ["数值含义：", "权重 2 相对于权重 1 的素材，大约多出现一倍；所有素材权重相同时基本平均分配。"],
+    ["权重为 0：", "素材不参与拼接，但仍保留在素材库中；已停用素材同样不参与。"],
+    ["计算范围：", "不同素材库分别计算，引子、利益点和结尾的权重不会互相比较。"],
+    ["举例：", "同库权重为 6、3、1，生成 10 条时通常约为 6、3、1 次，最终以计划预览为准。"],
+  ]);
+  $("#assetTableHead").innerHTML = `<tr>
+    <th class="asset-select-cell"><input id="selectAllAssets" class="check" type="checkbox" aria-label="选择当前素材库的全部素材" ${allSelected ? "checked" : ""}></th>
+    <th>启用</th><th>${assetSortHeader("name", "素材")}</th><th>${assetSortHeader("modified_at", "文件日期")}</th><th>媒体信息</th><th>标签</th><th><span class="asset-weight-heading">${assetSortHeader("weight", "权重")}${weightHelp}</span></th><th>${assetSortHeader("percent", "组内占比")}</th><th>${assetSortHeader("status", "状态")}</th>
+  </tr>`;
+  const selectAll = $("#selectAllAssets");
+  selectAll.indeterminate = someSelected && !allSelected;
+  selectAll.addEventListener("change", () => {
+    assets.forEach(asset => selectAll.checked ? selected.add(asset.id) : selected.delete(asset.id));
+    state.assetLastSelectedIndex = null;
+    renderAssets();
+  });
+  $$("[data-asset-sort]").forEach(button => button.addEventListener("click", () => {
+    syncVisibleAssetValues(false);
+    const key = button.dataset.assetSort;
+    state.assetSort = {
+      key,
+      direction: state.assetSort.key === key && state.assetSort.direction === "asc" ? "desc" : "asc",
+    };
+    state.assetLastSelectedIndex = null;
+    renderAssets();
   }));
 }
 
 function renderAssets() {
   const assets = state.scan?.assets[state.assetCategory] || [];
   const fixedAsset = ["benefit_overlay", "visual_border"].includes(state.assetCategory);
+  const editable = state.assetEditing && !state.configLease?.lost;
   const total = assets.filter(asset => asset.enabled && asset.valid).reduce((sum, asset) => sum + Number(asset.weight), 0);
-  $("#assetTable").innerHTML = assets.length ? assets.map(asset => {
+  const displayedAssets = sortedAssets(assets, total);
+  const selected = assetSelection();
+  const validIds = new Set(assets.map(asset => asset.id));
+  [...selected].forEach(id => { if (!validIds.has(id)) selected.delete(id); });
+  renderAssetTableHead(displayedAssets);
+  $("#assetTable").innerHTML = displayedAssets.length ? displayedAssets.map(asset => {
     const probe = asset.probe;
     const meta = probe ? (asset.media_type === "image" ? `${probe.width}×${probe.height} · 图片` : `${probe.width}×${probe.height} · ${formatDuration(probe.duration)} · ${probe.fps ? probe.fps.toFixed(2) + "fps" : "—"}`) : "无法读取";
     const percent = asset.enabled && asset.valid && total ? (asset.weight / total * 100).toFixed(1) : "0.0";
-    return `<tr data-id="${asset.id}">
-      <td>${fixedAsset ? '<span class="valid">固定</span>' : `<input class="check asset-enabled" type="checkbox" ${asset.enabled ? "checked" : ""}>`}</td>
+    const isSelected = selected.has(asset.id);
+    return `<tr data-id="${asset.id}" class="${isSelected ? "asset-row-selected" : ""}">
+      <td class="asset-select-cell"><input class="check asset-selected" type="checkbox" aria-label="选择 ${escapeHtml(asset.name)}" ${isSelected ? "checked" : ""}></td>
+      <td>${fixedAsset ? '<span class="valid">固定</span>' : `<button class="asset-enable-button ${asset.enabled ? "enabled" : "disabled"}" type="button" data-enabled="${asset.enabled}" aria-pressed="${asset.enabled}" title="点击${asset.enabled ? "停用" : "启用"}该素材" ${editable ? "" : "disabled"}>${asset.enabled ? "已启用" : "已停用"}</button>`}</td>
       <td><div class="file-name" title="${escapeHtml(asset.name)}">${escapeHtml(asset.name)}</div><div class="file-path" title="${escapeHtml(asset.path)}">${escapeHtml(asset.path)}</div></td>
+      <td><span class="asset-date">${asset.modified_at ? escapeHtml(formatAssetDate(asset.modified_at)) : "—"}</span></td>
       <td><span class="media-meta">${escapeHtml(meta)}</span></td>
-      <td>${fixedAsset ? "—" : `<input class="tags-input asset-tags" value="${escapeHtml(asset.tags.join(","))}" placeholder="通用">`}</td>
-      <td>${fixedAsset ? "不参与随机" : `<input class="weight-input asset-weight" type="number" min="0" step="0.1" value="${asset.weight}">`}</td>
+      <td>${fixedAsset ? "—" : `<input class="tags-input asset-tags" value="${escapeHtml(asset.tags.join(","))}" placeholder="通用" ${editable ? "" : "disabled"}>`}</td>
+      <td>${fixedAsset ? "不参与随机" : `<input class="weight-input asset-weight" type="number" min="0" step="0.1" value="${asset.weight}" ${editable ? "" : "disabled"}>`}</td>
       <td>${fixedAsset ? "100%" : `${percent}%`}</td>
       <td><span class="${asset.valid ? "valid" : "invalid"}" title="${escapeHtml(asset.error || "")}">${asset.valid ? "可用" : "异常"}</span></td>
     </tr>`;
-  }).join("") : `<tr><td colspan="7" style="text-align:center;padding:50px;color:var(--muted)">此类别当前没有素材</td></tr>`;
-  $$(".asset-weight,.asset-enabled,.asset-tags").forEach(input => input.addEventListener("change", () => syncVisibleAssetValues(true)));
+  }).join("") : `<tr><td colspan="9" style="text-align:center;padding:50px;color:var(--muted)">此类别当前没有素材</td></tr>`;
+  $$(".asset-weight,.asset-tags").forEach(input => input.addEventListener("change", () => syncVisibleAssetValues(true)));
+  $$(".asset-weight").forEach(input => input.addEventListener("keydown", event => {
+    if (event.key !== "Enter" || !state.assetEditing) return;
+    event.preventDefault();
+    const weight = Number(input.value);
+    if (!input.value.trim() || !input.validity.valid || !Number.isFinite(weight) || weight < 0) {
+      toast("请输入大于等于 0 的权重", true);
+      return;
+    }
+    syncVisibleAssetValues(false);
+    const row = input.closest("tr[data-id]");
+    const asset = assets.find(item => item.id === row.dataset.id);
+    const selected = assetSelection();
+    const targets = selected.has(asset.id)
+      ? assets.filter(item => selected.has(item.id))
+      : [asset];
+    targets.forEach(item => { item.weight = weight; });
+    renderAssets();
+    if (targets.length > 1) toast(`已将 ${targets.length} 个选中素材的权重设为 ${weight}`);
+  }));
+  $$(".asset-enable-button").forEach(button => button.addEventListener("click", () => {
+    syncVisibleAssetValues(false);
+    const row = button.closest("tr[data-id]");
+    const asset = assets.find(item => item.id === row.dataset.id);
+    const selected = assetSelection();
+    const nextEnabled = !asset.enabled;
+    const targets = selected.has(asset.id)
+      ? assets.filter(item => selected.has(item.id))
+      : [asset];
+    targets.forEach(item => { item.enabled = nextEnabled; });
+    renderAssets();
+    if (targets.length > 1) {
+      toast(`已将 ${targets.length} 个选中素材批量${nextEnabled ? "启用" : "停用"}`);
+    }
+  }));
+  $$(".asset-selected").forEach((input, index) => input.addEventListener("click", event => {
+    if (event.shiftKey && state.assetLastSelectedIndex != null) {
+      const start = Math.min(index, state.assetLastSelectedIndex);
+      const end = Math.max(index, state.assetLastSelectedIndex);
+      displayedAssets.slice(start, end + 1).forEach(asset => input.checked ? selected.add(asset.id) : selected.delete(asset.id));
+    } else if (input.checked) selected.add(displayedAssets[index].id);
+    else selected.delete(displayedAssets[index].id);
+    state.assetLastSelectedIndex = index;
+    renderAssets();
+  }));
+  bindAssetMarquee(displayedAssets);
+}
+
+function refreshAssetSelectionVisuals(displayedAssets) {
+  const selected = assetSelection();
+  $$("#assetTable tr[data-id]").forEach(row => {
+    const isSelected = selected.has(row.dataset.id);
+    row.classList.toggle("asset-row-selected", isSelected);
+    const checkbox = row.querySelector(".asset-selected");
+    if (checkbox) checkbox.checked = isSelected;
+  });
+  const selectAll = $("#selectAllAssets");
+  if (selectAll) {
+    const selectedCount = displayedAssets.filter(asset => selected.has(asset.id)).length;
+    selectAll.checked = displayedAssets.length > 0 && selectedCount === displayedAssets.length;
+    selectAll.indeterminate = selectedCount > 0 && selectedCount < displayedAssets.length;
+  }
+}
+
+function bindAssetMarquee(displayedAssets) {
+  const tableBody = $("#assetTable");
+  if (!displayedAssets.length) return;
+  tableBody.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || event.target.closest("button,input,select,textarea,a,label")) return;
+    const startRow = event.target.closest("tr[data-id]");
+    if (!startRow) return;
+    event.preventDefault();
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const selected = assetSelection();
+    const originalSelection = new Set(selected);
+    const selectionMode = originalSelection.has(startRow.dataset.id) ? "remove" : "add";
+    let marquee = null;
+    let dragging = false;
+
+    const finish = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      marquee?.remove();
+      document.body.classList.remove("asset-marquee-active");
+      if (dragging) state.assetLastSelectedIndex = null;
+    };
+    const move = moveEvent => {
+      if (moveEvent.pointerId !== pointerId) return;
+      const distance = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
+      if (!dragging && distance < 5) return;
+      if (!dragging) {
+        dragging = true;
+        marquee = document.createElement("div");
+        marquee.className = "asset-selection-marquee";
+        document.body.append(marquee);
+        document.body.classList.add("asset-marquee-active");
+      }
+      const left = Math.min(startX, moveEvent.clientX);
+      const top = Math.min(startY, moveEvent.clientY);
+      const right = Math.max(startX, moveEvent.clientX);
+      const bottom = Math.max(startY, moveEvent.clientY);
+      Object.assign(marquee.style, {
+        left: `${left}px`,
+        top: `${top}px`,
+        width: `${right - left}px`,
+        height: `${bottom - top}px`,
+      });
+      selected.clear();
+      originalSelection.forEach(id => selected.add(id));
+      $$("#assetTable tr[data-id]").forEach(row => {
+        const rect = row.getBoundingClientRect();
+        if (rect.left <= right && rect.right >= left && rect.top <= bottom && rect.bottom >= top) {
+          if (selectionMode === "remove") selected.delete(row.dataset.id);
+          else selected.add(row.dataset.id);
+        }
+      });
+      refreshAssetSelectionVisuals(displayedAssets);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  });
 }
 
 function syncVisibleAssetValues(rerender = true) {
@@ -2580,7 +2895,7 @@ function syncVisibleAssetValues(rerender = true) {
   const assets = state.scan.assets[state.assetCategory];
   $$("#assetTable tr[data-id]").forEach(row => {
     const asset = assets.find(item => item.id === row.dataset.id);
-    asset.enabled = row.querySelector(".asset-enabled").checked;
+    asset.enabled = row.querySelector(".asset-enable-button").dataset.enabled === "true";
     asset.weight = Number(row.querySelector(".asset-weight").value || 0);
     asset.tags = row.querySelector(".asset-tags").value.split(",").map(value => value.trim()).filter(Boolean);
   });
@@ -2588,22 +2903,35 @@ function syncVisibleAssetValues(rerender = true) {
 }
 
 async function saveWeights() {
-  if (!state.scan) return;
+  if (!state.scan || !state.assetEditing || state.configLease?.context !== "assets") return;
   syncVisibleAssetValues(false);
   const items = Object.entries(state.scan.assets)
     .filter(([category]) => !["benefit_overlay", "visual_border"].includes(category))
     .flatMap(([category, assets]) => assets.map(asset => ({ category, path: asset.path, enabled: asset.enabled, weight: Number(asset.weight), tags: asset.tags })));
+  const button = $("#saveWeightsBtn");
+  button.disabled = true;
+  button.textContent = "保存中…";
+  renderAssetEditStatus("正在保存…", "saving");
   try {
-    const saved = await withTemporaryConfigLease((lease, configHash) => api(`/configs/${state.configId}/weights`, {
+    const saved = await api(`/configs/${state.configId}/weights`, {
       method: "POST",
-      headers: configLeaseHeaders(lease, configHash),
+      headers: configLeaseHeaders(),
       body: JSON.stringify({ items }),
-    }));
-    if (!saved) return;
+    });
+    state.config = saved.config;
     state.configHash = saved.content_hash;
-    toast("权重已保存，原配置已备份");
-    await selectConfig(state.configId);
-  } catch (error) { toast(error.message, true); }
+    state.assetEditSnapshot = assetWeightSnapshot();
+    renderAssetEditStatus("已保存，继续独占编辑", "saved");
+    toast("素材权重已保存，原配置已备份");
+  } catch (error) {
+    if (!isTerminalConfigLeaseError(error) || !await expireConfigLease()) {
+      renderAssetEditStatus("保存失败，仍在编辑", "error");
+      toast(error.message, true);
+    }
+  } finally {
+    button.textContent = "保存权重";
+    button.disabled = !state.assetEditing || Boolean(state.configLease?.lost);
+  }
 }
 
 function requestValues() {
@@ -4886,6 +5214,7 @@ async function saveConfig() {
 
 function formatDuration(seconds) { const mins = Math.floor(seconds/60); const secs = Math.round(seconds%60); return mins ? `${mins}m${secs}s` : `${secs}s`; }
 function formatDate(value) { try { return new Intl.DateTimeFormat("zh-CN", { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" }).format(new Date(value)); } catch (_) { return value; } }
+function formatAssetDate(value) { try { return new Intl.DateTimeFormat("zh-CN", { year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" }).format(new Date(Number(value) * 1000)); } catch (_) { return value; } }
 function escapeHtml(value) { return String(value ?? "").replace(/[&<>'"]/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char])); }
 
 document.addEventListener("DOMContentLoaded", init);
