@@ -9,9 +9,14 @@ from collections import Counter
 import pytest
 import smartstitch.scanner as scanner_module
 from smartstitch.database import SQLiteStore
-from smartstitch.models import AppConfig, AssetItemConfig, MediaProbe
+from smartstitch.models import (
+    AppConfig,
+    AssetItemConfig,
+    MediaProbe,
+    SourceGroupConfig,
+)
 from smartstitch.probe_cache import MediaProbeCache
-from smartstitch.scanner import scan_config, scan_visual_border
+from smartstitch.scanner import scan_config, scan_source_inventory, scan_visual_border
 
 
 def generate_qtrle_border(path, *, alpha=True, width=180, height=320):
@@ -390,6 +395,48 @@ def test_scan_keeps_existing_but_unreadable_file_as_abnormal(tmp_path, monkeypat
     assert [asset.name for asset in result.assets["pool_1"]] == ["broken.mp4"]
     assert result.assets["pool_1"][0].valid is False
     assert result.assets["pool_1"][0].error == "媒体损坏"
+
+
+def test_source_inventory_counts_disabled_groups_without_ffprobe(tmp_path, monkeypatch):
+    config = _probe_test_config(tmp_path)
+    disabled_directory = tmp_path / "disabled"
+    disabled_directory.mkdir()
+    (disabled_directory / "visible.mp4").write_bytes(b"video")
+    (disabled_directory / "notes.txt").write_text("ignore", encoding="utf-8")
+    (disabled_directory / ".hidden.mp4").write_bytes(b"hidden")
+    config.timeline.extend(["pool_2", "pool_3"])
+    config.sources["pool_2"] = SourceGroupConfig(
+        label="关闭素材库",
+        mode="disabled",
+        directory="disabled",
+        extensions=[".mp4"],
+    )
+    config.sources["pool_3"] = SourceGroupConfig(
+        label="未挂载素材库",
+        mode="disabled",
+        directory="missing",
+        extensions=[".mp4"],
+    )
+    monkeypatch.setattr(
+        scanner_module,
+        "probe_media",
+        lambda *_args, **_kwargs: pytest.fail("素材库概览不得运行 ffprobe"),
+    )
+
+    inventory = scan_source_inventory(config)
+    scan = scan_config(config)
+
+    assert inventory.sources["pool_2"].discovered_count == 1
+    assert inventory.sources["pool_2"].directory_status == "available"
+    assert inventory.sources["pool_2"].enabled is False
+    assert inventory.sources["pool_3"].directory_status == "unavailable"
+    assert scan.assets["pool_2"] == []
+    assert scan.assets["pool_3"] == []
+
+    (disabled_directory / "visible.mp4").unlink()
+    refreshed = scan_source_inventory(config)
+    assert refreshed.sources["pool_2"].discovered_count == 0
+    assert refreshed.sources["pool_2"].directory_status == "empty"
 
 
 def test_scan_limits_concurrent_ffprobe_processes(tmp_path, monkeypatch):

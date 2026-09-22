@@ -193,6 +193,49 @@ def test_structured_config_update(tmp_path):
     assert list((config_directory / "backups").glob("*.yaml"))
 
 
+def test_source_inventory_api_includes_disabled_libraries(tmp_path):
+    config_directory = tmp_path / "config"
+    config_directory.mkdir()
+    source_root = tmp_path / "library"
+    active = source_root / "active"
+    disabled = source_root / "disabled"
+    active.mkdir(parents=True)
+    disabled.mkdir()
+    (active / "one.mp4").write_bytes(b"active")
+    (disabled / "one.mp4").write_bytes(b"disabled-1")
+    (disabled / "two.mp4").write_bytes(b"disabled-2")
+    config = {
+        "schema_version": 3,
+        "workflow_type": "generic",
+        "id": "inventory-test",
+        "name": "素材库概览测试",
+        "source_root": str(source_root),
+        "timeline": ["pool_1", "pool_2", "pool_3"],
+        "sources": {
+            "pool_1": {"label": "启用库", "mode": "required", "directory": "active"},
+            "pool_2": {"label": "关闭库", "mode": "disabled", "directory": "disabled"},
+            "pool_3": {"label": "掉线库", "mode": "disabled", "directory": "missing"},
+        },
+        "benefit_overlays": {"mode": "disabled", "file": ""},
+        "output": {"directory": str(tmp_path / "output")},
+    }
+    (config_directory / "inventory-test.yaml").write_text(
+        yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    client = TestClient(create_app(tmp_path))
+
+    response = client.get("/api/v1/configs/inventory-test/source-inventory")
+
+    assert response.status_code == 200
+    sources = response.json()["sources"]
+    assert sources["pool_1"]["discovered_count"] == 1
+    assert sources["pool_1"]["enabled"] is True
+    assert sources["pool_2"]["discovered_count"] == 2
+    assert sources["pool_2"]["enabled"] is False
+    assert sources["pool_2"]["directory_status"] == "available"
+    assert sources["pool_3"]["directory_status"] == "unavailable"
+
+
 def test_create_and_delete_config_with_recoverable_backup(tmp_path):
     config_directory = tmp_path / "config"
     config_directory.mkdir()

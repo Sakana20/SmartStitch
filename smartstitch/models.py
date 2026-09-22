@@ -701,6 +701,20 @@ class ScanResult(BaseModel):
         return not self.errors
 
 
+class SourceInventoryItem(BaseModel):
+    category: str
+    label: str
+    directory: str
+    directory_status: Literal["available", "empty", "unavailable"]
+    discovered_count: int = Field(ge=0)
+    enabled: bool
+
+
+class SourceInventoryResult(BaseModel):
+    config_id: str
+    sources: dict[str, SourceInventoryItem]
+
+
 class PlanItem(BaseModel):
     index: int
     selections: dict[str, Asset | None]

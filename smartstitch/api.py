@@ -81,7 +81,7 @@ from .runtime import (
     writable_config_directory,
     writable_data_directory,
 )
-from .scanner import probe_config_audio, scan_config
+from .scanner import probe_config_audio, scan_config, scan_source_inventory
 from .slice_jobs import SliceJobManager
 from .slicer import SliceConflictError, SliceError, TimelineSlicer
 from .timeline import TimelineAnalyzer, TimelineError, list_source_videos
@@ -881,6 +881,14 @@ def create_app(
                 media_probe_cache,
             )
             return {**result.model_dump(mode="json"), "ok": result.ok}
+        except (ConfigError, FileNotFoundError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/configs/{config_id}/source-inventory")
+    def source_inventory(config_id: str) -> dict[str, object]:
+        try:
+            config = config_store.load(config_id)
+            return scan_source_inventory(config).model_dump(mode="json")
         except (ConfigError, FileNotFoundError) as exc:
             raise HTTPException(422, str(exc)) from exc
 

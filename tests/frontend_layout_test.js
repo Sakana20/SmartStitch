@@ -15,13 +15,23 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260922-72"/,
+  /href="\/styles\.css\?v=20260922-74"/,
   "ffprobe 扫描配置更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
 assert.equal(staticVersions.length, 3, "三个前端静态资源都必须声明缓存版本");
 assert.equal(new Set(staticVersions).size, 1, "CSS 与 JS 必须使用同一个发布版本，避免新旧资源混用");
+assert.match(
+  html,
+  /class="asset-scope-notice"[\s\S]*随机候选池[\s\S]*仅列出已开启视频库的素材[\s\S]*配置管理 → 拼接顺序/,
+  "素材权重页必须说明它是生成候选池，并指引用户查看关闭视频库的素材数量",
+);
+assert.match(
+  css,
+  /\.asset-scope-notice\s*\{[^}]*background:\s*#edf4ef[^}]*color:\s*var\(--muted\)/,
+  "素材权重说明必须沿用现有薄荷绿提示卡样式",
+);
 assert.match(
   css,
   /html\s*\{[^}]*scrollbar-gutter:\s*stable/,
@@ -130,8 +140,13 @@ assert.match(
 );
 assert.match(
   app,
-  /id="refreshSimpleAssetsBtn"[\s\S]*刷新素材库[\s\S]*function bindSimpleConfigControls\(\)[\s\S]*refreshSimpleAssetsBtn[\s\S]*await scanAssets\(false\)[\s\S]*renderSimpleConfig\(\)/,
+  /id="refreshSimpleAssetsBtn"[\s\S]*刷新素材库[\s\S]*function bindSimpleConfigControls\(\)[\s\S]*refreshSimpleAssetsBtn[\s\S]*loadSourceInventory\(true\)[\s\S]*await scanAssets\(false\)[\s\S]*renderSimpleConfig\(\)/,
   "拼接顺序标题栏必须提供刷新素材库按钮，并在扫描后更新各视频库数量",
+);
+assert.match(
+  app,
+  /sourceInventory[\s\S]*source-inventory[\s\S]*disabled && count[\s\S]*未参与拼接/,
+  "关闭的视频库必须使用独立概览数量，并明确标记为未参与拼接",
 );
 assert.match(
   app,

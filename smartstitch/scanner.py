@@ -18,6 +18,8 @@ from .models import (
     Asset,
     MediaProbe,
     ScanResult,
+    SourceInventoryItem,
+    SourceInventoryResult,
     SourceGroupConfig,
     SourceMode,
     resolve_directory,
@@ -458,6 +460,33 @@ def _prepare_group(config: AppConfig, group: SourceGroupConfig) -> _PreparedGrou
         explicit=explicit,
         candidates=candidates,
     )
+
+
+def scan_source_inventory(config: AppConfig) -> SourceInventoryResult:
+    """Enumerate every source group without probing media or applying its mode."""
+    sources: dict[str, SourceInventoryItem] = {}
+    for category, group in config.sources.items():
+        directory = resolve_directory(config, group.directory)
+        try:
+            if not directory.is_dir():
+                status = "unavailable"
+                count = 0
+            else:
+                prepared = _prepare_group(config, group)
+                count = len(prepared.candidates)
+                status = "available" if count else "empty"
+        except OSError:
+            status = "unavailable"
+            count = 0
+        sources[category] = SourceInventoryItem(
+            category=category,
+            label=group.label,
+            directory=str(directory),
+            directory_status=status,
+            discovered_count=count,
+            enabled=group.mode != SourceMode.DISABLED,
+        )
+    return SourceInventoryResult(config_id=config.id, sources=sources)
 
 
 def scan_group(

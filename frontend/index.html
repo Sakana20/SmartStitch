@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260922-72" />
+    <link rel="stylesheet" href="/styles.css?v=20260922-74" />
   </head>
   <body>
     <div class="noise"></div>
@@ -252,6 +252,10 @@
               <button id="saveWeightsBtn" class="button primary small">保存权重</button>
             </div>
           </div>
+          <div class="asset-scope-notice" role="note">
+            <span>随机候选池</span>
+            <p><strong>这里展示生成时实际读取的素材。</strong>仅列出已开启视频库的素材；其中通过预检、已启用且权重大于 0 的素材才会参与随机抽取。关闭的视频库不会出现在这里，可在“配置管理 → 拼接顺序”查看其素材数量。</p>
+          </div>
           <div id="scanSummary" class="scan-summary">选择配置后将自动扫描</div>
           <div id="assetTabs" class="asset-tabs"></div>
           <div class="table-wrap">
@@ -393,7 +397,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260922-72" defer></script>
-    <script src="/app.js?v=20260922-72" defer></script>
+    <script src="/timeline-math.js?v=20260922-74" defer></script>
+    <script src="/app.js?v=20260922-74" defer></script>
   </body>
 </html>

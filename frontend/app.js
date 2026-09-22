@@ -6,6 +6,7 @@ const state = {
   library: null,
   yaml: "",
   scan: null,
+  sourceInventory: null,
   visualBorderLibrary: null,
   assetCategory: "pre_roll",
   preview: null,
@@ -2413,7 +2414,7 @@ async function loadConfigs(preferredId = null) {
   [$("#cloneConfigBtn"), $("#deleteConfigBtn"), $("#editConfigBtn"), $("#scanBtn"), $("#saveWeightsBtn"), $("#previewBtn"), $("#startBtn")]
     .forEach(button => { button.disabled = !hasConfigs; });
   if (!hasConfigs) {
-    state.configId = null; state.config = null; state.configHash = null; state.library = null; state.scan = null;
+    state.configId = null; state.config = null; state.configHash = null; state.library = null; state.scan = null; state.sourceInventory = null;
     select.innerHTML = '<option value="">暂无可用配置</option>';
     $("#heroConfigName").textContent = "尚未创建配置";
     $("#heroAssetCount").textContent = "新建配置后开始扫描";
@@ -2472,6 +2473,7 @@ async function selectConfig(id) {
     resetPreview();
     if (state.timeline.analysis) renderTimeline();
     await loadVisualBorderLibrary();
+    await loadSourceInventory();
     await scanAssets(false);
   } catch (error) { toast(error.message, true); }
 }
@@ -2481,6 +2483,21 @@ async function loadVisualBorderLibrary() {
     state.visualBorderLibrary = await api("/global-assets/visual-borders");
   } catch (_) {
     state.visualBorderLibrary = null;
+  }
+}
+
+async function loadSourceInventory(showToast = false) {
+  if (!state.configId) return false;
+  const configId = state.configId;
+  try {
+    const inventory = await api(`/configs/${configId}/source-inventory`);
+    if (state.configId !== configId) return false;
+    state.sourceInventory = inventory;
+    return true;
+  } catch (error) {
+    if (state.configId === configId) state.sourceInventory = null;
+    if (showToast) toast(`素材库概览刷新失败：${error.message}`, true);
+    return false;
   }
 }
 
@@ -3059,6 +3076,7 @@ async function openConfig() {
     state.configDraft = structuredClone(acquired.config);
     state.configHash = acquired.content_hash;
     state.yaml = acquired.yaml_text;
+    await loadSourceInventory();
     state.feishuSettings = await api("/integrations/feishu/settings");
     state.feishuSettingsDraft = structuredClone(state.feishuSettings);
     state.feishuSecretDraft = "";
@@ -3487,7 +3505,19 @@ function renderSimpleConfig() {
   const benefitCategories = categories.filter(isBenefitCategory);
   const sourceCards = categories.map((category, index) => {
     const group = config.sources[category];
-    const count = state.scan?.assets?.[category]?.length ?? 0;
+    const scanCount = state.scan?.assets?.[category]?.length ?? 0;
+    const inventory = state.sourceInventory?.sources?.[category];
+    const disabled = group.mode === "disabled";
+    const savedDisabled = state.config?.sources?.[category]?.mode === "disabled";
+    const inventoryCount = inventory?.discovered_count ?? 0;
+    const count = inventory && (disabled || savedDisabled) ? inventoryCount : scanCount;
+    const sourceStatus = inventory?.directory_status === "unavailable"
+      ? "目录不可用"
+      : disabled && count
+        ? `${count} 个素材 · 未参与拼接`
+        : savedDisabled && count
+          ? `${count} 个素材 · 保存后校验`
+        : count ? `${count} 个素材可用` : "还没有素材";
     const label = group.label?.trim() || categoryLabel(category);
     const folderName = String(group.directory || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || group.directory;
     const canDelete = generic || (isBenefitCategory(category) && benefitCategories.length > 1);
@@ -3502,7 +3532,7 @@ function renderSimpleConfig() {
           ${generic
             ? `<input class="simple-source-name" data-simple-source-name="${escapeHtml(category)}" value="${escapeHtml(label)}" aria-label="视频库名称">`
             : `<strong>${escapeHtml(label)}</strong>`}
-          <div class="simple-source-meta"><span class="${count ? "has-assets" : ""}">${count ? `${count} 个素材可用` : "还没有素材"}</span></div>
+          <div class="simple-source-meta"><span class="${count && inventory?.directory_status !== "unavailable" ? "has-assets" : ""}">${sourceStatus}</span></div>
         </div>
         <button type="button" class="text-btn simple-source-directory" data-open-source-directory="${escapeHtml(category)}" title="打开文件夹：${escapeHtml(group.directory)}">${escapeHtml(folderName)} ↗</button>
         <label class="simple-source-switch">
@@ -3708,9 +3738,10 @@ function bindSimpleConfigControls() {
     const button = event.currentTarget;
     button.disabled = true;
     button.textContent = "刷新中…";
+    const inventoryRefreshed = await loadSourceInventory(true);
     const refreshed = await scanAssets(false);
     renderSimpleConfig();
-    if (refreshed) toast("素材库已刷新");
+    if (inventoryRefreshed && refreshed) toast("素材库已刷新");
   });
   $$('[data-open-advanced]').forEach(button => button.addEventListener("click", () => setConfigMode("advanced")));
   $$('[data-open-naming-advanced]').forEach(button => button.addEventListener("click", () => {
@@ -3759,7 +3790,7 @@ function bindSimpleConfigControls() {
   $$('[data-simple-source-enabled]').forEach(input => input.addEventListener("change", () => {
     const category = input.dataset.simpleSourceEnabled;
     state.configDraft.sources[category].mode = input.checked ? input.dataset.activeMode : "disabled";
-    input.closest(".simple-source-card")?.classList.toggle("is-disabled", !input.checked);
+    renderSimpleConfig();
   }));
   $$('[data-open-source-directory]').forEach(button => button.addEventListener("click", async event => {
     event.stopPropagation();
@@ -4490,6 +4521,7 @@ async function refreshConfigEditor(scrollTop = 0) {
   state.library = await api(`/libraries/by-config/${state.configId}`);
   state.timeline.sliceTargets = (await api(`/libraries/by-config/${state.configId}/slice-targets`)).targets;
   await loadVisualBorderLibrary();
+  await loadSourceInventory();
   $("#yamlEditor").value = state.yaml;
   renderSimpleConfig();
   renderVisualConfig();
@@ -4606,6 +4638,7 @@ async function addBenefitFromEditor(button) {
     state.yaml = refreshed.yaml_text;
     state.library = await api(`/libraries/by-config/${state.configId}`);
     state.timeline.sliceTargets = (await api(`/libraries/by-config/${state.configId}/slice-targets`)).targets;
+    await loadSourceInventory();
     $("#yamlEditor").value = state.yaml;
     renderSimpleConfig();
     renderVisualConfig();
