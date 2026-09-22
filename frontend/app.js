@@ -2499,7 +2499,12 @@ async function scanAssets(showToast = true) {
       : `<span class="invalid">● 预检未通过</span>　${escapeHtml(state.scan.errors.join("；"))}`;
     renderAssetTabs(); renderAssets();
     if (showToast) toast(state.scan.ok ? "素材扫描完成" : "扫描完成，但存在阻塞问题", !state.scan.ok);
-  } catch (error) { $("#scanSummary").textContent = error.message; toast(error.message, true); }
+    return true;
+  } catch (error) {
+    $("#scanSummary").textContent = error.message;
+    toast(error.message, true);
+    return false;
+  }
   finally {
     button.disabled = false;
     button.textContent = "重新扫描";
@@ -3634,7 +3639,7 @@ function renderSimpleConfig() {
     </section>
 
     <section class="simple-config-card simple-wide-card">
-      <header><span class="simple-card-number">03</span><div><h3>拼接顺序</h3><p>${generic ? "列表从上到下，就是成片从头到尾。" : "淘宝闪购主流程保持固定，利益点可以增删和排序。"}</p></div></header>
+      <header><span class="simple-card-number">03</span><div><h3>拼接顺序</h3><p>${generic ? "列表从上到下，就是成片从头到尾。" : "淘宝闪购主流程保持固定，利益点可以增删和排序。"}</p></div><button id="refreshSimpleAssetsBtn" class="button secondary small" type="button">↻ 刷新素材库</button></header>
       <div class="simple-card-body">
         <div class="simple-logic-strip"><span>每个启用的视频库随机取 1 条</span><i>→</i><span>按下方顺序拼接</span><i>→</i><strong>输出成片</strong></div>
         <div class="simple-source-list">${sourceCards || '<div class="simple-empty-state">还没有视频库。添加第一个视频库后即可开始。</div>'}</div>
@@ -3699,6 +3704,14 @@ function moveSimpleSource(category, action) {
 
 function bindSimpleConfigControls() {
   bindFeishuControls("simple");
+  $("#refreshSimpleAssetsBtn")?.addEventListener("click", async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "刷新中…";
+    const refreshed = await scanAssets(false);
+    renderSimpleConfig();
+    if (refreshed) toast("素材库已刷新");
+  });
   $$('[data-open-advanced]').forEach(button => button.addEventListener("click", () => setConfigMode("advanced")));
   $$('[data-open-naming-advanced]').forEach(button => button.addEventListener("click", () => {
     setConfigMode("advanced");

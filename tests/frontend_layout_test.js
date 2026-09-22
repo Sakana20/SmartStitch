@@ -15,7 +15,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260921-71"/,
+  /href="\/styles\.css\?v=20260922-72"/,
   "ffprobe 扫描配置更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -127,6 +127,11 @@ assert.match(
   app,
   /function renderSimpleConfig\(\)[\s\S]*simple-half-card[\s\S]*simple-half-card[\s\S]*simple-wide-card[\s\S]*simple-wide-card[\s\S]*组合重复规则/,
   "简单模式必须使用大区块展示核心配置逻辑",
+);
+assert.match(
+  app,
+  /id="refreshSimpleAssetsBtn"[\s\S]*刷新素材库[\s\S]*function bindSimpleConfigControls\(\)[\s\S]*refreshSimpleAssetsBtn[\s\S]*await scanAssets\(false\)[\s\S]*renderSimpleConfig\(\)/,
+  "拼接顺序标题栏必须提供刷新素材库按钮，并在扫描后更新各视频库数量",
 );
 assert.match(
   app,
