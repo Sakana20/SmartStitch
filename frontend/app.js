@@ -101,6 +101,7 @@ function categoryLabel(category) {
 const terminalStates = new Set(["completed", "partial_failed", "failed", "cancelled", "interrupted"]);
 const configUiStoragePrefix = "smartstitch.config-ui.";
 const browserSessionStorageKey = "smartstitch.browser_session_id";
+const configLeaseMaxDurationMs = 5 * 60 * 1000;
 const pathQuotePairs = { "'": "'", '"': '"', "‘": "’", "“": "”" };
 
 function normalizePathInput(value) {
@@ -271,7 +272,7 @@ function renderConfigLeaseBanner(lost = false, message = "") {
   const owner = state.configLease?.owner;
   if (state.configLease) state.configLease.lost = lost;
   banner.classList.toggle("lost", lost);
-  banner.querySelector("strong").textContent = message || (lost ? "配置编辑权已失效" : "你正在独占编辑此配置");
+  banner.querySelector("strong").textContent = message || (lost ? "配置编辑权已失效" : "你正在独占编辑此配置（最长 5 分钟）");
   banner.querySelector("small").textContent = owner ? `${owner.display_name} · ${owner.device_name}` : "";
   $("#saveConfigBtn").disabled = lost;
 }
@@ -280,8 +281,10 @@ function clearConfigLeaseTimers(lease) {
   if (!lease) return;
   if (lease.heartbeatTimer) clearInterval(lease.heartbeatTimer);
   if (lease.expiryTimer) clearTimeout(lease.expiryTimer);
+  if (lease.maxExpiryTimer) clearTimeout(lease.maxExpiryTimer);
   lease.heartbeatTimer = null;
   lease.expiryTimer = null;
+  lease.maxExpiryTimer = null;
 }
 
 function scheduleConfigLeaseExpiry(lease) {
@@ -361,12 +364,37 @@ function installConfigLease(configId, acquired, context = "config") {
     lost: false,
     heartbeatTimer: null,
     expiryTimer: null,
+    maxExpiryTimer: null,
+    maxExpiresAt: null,
     expiresAt: null,
     expirationHandled: false,
   };
   state.configLease.heartbeatTimer = setInterval(renewConfigLease, 15000);
   scheduleConfigLeaseExpiry(state.configLease);
+  const lease = state.configLease;
+  lease.maxExpiresAt = Date.now() + configLeaseMaxDurationMs;
+  lease.maxExpiryTimer = setTimeout(
+    () => expireConfigLeaseByLimit(lease),
+    configLeaseMaxDurationMs,
+  );
   renderConfigLeaseBanner(false);
+}
+
+async function expireConfigLeaseByLimit(lease) {
+  if (!lease || state.configLease !== lease) return;
+  lease.lost = true;
+  await releaseConfigLease(lease, { silent: true });
+  if (lease.context === "assets") {
+    state.assetEditing = false;
+    renderAssetEditStatus("已达到 5 分钟上限，编辑权已释放", "error");
+    renderAssets();
+    window.alert("素材权重独占编辑已达到 5 分钟，编辑权已自动断开。未保存修改仍保留在当前页面；请离开素材权重页后重新进入，再继续编辑或保存。");
+    return;
+  }
+  await closeConfig({ skipConfirm: true, releaseLease: false });
+  state.configDraft = state.config ? structuredClone(state.config) : null;
+  if ($("#yamlEditor")) $("#yamlEditor").value = state.yaml;
+  window.alert("配置管理独占编辑已达到 5 分钟，编辑权已自动断开，未保存的配置修改已放弃。请重新打开配置管理后继续编辑。");
 }
 
 async function renewConfigLease() {
@@ -385,7 +413,7 @@ async function renewConfigLease() {
     lease.heartbeatFailures = 0;
     scheduleConfigLeaseExpiry(lease);
     renderConfigLeaseBanner(false);
-    if (lease.context === "assets") renderAssetEditStatus("你正在独占编辑", "saved");
+    if (lease.context === "assets") renderAssetEditStatus("你正在独占编辑（最长 5 分钟）", "saved");
   } catch (error) {
     if (state.configLease !== lease) return;
     if (isTerminalConfigLeaseError(error)) {
@@ -643,7 +671,7 @@ async function openAssetWeightEditor() {
     state.assetEditing = true;
     if (changed) await scanAssets(false);
     state.assetEditSnapshot = assetWeightSnapshot();
-    renderAssetEditStatus("你正在独占编辑", "saved");
+    renderAssetEditStatus("你正在独占编辑（最长 5 分钟）", "saved");
     renderAssets();
   } catch (error) {
     state.assetEditing = false;

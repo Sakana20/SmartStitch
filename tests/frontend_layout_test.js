@@ -15,7 +15,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260922-85"/,
+  /href="\/styles\.css\?v=20260922-87"/,
   "ffprobe 扫描配置更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -116,6 +116,11 @@ assert.match(
   app,
   /async function saveWeights\(\)[\s\S]*state\.configLease\?\.context !== "assets"[\s\S]*headers: configLeaseHeaders\(\)[\s\S]*state\.assetEditSnapshot = assetWeightSnapshot\(\)/,
   "素材权重只能使用当前页面持有的独占锁手动保存",
+);
+assert.match(
+  app,
+  /configLeaseMaxDurationMs = 5 \* 60 \* 1000[\s\S]*maxExpiryTimer = setTimeout[\s\S]*expireConfigLeaseByLimit[\s\S]*lease\.context === "assets"[\s\S]*素材权重独占编辑已达到 5 分钟[\s\S]*配置管理独占编辑已达到 5 分钟/,
+  "配置管理和素材权重的独占锁都必须在五分钟硬上限后主动释放并提示",
 );
 assert.doesNotMatch(
   app,
