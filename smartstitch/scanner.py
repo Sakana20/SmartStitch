@@ -27,6 +27,7 @@ from .probe_cache import CachedProbe, MediaProbeCache, ProbeFingerprint
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 VISUAL_BORDER_IMAGE_EXTENSIONS = {".png", ".webp"}
 VISUAL_BORDER_EXTENSIONS = VISUAL_BORDER_IMAGE_EXTENSIONS | {".mov"}
+VISUAL_BORDER_VIDEO_CODECS = {"qtrle", "prores"}
 MANAGED_LIBRARY_MARKER = Path(".smartstitch/library.json")
 LOGGER = logging.getLogger(__name__)
 
@@ -342,10 +343,10 @@ def validate_visual_border_media(
     """Validate one transparent border independently from project discovery."""
     extension = path.suffix.lower()
     if extension not in VISUAL_BORDER_EXTENSIONS:
-        raise ValueError("边框仅支持 qtrle/ARGB MOV、透明 PNG 或透明 WebP")
+        raise ValueError("边框仅支持 qtrle 或 ProRes 4444 MOV、透明 PNG 或透明 WebP")
     probe = probe or probe_media(path)
-    if extension == ".mov" and probe.video_codec != "qtrle":
-        raise ValueError("MOV 边框必须使用 QuickTime Animation/qtrle 编码")
+    if extension == ".mov" and probe.video_codec not in VISUAL_BORDER_VIDEO_CODECS:
+        raise ValueError("MOV 边框必须使用 QuickTime Animation/qtrle 或 ProRes 4444 编码")
     if not probe.has_alpha:
         raise ValueError(f"边框像素格式 {probe.pixel_format or '未知'} 不含 Alpha 通道")
     if exact_size and (
@@ -444,8 +445,13 @@ def _prepare_group(config: AppConfig, group: SourceGroupConfig) -> _PreparedGrou
         if not item_path.is_absolute():
             item_path = directory / item_path
         explicit[item_path.resolve()] = item
+    # `items` stores per-file weights/tags and can outlive the underlying NAS file.
+    # A deleted file is no longer a scan candidate: keeping it here would turn a
+    # normal library deletion into a permanent "文件不存在 / 异常" row. Existing
+    # but unreadable files remain candidates and are still reported as damaged.
+    existing_explicit = {path for path in explicit if path.is_file()}
     candidates = sorted(
-        set(discovered) | set(explicit), key=lambda item: str(item).casefold()
+        set(discovered) | existing_explicit, key=lambda item: str(item).casefold()
     )
     return _PreparedGroup(
         directory=directory,
@@ -476,12 +482,18 @@ def scan_group(
 
     assets: list[Asset] = []
     for path in prepared.candidates:
+        # The file can be removed from the NAS after discovery but before this
+        # loop. Treat that race exactly like a file absent at discovery time.
+        if not path.is_file():
+            continue
         item = prepared.explicit.get(path)
         enabled = item.enabled if item is not None else True
         weight = item.weight if item is not None else group.default_weight
         tags = list(item.tags) if item is not None else []
-        exists = path.exists() and path.is_file()
-        stat = path.stat() if exists else None
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
         asset = Asset(
             id=_asset_id(category, path),
             category=category,
@@ -491,28 +503,27 @@ def scan_group(
             enabled=enabled,
             weight=weight,
             tags=tags,
-            exists=exists,
-            valid=exists,
-            error=None if exists else "文件不存在",
-            size_bytes=stat.st_size if stat else None,
-            modified_at=stat.st_mtime if stat else None,
+            exists=True,
+            valid=True,
+            error=None,
+            size_bytes=stat.st_size,
+            modified_at=stat.st_mtime,
         )
-        if exists:
-            result = (
-                probe_session.get(path, group.image_duration_seconds)
-                if probe_session is not None
-                else None
-            )
-            try:
-                if result is not None and result.probe is not None:
-                    asset.probe = result.probe
-                elif result is not None:
-                    raise ValueError(result.error or "ffprobe 无法读取媒体")
-                else:
-                    asset.probe = probe_media(path, group.image_duration_seconds)
-            except Exception as exc:
-                asset.valid = False
-                asset.error = str(exc)
+        result = (
+            probe_session.get(path, group.image_duration_seconds)
+            if probe_session is not None
+            else None
+        )
+        try:
+            if result is not None and result.probe is not None:
+                asset.probe = result.probe
+            elif result is not None:
+                raise ValueError(result.error or "ffprobe 无法读取媒体")
+            else:
+                asset.probe = probe_media(path, group.image_duration_seconds)
+        except Exception as exc:
+            asset.valid = False
+            asset.error = str(exc)
         assets.append(asset)
 
     selectable = [asset for asset in assets if asset.selectable]
@@ -734,7 +745,7 @@ def scan_visual_border(
     elif not exists:
         error = "边框文件不存在或外接磁盘未挂载"
     elif extension not in VISUAL_BORDER_EXTENSIONS:
-        error = "边框仅支持 qtrle/ARGB MOV、透明 PNG 或透明 WebP"
+        error = "边框仅支持 qtrle 或 ProRes 4444 MOV、透明 PNG 或透明 WebP"
     else:
         try:
             cached_probe: MediaProbe | None = None

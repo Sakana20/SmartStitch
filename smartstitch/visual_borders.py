@@ -115,6 +115,11 @@ class VisualBorderLibrary:
 
     def _discover_unregistered(self, data: dict[str, Any]) -> bool:
         """Register valid border files copied directly into the shared directory."""
+        existing_assets = [
+            record for record in data["assets"] if self._storage_path(record).is_file()
+        ]
+        changed = len(existing_assets) != len(data["assets"])
+        data["assets"] = existing_assets
         registered_paths = {
             self._storage_path(record).resolve()
             for record in data["assets"]
@@ -123,7 +128,6 @@ class VisualBorderLibrary:
             str(record.get("content_hash", ""))
             for record in data["assets"]
         }
-        changed = False
         for path in sorted(
             self.directory.iterdir(), key=lambda item: item.name.casefold()
         ):

@@ -9,7 +9,7 @@ from collections import Counter
 import pytest
 import smartstitch.scanner as scanner_module
 from smartstitch.database import SQLiteStore
-from smartstitch.models import AppConfig, MediaProbe
+from smartstitch.models import AppConfig, AssetItemConfig, MediaProbe
 from smartstitch.probe_cache import MediaProbeCache
 from smartstitch.scanner import scan_config, scan_visual_border
 
@@ -24,6 +24,23 @@ def generate_qtrle_border(path, *, alpha=True, width=180, height=320):
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-f", "lavfi", "-i", source,
             "-c:v", "qtrle", "-pix_fmt", pixel_format, str(path),
+        ],
+        check=True,
+    )
+
+
+def generate_prores_4444_border(path, *, width=180, height=320):
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i",
+            (
+                f"color=c=black@0.0:s={width}x{height}:r=12:d=0.4,"
+                "format=yuva444p10le,"
+                "drawbox=x=0:y=0:w=iw:h=20:color=red@1:t=fill:replace=1"
+            ),
+            "-c:v", "prores_ks", "-profile:v", "4444",
+            "-pix_fmt", "yuva444p10le", str(path),
         ],
         check=True,
     )
@@ -80,6 +97,21 @@ def test_visual_border_accepts_transparent_qtrle_and_rejects_opaque_qtrle(tmp_pa
     )
     assert not assets[0].valid
     assert "不含 Alpha" in errors[0]
+
+
+def test_visual_border_accepts_transparent_prores_4444(tmp_path):
+    border = tmp_path / "prores-4444.mov"
+    generate_prores_4444_border(border)
+
+    assets, errors, warnings = scan_visual_border(
+        visual_border_config(tmp_path, border)
+    )
+
+    assert errors == []
+    assert warnings == []
+    assert assets[0].valid
+    assert assets[0].probe.video_codec == "prores"
+    assert assets[0].probe.has_alpha is True
 
 
 def test_visual_border_exact_mode_rejects_wrong_dimensions(tmp_path):
@@ -308,6 +340,56 @@ def test_scan_reuses_persistent_probe_cache_and_invalidates_changed_file(
 
     assert changed.ok
     assert Counter(calls) == Counter({first.resolve(): 2, second.resolve(): 1})
+
+
+def test_scan_omits_deleted_nas_file_kept_in_weight_items(tmp_path, monkeypatch):
+    config = _probe_test_config(tmp_path)
+    deleted = tmp_path / "source" / "deleted.mp4"
+    remaining = tmp_path / "source" / "remaining.mp4"
+    deleted.write_bytes(b"deleted")
+    remaining.write_bytes(b"remaining")
+    config.sources["pool_1"].items = [
+        AssetItemConfig(
+            path=str(deleted), enabled=True, weight=2, tags=["旧素材"]
+        ),
+        AssetItemConfig(
+            path=str(remaining), enabled=True, weight=3, tags=["保留"]
+        ),
+    ]
+    monkeypatch.setattr(
+        scanner_module,
+        "probe_media",
+        lambda *_args, **_kwargs: MediaProbe(duration=1, width=720, height=1280),
+    )
+
+    before = scan_config(config)
+    deleted.unlink()
+    after = scan_config(config)
+
+    assert [asset.name for asset in before.assets["pool_1"]] == [
+        "deleted.mp4",
+        "remaining.mp4",
+    ]
+    assert [asset.name for asset in after.assets["pool_1"]] == ["remaining.mp4"]
+    assert after.assets["pool_1"][0].weight == 3
+    assert not any("文件不可用" in warning for warning in after.warnings)
+
+
+def test_scan_keeps_existing_but_unreadable_file_as_abnormal(tmp_path, monkeypatch):
+    config = _probe_test_config(tmp_path)
+    broken = tmp_path / "source" / "broken.mp4"
+    broken.write_bytes(b"broken")
+
+    def fail_probe(*_args, **_kwargs):
+        raise ValueError("媒体损坏")
+
+    monkeypatch.setattr(scanner_module, "probe_media", fail_probe)
+
+    result = scan_config(config)
+
+    assert [asset.name for asset in result.assets["pool_1"]] == ["broken.mp4"]
+    assert result.assets["pool_1"][0].valid is False
+    assert result.assets["pool_1"][0].error == "媒体损坏"
 
 
 def test_scan_limits_concurrent_ffprobe_processes(tmp_path, monkeypatch):

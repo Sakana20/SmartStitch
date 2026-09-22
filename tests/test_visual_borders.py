@@ -103,6 +103,20 @@ def test_global_visual_border_library_ignores_invalid_files_copied_into_director
     assert refreshed["assets"] == []
 
 
+def test_global_visual_border_library_removes_records_for_deleted_files(tmp_path):
+    library = VisualBorderLibrary(tmp_path / "config")
+    source = tmp_path / "待删除.mov"
+    generate_border(source)
+    uploaded = library.upload(source.name, source, 0)
+    stored = tmp_path / "config" / uploaded["asset"]["storage_path"]
+    stored.unlink()
+
+    refreshed = library.list()
+
+    assert refreshed["revision"] == 2
+    assert refreshed["assets"] == []
+
+
 def test_global_visual_border_library_uses_revision_and_project_compatibility(tmp_path):
     library = VisualBorderLibrary(tmp_path / "config")
     first_source = tmp_path / "红.mov"
