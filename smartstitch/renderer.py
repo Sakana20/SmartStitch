@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-from .models import AppConfig, Asset, PlanItem, is_benefit_category
+from .models import AppConfig, Asset, PlanItem, SourceMode, is_benefit_category
 
 
 class RenderError(RuntimeError):
@@ -170,7 +170,11 @@ def build_ffmpeg_command(
             command.extend(["-i", asset.path])
 
     visual_border_index: int | None = None
-    if config.visual_dedup.enabled and item.visual_border is not None:
+    if (
+        config.visual_dedup.enabled
+        and config.visual_dedup.border_overlay.mode != SourceMode.DISABLED
+        and item.visual_border is not None
+    ):
         visual_border_index = len(timeline)
         if item.visual_border.media_type == "image":
             command.extend(["-loop", "1", "-i", item.visual_border.path])
@@ -190,7 +194,7 @@ def build_ffmpeg_command(
     filters.append(f"{concat_inputs}concat=n={len(timeline)}:v=1:a=1[basev][outa]")
 
     video_map = "[basev]"
-    if config.visual_dedup.enabled:
+    if config.visual_dedup.enabled and config.visual_dedup.background.enabled:
         visual = config.visual_dedup
         foreground_width = max(
             2, int(config.output.width * visual.foreground.scale / 2) * 2

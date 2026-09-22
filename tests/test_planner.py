@@ -136,6 +136,12 @@ def test_visual_border_fixed_mode_uses_one_global_asset(tmp_path):
     assert all(item.visual_border == border for item in plan.items)
     assert plan.distribution["visual_border"] == {"border.mov": 3}
 
+    master_disabled = config.model_copy(deep=True)
+    master_disabled.visual_dedup.enabled = False
+    disabled_plan = build_plan(master_disabled, scan, 3, seed=10)
+    assert all(item.visual_border is None for item in disabled_plan.items)
+    assert "visual_border" not in disabled_plan.distribution
+
 
 def test_visual_border_random_mode_uses_weighted_reproducible_sequence(tmp_path):
     config = make_config(tmp_path)

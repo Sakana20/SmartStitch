@@ -468,6 +468,8 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .simple-half-card .simple-overlay-actions label.button { flex: 1; }
 .simple-half-card .simple-choice-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .simple-overlay-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.simple-visual-border-actions { align-self: stretch; align-items: stretch; }
+.simple-visual-border-actions label.button { min-height: 100%; }
 .simple-overlay-actions label.button { cursor: pointer; }
 .simple-overlay-actions label.button.disabled { opacity: .45; pointer-events: none; }
 .simple-overlay-actions input[type="file"] { display: none; }

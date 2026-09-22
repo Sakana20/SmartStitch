@@ -320,10 +320,14 @@ def build_plan(
     elif overlay_required:
         raise PlanError("风险提示语图片为必需，但没有可用图片")
 
-    border_assets = _selectable(scan, "visual_border")
+    border_enabled = (
+        config.visual_dedup.enabled
+        and config.visual_dedup.border_overlay.mode != SourceMode.DISABLED
+    )
+    border_assets = _selectable(scan, "visual_border") if border_enabled else []
     visual_borders: list[Asset | None] = [None] * count
     border_required = (
-        config.visual_dedup.enabled
+        border_enabled
         and config.visual_dedup.border_overlay.mode == SourceMode.REQUIRED
     )
     if border_assets:
@@ -388,7 +392,7 @@ def build_plan(
     for category, sequence in sequences.items():
         distribution[category] = dict(Counter(asset.name for asset in sequence if asset))
     distribution["benefit_overlay"] = dict(Counter(asset.name for asset in overlays if asset))
-    if config.visual_dedup.enabled:
+    if border_enabled:
         distribution["visual_border"] = dict(
             Counter(asset.name for asset in visual_borders if asset)
         )

@@ -486,6 +486,7 @@ def test_managed_library_streams_and_replaces_visual_border(tmp_path):
     target = storage / "视觉边框项目库" / "视觉去重边框" / border.name
     assert target.is_file()
     assert payload["config"]["visual_dedup"]["enabled"] is True
+    assert payload["config"]["visual_dedup"]["background"]["enabled"] is True
     assert payload["config"]["visual_dedup"]["border_overlay"]["mode"] == "required"
 
 

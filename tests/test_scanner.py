@@ -43,6 +43,7 @@ def visual_border_config(tmp_path, border_path):
             "benefit_overlays": {"mode": "disabled", "file": ""},
             "visual_dedup": {
                 "enabled": True,
+                "background": {"enabled": False},
                 "border_overlay": {
                     "mode": "required",
                     "file": str(border_path),

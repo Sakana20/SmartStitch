@@ -129,6 +129,7 @@ class VisualDedupForegroundConfig(BaseModel):
 
 
 class VisualDedupBackgroundConfig(BaseModel):
+    enabled: bool = True
     mode: Literal["gaussian_blur"] = "gaussian_blur"
     sigma: float = Field(default=20.0, ge=0, le=100)
     steps: int = Field(default=2, ge=1, le=6)
@@ -181,6 +182,20 @@ class VisualDedupConfig(BaseModel):
     border_overlay: VisualBorderOverlayConfig = Field(
         default_factory=VisualBorderOverlayConfig
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_master_switch(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = copy.deepcopy(value)
+        legacy_enabled = data.get("enabled")
+        background = data.setdefault("background", {})
+        if not isinstance(background, dict):
+            return data
+        if "enabled" not in background and isinstance(legacy_enabled, bool):
+            background["enabled"] = True
+        return data
 
 
 class MatchingConfig(BaseModel):

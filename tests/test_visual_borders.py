@@ -43,6 +43,7 @@ def visual_config(tmp_path: Path) -> AppConfig:
             "benefit_overlays": {"mode": "disabled", "timing": {"scope": "full"}},
             "visual_dedup": {
                 "enabled": True,
+                "background": {"enabled": False},
                 "border_overlay": {"mode": "required", "selection_mode": "random"},
             },
             "output": {"directory": str(tmp_path / "out"), "width": 180, "height": 320},

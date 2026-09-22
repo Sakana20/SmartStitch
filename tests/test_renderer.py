@@ -278,7 +278,7 @@ def test_visual_dedup_renders_border_below_risk_overlay(tmp_path):
             "visual_dedup": {
                 "enabled": True,
                 "foreground": {"scale": 0.9},
-                "background": {"sigma": 12, "steps": 2},
+                "background": {"enabled": True, "sigma": 12, "steps": 2},
                 "border_overlay": {
                     "mode": "required",
                     "file": str(border_path),
@@ -320,6 +320,38 @@ def test_visual_dedup_renders_border_below_risk_overlay(tmp_path):
     assert probe_media(output).width == 180
     assert probe_media(output).height == 320
 
+    background_only = config.model_copy(deep=True)
+    background_only.visual_dedup.background.enabled = True
+    background_only.visual_dedup.border_overlay.mode = "disabled"
+    background_item = item.model_copy(update={"visual_border": None})
+    command, _duration = build_ffmpeg_command(
+        background_only, background_item, tmp_path / "background-only.mp4"
+    )
+    filter_complex = command[command.index("-filter_complex") + 1]
+    assert "[basev]split=2" in filter_complex
+    assert "gblur=" in filter_complex
+    assert "[visual_border]" not in filter_complex
+
+    neither = background_only.model_copy(deep=True)
+    neither.visual_dedup.background.enabled = False
+    command, _duration = build_ffmpeg_command(
+        neither, background_item, tmp_path / "neither.mp4"
+    )
+    filter_complex = command[command.index("-filter_complex") + 1]
+    assert "[basev]split=2" not in filter_complex
+    assert "gblur=" not in filter_complex
+    assert "[visual_border]" not in filter_complex
+
+    master_disabled = config.model_copy(deep=True)
+    master_disabled.visual_dedup.enabled = False
+    command, _duration = build_ffmpeg_command(
+        master_disabled, item, tmp_path / "master-disabled.mp4"
+    )
+    filter_complex = command[command.index("-filter_complex") + 1]
+    assert "[basev]split=2" not in filter_complex
+    assert "gblur=" not in filter_complex
+    assert "[visual_border]" not in filter_complex
+
     def pixel(x, y):
         result = subprocess.run(
             [
@@ -337,3 +369,77 @@ def test_visual_dedup_renders_border_below_risk_overlay(tmp_path):
     border_pixel = pixel(100, 5)
     assert risk_pixel[1] > risk_pixel[0]
     assert border_pixel[0] > border_pixel[1]
+
+
+def test_visual_border_renders_without_blurred_background(tmp_path):
+    source_path = tmp_path / "source.mp4"
+    generate_clip(source_path, "blue", duration=0.5)
+    source = Asset(
+        id="source",
+        category="pool_1",
+        path=str(source_path),
+        name=source_path.name,
+        media_type="video",
+        probe=probe_media(source_path),
+    )
+    border_path = tmp_path / "border.mov"
+    generate_qtrle_border(border_path)
+    border = Asset(
+        id="border",
+        category="visual_border",
+        path=str(border_path),
+        name=border_path.name,
+        media_type="video",
+        probe=probe_media(border_path),
+    )
+    config = AppConfig.model_validate(
+        {
+            "schema_version": 3,
+            "workflow_type": "generic",
+            "id": "border-only-render",
+            "name": "仅透明边框",
+            "source_root": str(tmp_path),
+            "timeline": ["pool_1"],
+            "sources": {"pool_1": {"label": "主素材", "directory": "."}},
+            "benefit_overlays": {"mode": "disabled", "timing": {"scope": "full"}},
+            "visual_dedup": {
+                "enabled": True,
+                "background": {"enabled": False},
+                "border_overlay": {
+                    "mode": "required",
+                    "file": str(border_path),
+                    "scale_mode": "exact",
+                },
+            },
+            "output": {
+                "directory": str(tmp_path / "out"),
+                "width": 180,
+                "height": 320,
+                "fps": 24,
+                "video_codec": "libx264",
+                "video_preset": "ultrafast",
+            },
+        }
+    )
+    item = PlanItem(
+        index=1,
+        selections={"pool_1": source},
+        overlay=None,
+        visual_border=border,
+        output_name="border-only.mp4",
+        estimated_duration=source.probe.duration,
+    )
+
+    command, _duration = build_ffmpeg_command(config, item, tmp_path / "border-only.mp4")
+    filter_complex = command[command.index("-filter_complex") + 1]
+
+    assert "[basev][visual_border]overlay=" in filter_complex
+    assert "[basev]split=2" not in filter_complex
+    assert "gblur=" not in filter_complex
+    assert "[dedupv]" not in filter_complex
+
+    output = tmp_path / "border-only.mp4"
+    render_item(config, item, output, threading.Event())
+    assert output.exists()
+    assert probe_media(output).width == 180
+    assert probe_media(output).height == 320

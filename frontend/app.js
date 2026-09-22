@@ -3191,6 +3191,9 @@ function ensureVisualDedup(config) {
     opacity: 1,
     alpha_mode: "auto",
   };
+  if (typeof visual.background.enabled !== "boolean") {
+    visual.background.enabled = true;
+  }
   visual.border_overlay.source ||= "global_library";
   visual.border_overlay.selection_mode ||= "random";
   visual.border_overlay.fixed_asset_id ||= "";
@@ -3640,9 +3643,10 @@ function renderSimpleConfig() {
     </section>
 
     <section class="simple-config-card simple-wide-card ${visual.enabled ? "is-accent" : ""}">
-      <header><span class="simple-card-number">04</span><div><h3>视觉去重</h3><p>缩小清晰画面，以同一画面的模糊版本补满四周，并可叠加透明边框。</p></div><label class="simple-header-switch"><span>${visual.enabled ? "已启用" : "未启用"}</span><input id="simpleVisualDedupEnabled" class="switch-input" type="checkbox" ${visual.enabled ? "checked" : ""}></label></header>
+      <header><span class="simple-card-number">04</span><div><h3>视觉去重</h3><p>总开关控制整体生效；模糊背景与透明边框可分别选择或同时使用。</p></div><label class="simple-header-switch"><span>${visual.enabled ? "已启用" : "未启用"}</span><input id="simpleVisualDedupEnabled" class="switch-input" type="checkbox" ${visual.enabled ? "checked" : ""}></label></header>
       <div class="simple-card-body simple-visual-dedup-body ${visual.enabled ? "" : "is-disabled"}">
-        <div class="simple-setting-group"><div class="simple-setting-label">效果强度</div>${simpleChoiceButtons("visualDedup", [
+        <label class="simple-toggle-row compact"><span><b>模糊背景与缩小主画面</b><small>缩小清晰画面，以同一画面的模糊版本补满四周</small></span><input id="simpleVisualBackgroundEnabled" class="switch-input" type="checkbox" ${visual.background.enabled ? "checked" : ""}></label>
+        <div class="simple-setting-group ${visual.background.enabled ? "" : "hidden"}"><div class="simple-setting-label">效果强度</div>${simpleChoiceButtons("visualDedup", [
           ["light", "轻度", "保留更多主画面"],
           ["standard", "标准", "推荐"],
           ["strong", "强化", "边框区域更明显"],
@@ -3651,7 +3655,7 @@ function renderSimpleConfig() {
         <label class="simple-toggle-row compact"><span><b>使用透明边框</b><small>边框位于主画面之上，风险提示语之下</small></span><input id="simpleVisualBorderEnabled" class="switch-input" type="checkbox" ${visualBorderEnabled ? "checked" : ""}></label>
         <div class="simple-overlay-row ${visualBorderEnabled ? "" : "hidden"}">
           <div class="simple-overlay-status ${compatibleVisualBorders.length ? "has-file" : ""}"><i></i><div><strong>${escapeHtml(visualBorderName)}</strong><span>${escapeHtml(visualBorderStatus)}</span></div></div>
-          <div class="simple-overlay-actions"><label class="button secondary">添加到全局库<input id="simpleVisualBorderFile" type="file" accept=".mov,.png,.webp"></label></div>
+          <div class="simple-overlay-actions simple-visual-border-actions"><label class="button secondary">添加到全局库<input id="simpleVisualBorderFile" type="file" accept=".mov,.png,.webp"></label></div>
         </div>
         <div class="simple-setting-group ${visualBorderEnabled ? "" : "hidden"}"><div class="simple-setting-label">边框选择方式</div>${simpleChoiceButtons("visualBorderSelection", [["random", "随机使用", "无需每个项目配置"], ["fixed", "固定使用", "始终使用同一边框"]], visual.border_overlay.selection_mode)}</div>
         <label class="simple-large-field ${visualBorderEnabled && visual.border_overlay.selection_mode === "fixed" ? "" : "hidden"}"><span>固定边框</span><select id="simpleVisualBorderFixed"><option value="">请选择全局边框</option>${visualBorderOptions}</select></label>
@@ -3789,6 +3793,10 @@ function bindSimpleConfigControls() {
   });
   $("#simpleVisualDedupEnabled")?.addEventListener("change", event => {
     ensureVisualDedup(state.configDraft).enabled = event.target.checked;
+    renderSimpleConfig();
+  });
+  $("#simpleVisualBackgroundEnabled")?.addEventListener("change", event => {
+    ensureVisualDedup(state.configDraft).background.enabled = event.target.checked;
     renderSimpleConfig();
   });
   $("#simpleVisualBorderEnabled")?.addEventListener("change", event => {
@@ -4164,7 +4172,8 @@ function renderVisualConfig() {
     <details class="config-section" data-config-section="visual-dedup" open>
       <summary>视觉去重 <small>模糊背景、缩小前景与透明边框</small></summary>
       <div class="config-section-body config-form-grid three">
-        ${configSwitch("启用视觉去重", "visual_dedup.enabled", visual.enabled, "功能状态")}
+        ${configSwitch("启用视觉去重", "visual_dedup.enabled", visual.enabled, "总开关")}
+        ${configSwitch("启用模糊背景与缩小主画面", "visual_dedup.background.enabled", visual.background.enabled, "功能 1 · 独立开关")}
         ${configInput("前景缩放比例", "visual_dedup.foreground.scale", visual.foreground.scale, { type: "number", hint: "0.70～1.00" })}
         ${configSelect("背景处理", "visual_dedup.background.mode", visual.background.mode, [["gaussian_blur", "高斯模糊"]])}
         ${configInput("模糊 Sigma", "visual_dedup.background.sigma", visual.background.sigma, { type: "number", hint: "0～100" })}

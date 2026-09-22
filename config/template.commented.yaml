@@ -82,15 +82,18 @@ benefit_overlays:
     start_seconds: 0
     end_seconds: null
 
-# 视觉去重：模糊背景→缩小前景→透明边框→风险提示语。
+# 视觉去重包含两个独立功能：模糊背景/缩小前景与透明边框。
 # 边框统一来自 SmartStitch 配置根下的“全局素材库/视觉去重边框”。
-# 旧配置未填写本段时默认关闭。
+# 两项可单独或同时开启；旧配置未填写本段时均默认关闭。
 visual_dedup:
+  # 总开关；关闭时保留下方两项选择，但不执行任何视觉去重效果。
   enabled: false
   foreground:
     # 0.70～1.00；简单模式“标准”为 0.90。
     scale: 0.90
   background:
+    # 仅控制模糊背景与缩小主画面，不控制透明边框。
+    enabled: true
     mode: gaussian_blur
     sigma: 20.0
     steps: 2

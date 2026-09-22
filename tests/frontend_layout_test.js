@@ -179,9 +179,24 @@ assert.match(
   "视觉去重必须沿用简单模式卡片、大选项和文件选择结构",
 );
 assert.match(
+  app,
+  /simpleVisualDedupEnabled[\s\S]*visual\.enabled[\s\S]*simpleVisualBackgroundEnabled[\s\S]*visual\.background\.enabled[\s\S]*simpleVisualBorderEnabled[\s\S]*visualBorderEnabled/,
+  "视觉去重必须包含总开关以及两个独立的子功能开关",
+);
+assert.match(
+  app,
+  /configSwitch\("启用视觉去重", "visual_dedup\.enabled"[\s\S]*configSwitch\("启用模糊背景与缩小主画面", "visual_dedup\.background\.enabled"[\s\S]*configSelect\("边框使用方式", "visual_dedup\.border_overlay\.mode"/,
+  "高级模式必须分别保留总开关、模糊背景开关和透明边框模式",
+);
+assert.match(
   app + css,
   /simple-visual-dedup-body[\s\S]*\.simple-visual-dedup-body\s*\{[^}]*display:\s*grid[^}]*gap:\s*16px/,
   "视觉去重卡片各设置组之间必须保留与其他卡片一致的纵向留白",
+);
+assert.match(
+  app + css,
+  /simple-visual-border-actions[\s\S]*\.simple-visual-border-actions\s*\{[^}]*align-self:\s*stretch[^}]*align-items:\s*stretch[^}]*\}[\s\S]*\.simple-visual-border-actions label\.button\s*\{[^}]*min-height:\s*100%/,
+  "添加全局边框按钮必须与左侧状态框上下对齐",
 );
 assert.match(
   app,
@@ -200,7 +215,7 @@ assert.match(
 );
 assert.match(
   app,
-  /function renderVisualConfig\(\)[\s\S]*data-config-section="visual-dedup"[\s\S]*visual_dedup\.foreground\.scale[\s\S]*visual_dedup\.border_overlay\.alpha_mode/,
+  /function renderVisualConfig\(\)[\s\S]*data-config-section="visual-dedup"[\s\S]*visual_dedup\.background\.enabled[\s\S]*visual_dedup\.foreground\.scale[\s\S]*visual_dedup\.border_overlay\.alpha_mode/,
   "视觉去重复杂参数必须进入现有高级配置与 data-config-path 架构",
 );
 assert.match(

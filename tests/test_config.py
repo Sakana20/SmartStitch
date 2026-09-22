@@ -38,9 +38,47 @@ def test_visual_dedup_defaults_are_backward_compatible(tmp_path):
     config = AppConfig.model_validate(config_data(tmp_path))
 
     assert config.visual_dedup.enabled is False
+    assert config.visual_dedup.background.enabled is True
     assert config.visual_dedup.foreground.scale == 0.9
     assert config.visual_dedup.background.sigma == 20
     assert config.visual_dedup.border_overlay.mode == "disabled"
+
+
+def test_visual_dedup_migrates_legacy_master_switch_without_changing_output(tmp_path):
+    enabled_data = config_data(tmp_path)
+    enabled_data["visual_dedup"] = {
+        "enabled": True,
+        "border_overlay": {"mode": "required"},
+    }
+    enabled = AppConfig.model_validate(enabled_data)
+    assert enabled.visual_dedup.enabled is True
+    assert enabled.visual_dedup.background.enabled is True
+    assert enabled.visual_dedup.border_overlay.mode == "required"
+
+    disabled_data = config_data(tmp_path)
+    disabled_data["visual_dedup"] = {
+        "enabled": False,
+        "border_overlay": {"mode": "required"},
+    }
+    disabled = AppConfig.model_validate(disabled_data)
+    assert disabled.visual_dedup.enabled is False
+    assert disabled.visual_dedup.background.enabled is True
+    assert disabled.visual_dedup.border_overlay.mode == "required"
+
+
+def test_visual_border_can_be_enabled_without_blurred_background(tmp_path):
+    data = config_data(tmp_path)
+    data["visual_dedup"] = {
+        "enabled": True,
+        "background": {"enabled": False},
+        "border_overlay": {"mode": "required"},
+    }
+
+    config = AppConfig.model_validate(data)
+
+    assert config.visual_dedup.enabled is True
+    assert config.visual_dedup.background.enabled is False
+    assert config.visual_dedup.border_overlay.mode == "required"
 
 
 @pytest.mark.parametrize(
