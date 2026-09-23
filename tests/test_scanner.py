@@ -387,6 +387,57 @@ def test_scan_reuses_persistent_probe_cache_and_invalidates_changed_file(
     assert Counter(calls) == Counter({first.resolve(): 2, second.resolve(): 1})
 
 
+def test_scan_preserves_canonical_paths_for_linked_source_directory(tmp_path, monkeypatch):
+    config = _probe_test_config(tmp_path)
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    video = actual / "clip.mp4"
+    video.write_bytes(b"video")
+    (tmp_path / "source").rmdir()
+    (tmp_path / "source").symlink_to(actual, target_is_directory=True)
+    monkeypatch.setattr(
+        scanner_module,
+        "probe_media",
+        lambda *_args, **_kwargs: MediaProbe(duration=1, width=720, height=1280),
+    )
+
+    result = scan_config(config)
+
+    assert result.assets["pool_1"][0].path == str(video.resolve())
+
+
+def test_source_inventory_discovers_independent_groups_concurrently(tmp_path, monkeypatch):
+    config = _probe_test_config(tmp_path)
+    for index in range(2, 5):
+        directory = tmp_path / f"source_{index}"
+        directory.mkdir()
+        config.sources[f"pool_{index}"] = config.sources["pool_1"].model_copy(
+            update={"directory": directory.name}
+        )
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+    original = scanner_module._prepare_group
+
+    def slow_prepare(*args, **kwargs):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.02)
+            return original(*args, **kwargs)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(scanner_module, "_prepare_group", slow_prepare)
+    scan_source_inventory(config)
+
+    assert peak > 1
+
+
 def test_scan_omits_deleted_nas_file_kept_in_weight_items(tmp_path, monkeypatch):
     config = _probe_test_config(tmp_path)
     deleted = tmp_path / "source" / "deleted.mp4"

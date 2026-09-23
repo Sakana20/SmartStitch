@@ -902,25 +902,26 @@ function mountProResAlphaTool(container) {
   const previewBox = container.querySelector("#proresPreviewList");
   const resultBox = container.querySelector("#proresResult");
   const availableDestinations = () => [
-    { id: "alpha_output", label: "Alpha输出", path: "源文件夹/Alpha输出" },
-    ...["effect_1", "effect_2"].map(id => {
-      const library = effectLibraries.find(item => item.library_id === id);
-      return { id, label: library ? `${id} · ${library.name}` : `${id} · 未创建`, path: library?.directory || "", disabled: !library };
-    }),
+    { id: "source_directory", label: "原目录", path: preview?.source_directory || "源视频文件夹" },
+    ...effectLibraries.map(library => ({
+      id: library.library_id,
+      label: `${library.library_id} · ${library.name}`,
+      path: library.directory,
+    })),
   ];
   const renderPreview = () => {
     if (!preview || disposed) return;
     const options = availableDestinations();
     previewBox.innerHTML = `<section class="prores-result prores-preview">
       <strong>待转换 ${preview.count} 条</strong>
-      <p>保存位置与切片分类一样，可逐条选择。选择 effect_1 或 effect_2 时，文件直接进入对应全局特效库。</p>
+      <p>保存位置与切片分类一样，可逐条选择。默认输出回原目录；也可选择任一全局视觉特效库。</p>
       <div class="prores-preview-list">${preview.files.map((name, index) => `<div class="prores-preview-row">
         <b>${String(index + 1).padStart(2, "0")}</b><span>${escapeHtml(name)}</span>
         <select class="segment-type-select" data-prores-destination="${escapeHtml(name)}" aria-label="${escapeHtml(name)} 保存位置">
-          ${options.map(option => `<option value="${option.id}" ${destinations[name] === option.id ? "selected" : ""} ${option.disabled ? "disabled" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+          ${options.map(option => `<option value="${escapeHtml(option.id)}" ${destinations[name] === option.id ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
         </select>
       </div>`).join("")}</div>
-      <p>快捷位置：${options.slice(1).map(option => escapeHtml(option.path || `${option.id} 尚未创建`)).join(" · ")}</p>
+      <p>快捷位置：${options.slice(1).map(option => escapeHtml(option.path)).join(" · ") || "暂无视觉特效库"}</p>
     </section>`;
     previewBox.querySelectorAll("[data-prores-destination]").forEach(select => select.addEventListener("change", () => {
       destinations[select.dataset.proresDestination] = select.value;
@@ -940,7 +941,7 @@ function mountProResAlphaTool(container) {
       previewRequestedSource = source;
       effectLibraries = libraries.libraries || [];
       Object.keys(destinations).forEach(key => { if (!preview.files.includes(key)) delete destinations[key]; });
-      preview.files.forEach(name => { if (!destinations[name] || !availableDestinations().some(item => item.id === destinations[name] && !item.disabled)) destinations[name] = "alpha_output"; });
+      preview.files.forEach(name => { if (!destinations[name] || !availableDestinations().some(item => item.id === destinations[name])) destinations[name] = "source_directory"; });
       renderPreview();
       startButton.disabled = Boolean(job && !["completed", "partial_failed", "failed", "interrupted"].includes(job.status));
     } catch (error) { preview = null; previewBox.replaceChildren(); startButton.disabled = true; toast(error.message, true); }

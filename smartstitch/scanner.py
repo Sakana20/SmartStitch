@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
+import stat as stat_module
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -411,24 +413,40 @@ def probe_config_audio(config: AppConfig, requested_path: Path) -> MediaProbe:
 
 def _discover_paths(config: AppConfig, group: SourceGroupConfig) -> tuple[Path, list[Path]]:
     directory = resolve_directory(config, group.directory)
-    if not directory.exists() or not directory.is_dir():
+    if not directory.is_dir():
         return directory, []
-    iterator = directory.rglob("*") if config.scanner.recursive else directory.iterdir()
     paths = []
     allowed = set(group.extensions)
-    for path in iterator:
-        if not path.is_file():
-            continue
-        name = path.name
-        if name in config.scanner.ignore_names:
-            continue
-        if any(name.startswith(prefix) for prefix in config.scanner.ignore_prefixes):
-            continue
-        if config.scanner.ignore_hidden_files and name.startswith("."):
-            continue
-        if path.suffix.lower() not in allowed:
-            continue
-        paths.append(path.resolve())
+    if config.scanner.recursive:
+        iterator = directory.rglob("*")
+        for path in iterator:
+            if path.suffix.lower() not in allowed or not path.is_file():
+                continue
+            name = path.name
+            if name in config.scanner.ignore_names:
+                continue
+            if any(name.startswith(prefix) for prefix in config.scanner.ignore_prefixes):
+                continue
+            if config.scanner.ignore_hidden_files and name.startswith("."):
+                continue
+            paths.append(path.resolve())
+    else:
+        # DirEntry caches file type information. Resolving every regular file
+        # separately causes hundreds of extra NAS metadata round trips.
+        canonical_directory = directory.resolve()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                name = entry.name
+                if name in config.scanner.ignore_names:
+                    continue
+                if any(name.startswith(prefix) for prefix in config.scanner.ignore_prefixes):
+                    continue
+                if config.scanner.ignore_hidden_files and name.startswith("."):
+                    continue
+                if Path(name).suffix.lower() not in allowed or not entry.is_file():
+                    continue
+                path = canonical_directory / name
+                paths.append(path.resolve() if entry.is_symlink() else path)
     return directory, sorted(paths, key=lambda item: str(item).casefold())
 
 
@@ -462,17 +480,44 @@ def _prepare_group(config: AppConfig, group: SourceGroupConfig) -> _PreparedGrou
     )
 
 
+def _prepare_groups(
+    config: AppConfig, groups: list[tuple[str, SourceGroupConfig]]
+) -> dict[str, _PreparedGroup]:
+    if not groups:
+        return {}
+
+    def prepare(item: tuple[str, SourceGroupConfig]) -> _PreparedGroup:
+        return _prepare_group(config, item[1])
+
+    with ThreadPoolExecutor(max_workers=min(4, len(groups))) as pool:
+        prepared = pool.map(prepare, groups)
+        return {category: result for (category, _), result in zip(groups, prepared)}
+
+
 def scan_source_inventory(config: AppConfig) -> SourceInventoryResult:
     """Enumerate every source group without probing media or applying its mode."""
     sources: dict[str, SourceInventoryItem] = {}
+    groups = list(config.sources.items())
+
+    def prepare_inventory_group(item: tuple[str, SourceGroupConfig]) -> _PreparedGroup | None:
+        try:
+            return _prepare_group(config, item[1])
+        except OSError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(4, len(groups) or 1)) as pool:
+        prepared_groups = dict(zip(
+            (category for category, _ in groups),
+            pool.map(prepare_inventory_group, groups),
+        ))
     for category, group in config.sources.items():
         directory = resolve_directory(config, group.directory)
         try:
-            if not directory.is_dir():
+            prepared = prepared_groups[category]
+            if prepared is None or not directory.is_dir():
                 status = "unavailable"
                 count = 0
             else:
-                prepared = _prepare_group(config, group)
                 count = len(prepared.candidates)
                 status = "available" if count else "empty"
         except OSError:
@@ -513,15 +558,15 @@ def scan_group(
     for path in prepared.candidates:
         # The file can be removed from the NAS after discovery but before this
         # loop. Treat that race exactly like a file absent at discovery time.
-        if not path.is_file():
-            continue
         item = prepared.explicit.get(path)
         enabled = item.enabled if item is not None else True
         weight = item.weight if item is not None else group.default_weight
         tags = list(item.tags) if item is not None else []
         try:
             stat = path.stat()
-        except FileNotFoundError:
+        except OSError:
+            continue
+        if not stat_module.S_ISREG(stat.st_mode):
             continue
         asset = Asset(
             id=_asset_id(category, path),
@@ -828,17 +873,19 @@ def scan_config(
     errors: list[str] = []
     warnings: list[str] = []
     probe_session = _ProbeSession(config, probe_cache)
-    prepared_groups = {
-        category: _prepare_group(config, group)
-        for category, group in config.sources.items()
-        if group.mode != SourceMode.DISABLED
-    }
+    prepared_groups = _prepare_groups(
+        config,
+        [
+            (category, group)
+            for category, group in config.sources.items()
+            if group.mode != SourceMode.DISABLED
+        ],
+    )
     probe_session.prefetch(
         (path, group.image_duration_seconds)
         for category, group in config.sources.items()
         if group.mode != SourceMode.DISABLED
         for path in prepared_groups[category].candidates
-        if path.is_file()
     )
     for category, group in config.sources.items():
         group_assets, group_errors = scan_group(

@@ -50,6 +50,7 @@ class LocalApplicationServer:
             port=self.port,
             log_config=None,
             access_log=False,
+            timeout_graceful_shutdown=2,
         )
         self.server = uvicorn.Server(config)
         self.thread = threading.Thread(
@@ -80,6 +81,9 @@ class LocalApplicationServer:
             LOGGER.exception("SmartStitch local server stopped unexpectedly")
 
     def stop(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT) -> None:
+        stream_shutdown_event = getattr(self.app.state, "stream_shutdown_event", None)
+        if stream_shutdown_event is not None:
+            stream_shutdown_event.set()
         if self.server is not None:
             self.server.should_exit = True
         if self.thread is not None and self.thread is not threading.current_thread():
@@ -167,13 +171,19 @@ class DesktopApplication:
     def _confirm_close(self, window: Any) -> Callable[[], bool | None]:
         def confirm() -> bool | None:
             count = active_task_count(self.app)
-            if count == 0:
-                return None
-            confirmed = window.create_confirmation_dialog(
-                "退出 SmartStitch",
-                f"当前有 {count} 个任务仍在运行。退出会停止这些任务，确定退出吗？",
-            )
-            return None if confirmed else False
+            if count:
+                confirmed = window.create_confirmation_dialog(
+                    "退出 SmartStitch",
+                    f"当前有 {count} 个任务仍在运行。退出会停止这些任务，确定退出吗？",
+                )
+                if not confirmed:
+                    return False
+
+            # Cocoa may terminate the process directly after a Dock/Menu Quit,
+            # without returning from webview.start() to run its finally block.
+            # Clean up before allowing either native close path to finish.
+            self.shutdown()
+            return None
 
         return confirm
 
@@ -184,8 +194,14 @@ class DesktopApplication:
             self._stopped = True
         started = time.monotonic()
         shutdown_application(self.app, timeout=max(0.0, self.shutdown_timeout - 1.0))
+        manager_seconds = time.monotonic() - started
         remaining = max(0.0, self.shutdown_timeout - (time.monotonic() - started))
         self.server.stop(timeout=remaining)
+        LOGGER.info(
+            "Desktop shutdown completed: managers=%.2fs server=%.2fs",
+            manager_seconds,
+            time.monotonic() - started - manager_seconds,
+        )
 
 
 def run_desktop_application(app: Any, *, port: int = 0) -> None:

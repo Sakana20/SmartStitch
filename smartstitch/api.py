@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -250,6 +251,7 @@ def create_app(
             instance_lock.release()
         raise
     app.state.root = root
+    app.state.stream_shutdown_event = threading.Event()
     app.state.data_directory = resolved_data_directory
     app.state.instance_lock = instance_lock
     app.state.config_store = config_store
@@ -1267,7 +1269,7 @@ def create_app(
     async def timeline_slice_job_events() -> StreamingResponse:
         async def stream():
             previous = ""
-            while True:
+            while not app.state.stream_shutdown_event.is_set():
                 jobs = slice_job_manager.list_jobs()[:20]
                 payload = json.dumps(jobs, ensure_ascii=False)
                 if payload != previous:
@@ -1480,7 +1482,7 @@ def create_app(
 
         async def stream():
             previous = ""
-            while True:
+            while not app.state.stream_shutdown_event.is_set():
                 job = job_manager.get_job(job_id)
                 payload = json.dumps(job, ensure_ascii=False)
                 if payload != previous:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -12,10 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .visual_borders import VisualBorderLibrary, VisualBorderLibraryError
+from .visual_borders import EFFECT_LIBRARY_PATTERN, VisualBorderLibrary, VisualBorderLibraryError
 
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv"}
+GENERATED_STEM = re.compile(r"_Alpha(?:_[2-9][0-9]*)?$", re.IGNORECASE)
 ALPHA_FILTER = (
     "format=rgba,"
     "geq=r='if(gt(max(max(r(X,Y),g(X,Y)),b(X,Y)),3),"
@@ -33,7 +35,12 @@ def _now() -> str:
 
 def find_videos(directory: Path) -> list[Path]:
     return sorted(
-        (path for path in directory.iterdir() if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES),
+        (
+            path for path in directory.iterdir()
+            if path.is_file()
+            and path.suffix.lower() in VIDEO_SUFFIXES
+            and not (path.suffix.lower() == ".mov" and GENERATED_STEM.search(path.stem))
+        ),
         key=lambda path: path.name.casefold(),
     )
 
@@ -79,11 +86,11 @@ class ProResAlphaManager:
         if destinations is not None and set(destinations) != {path.name for path in files}:
             raise ValueError("待转换视频已变化，请重新读取视频并选择保存位置")
         destinations = destinations or {}
-        output_directories: dict[str, Path] = {"alpha_output": source / "Alpha输出"}
+        output_directories: dict[str, Path] = {"source_directory": source}
         for destination in set(destinations.values()):
-            if destination == "alpha_output":
+            if destination == "source_directory":
                 continue
-            if destination not in {"effect_1", "effect_2"} or self.visual_border_library is None:
+            if not EFFECT_LIBRARY_PATTERN.fullmatch(destination) or self.visual_border_library is None:
                 raise ValueError("保存位置无效")
             try:
                 output_directories[destination] = self.visual_border_library.effect_library_directory(destination)
@@ -97,7 +104,7 @@ class ProResAlphaManager:
                 raise ValueError("SmartStitch 正在退出，不能创建新任务")
             if self.active_id is not None:
                 raise ValueError("已有 ProRes 4444 任务正在运行，请等待完成")
-            selected_destinations = {destinations.get(path.name, "alpha_output") for path in files}
+            selected_destinations = {destinations.get(path.name, "source_directory") for path in files}
             for key in selected_destinations:
                 directory = output_directories[key]
                 directory.mkdir(parents=True, exist_ok=True)
@@ -105,10 +112,10 @@ class ProResAlphaManager:
             records = []
             reserved: set[Path] = set()
             for path in files:
-                destination = destinations.get(path.name, "alpha_output")
+                destination = destinations.get(path.name, "source_directory")
                 directory = output_directories[destination]
                 output_name = f"{path.stem}_Alpha.mov"
-                if destination != "alpha_output":
+                if destination != "source_directory":
                     number = 2
                     while (directory / output_name).exists() or directory / output_name in reserved:
                         output_name = f"{path.stem}_Alpha_{number}.mov"
@@ -125,7 +132,7 @@ class ProResAlphaManager:
                 "id": job_id,
                 "status": "queued",
                 "source_directory": str(source),
-                "output_directory": str(output_directories["alpha_output"]),
+                "output_directory": str(source),
                 "total": len(files),
                 "completed": 0,
                 "succeeded": 0,

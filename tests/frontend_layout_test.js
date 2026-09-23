@@ -16,7 +16,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260923-101"/,
+  /href="\/styles\.css\?v=20260923-102"/,
   "前端交互或样式更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -24,6 +24,7 @@ const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.
 assert.equal(staticVersions.length, 3, "三个前端静态资源都必须声明缓存版本");
 assert.equal(new Set(staticVersions).size, 1, "CSS 与 JS 必须使用同一个发布版本，避免新旧资源混用");
 assert.match(app, /id: "batch-dedup"[\s\S]*?mount: mountBatchDedupTool/, "批量去重卡片必须可打开");
+assert.match(app, /const availableDestinations = \(\) => \[[\s\S]*?effectLibraries\.map\(library =>/, "ProRes 保存位置必须从视觉特效库列表动态生成");
 assert.match(app, /function mountBatchDedupTool\(container\)[\s\S]*?\/tools\/batch-dedup/, "批量去重面板必须提交后端任务");
 assert.doesNotMatch(app.match(/function mountBatchDedupTool\(container\) \{[\s\S]*?\n\}\n\nfunction renderAssetEditStatus/)?.[0] || "", /batchDedupConfig|state\.configId/, "批量去重不能读取项目配置");
 const configIdValidator = app.match(/function libraryConfigIdError\(value\) \{[\s\S]*?\n\}/)?.[0];

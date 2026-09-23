@@ -46,8 +46,11 @@ def test_prores_alpha_api_converts_black_to_transparent(tmp_path: Path) -> None:
         time.sleep(.05)
     assert job["status"] == "completed", job
     assert job["succeeded"] == 1
-    output = source_dir / "Alpha输出" / "黑底_Alpha.mov"
+    output = source_dir / "黑底_Alpha.mov"
     assert output.is_file() and source.is_file()
+    assert not (source_dir / "Alpha输出").exists()
+    repeat_preview = client.post("/api/v1/tools/prores-alpha/preview", json={"source_directory": str(source_dir)})
+    assert repeat_preview.json()["files"] == ["黑底.MP4"]
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "stream=codec_name,codec_type", "-of", "csv=p=0", str(output)],
         capture_output=True, text=True, check=True,
@@ -86,6 +89,9 @@ def test_each_video_can_use_a_different_shortcut_destination(tmp_path: Path) -> 
     libraries = client.get("/api/v1/global-assets/visual-effect-libraries").json()
     created = client.post("/api/v1/global-assets/visual-effect-libraries", json={"name": "第二特效库", "library_revision": libraries["revision"]})
     assert created.status_code == 200
+    third = client.post("/api/v1/global-assets/visual-effect-libraries", json={"name": "第三特效库", "library_revision": created.json()["revision"]})
+    assert third.status_code == 200
+    assert third.json()["library"]["library_id"] == "effect_3"
     root = tmp_path / "config" / "全局素材库" / "视觉特效"
     existing = root / "effect_1" / "first_Alpha.mov"
     existing.write_bytes(b"existing asset")
@@ -94,12 +100,14 @@ def test_each_video_can_use_a_different_shortcut_destination(tmp_path: Path) -> 
     invalid = client.post("/api/v1/tools/prores-alpha", json={"source_directory": str(source_dir), "destinations": {"first.mp4": "../other"}})
     assert invalid.status_code == 422
     assert "重新读取视频" in invalid.json()["detail"]
-    invalid_path = client.post("/api/v1/tools/prores-alpha", json={"source_directory": str(source_dir), "destinations": {"first.mp4": "../other", "second.mov": "effect_2"}})
+    invalid_path = client.post("/api/v1/tools/prores-alpha", json={"source_directory": str(source_dir), "destinations": {"first.mp4": "../other", "second.mov": "effect_3"}})
     assert invalid_path.status_code == 422
     assert "保存位置无效" in invalid_path.json()["detail"]
+    missing_library = client.post("/api/v1/tools/prores-alpha", json={"source_directory": str(source_dir), "destinations": {"first.mp4": "effect_99", "second.mov": "effect_3"}})
+    assert missing_library.status_code == 422
     response = client.post("/api/v1/tools/prores-alpha", json={
         "source_directory": str(source_dir),
-        "destinations": {"first.mp4": "effect_1", "second.mov": "effect_2"},
+        "destinations": {"first.mp4": "effect_1", "second.mov": "effect_3"},
     })
     assert response.status_code == 200
     job_id = response.json()["id"]
@@ -112,9 +120,9 @@ def test_each_video_can_use_a_different_shortcut_destination(tmp_path: Path) -> 
     assert job["status"] == "completed", job
     assert existing.read_bytes() == b"existing asset"
     assert (root / "effect_1" / "first_Alpha_2.mov").is_file()
-    assert (root / "effect_2" / "second_Alpha.mov").is_file()
+    assert (root / "effect_3" / "second_Alpha.mov").is_file()
     assert not (source_dir / "Alpha输出" / "first_Alpha.mov").exists()
     refreshed = client.get("/api/v1/global-assets/visual-effect-libraries").json()
     by_id = {library["library_id"]: library for library in refreshed["libraries"]}
     assert any(asset["display_name"] == "first_Alpha_2.mov" for asset in by_id["effect_1"]["assets"])
-    assert any(asset["display_name"] == "second_Alpha.mov" for asset in by_id["effect_2"]["assets"])
+    assert any(asset["display_name"] == "second_Alpha.mov" for asset in by_id["effect_3"]["assets"])
