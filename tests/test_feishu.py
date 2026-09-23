@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from conftest import authenticated_client
+
 import json
 import ssl
 import stat
@@ -526,7 +528,7 @@ def test_feishu_settings_and_connection_api_are_secret_safe(tmp_path):
     app = create_app(tmp_path)
     fake_client = FakeFeishuBaseClient()
     app.state.feishu_client_factory = lambda _app_id, _app_secret: fake_client
-    client = TestClient(app)
+    client = authenticated_client(app)
 
     saved = client.put(
         "/api/v1/integrations/feishu/settings",

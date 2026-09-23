@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from conftest import authenticated_client
+
 import subprocess
 import time
 from pathlib import Path
@@ -47,7 +49,7 @@ def test_folder_concat_preview_api_reports_pair_count(tmp_path):
     b.mkdir()
     (a / "one.mp4").touch()
     (b / "two.mp4").touch()
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
     response = client.post("/api/v1/tools/folder-concat/preview", json={
         "directory_a": str(a), "directory_b": str(b),
     })

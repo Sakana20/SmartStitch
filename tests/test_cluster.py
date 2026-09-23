@@ -52,7 +52,11 @@ def test_cluster_renders_one_item_using_worker_local_database(tmp_path, monkeypa
     worker_app.state.user_profiles.update("张三")
     worker = worker_app.state.cluster_worker
     peer_client = TestClient(worker._app())
+    assert peer_client.get("/hello").status_code == 200
+    worker.set_token_required(True)
     assert peer_client.get("/hello").status_code == 401
+    assert peer_client.get("/hello", headers={"Authorization": f"Bearer {worker.settings['token']}"}).status_code == 200
+    worker.set_token_required(False)
     submitted = []
 
     def local_request(url, token, *, method="GET", payload=None):
@@ -67,8 +71,9 @@ def test_cluster_renders_one_item_using_worker_local_database(tmp_path, monkeypa
     monkeypatch.setattr(cluster, "_request", local_request)
     try:
         master = master_app.state.cluster_master
-        node = master.add_node("http://127.0.0.1:9876", worker.settings["token"])
+        node = master.add_node("http://127.0.0.1:9876", "")
         assert node["node_id"] == worker.settings["node_id"]
+        assert master.nodes[0]["token"] == ""
         assert node["display_name"] == "张三"
         assert master.node_statuses()[0]["display_name"] == "张三"
         worker_app.state.user_profiles.update("李四")
@@ -86,12 +91,26 @@ def test_cluster_renders_one_item_using_worker_local_database(tmp_path, monkeypa
         assert Path(job["items"][0]["output_path"]).is_file()
         attempt = worker.get(job["items"][0]["attempt_id"])
         assert attempt["status"] == "succeeded"
+        assert worker_app.state.job_manager.list_jobs() == []
+        worker_app.state.accounts.bootstrap("admin", "管理员", "ClusterTest123@")
+        worker_client = TestClient(worker_app)
+        assert worker_client.post("/api/v1/auth/login", json={
+            "username": "admin", "password": "ClusterTest123@",
+        }).status_code == 200
+        worker_records = worker_client.get("/api/v1/tools/cluster-worker/attempts").json()
+        assert worker_records[0]["attempt_id"] == attempt["attempt_id"]
+        assert worker_records[0]["config_name"] == "集群测试"
+        assert worker_records[0]["output_name"] == job["items"][0]["output_name"]
+        assert worker_records[0]["created_at"]
         duplicate = peer_client.post("/attempts", json=submitted[0], headers={"Authorization": f"Bearer {worker.settings['token']}"})
         assert duplicate.json() == {"attempt_id": attempt["attempt_id"], "status": "succeeded"}
         assert (Path(job["output_directory"]) / "manifest.csv").is_file()
         master_client = TestClient(master_app)
-        assert master_client.post(f"/api/v1/jobs/{job['id']}/cancel").status_code == 401
-        assert master_client.delete(f"/api/v1/jobs/{job['id']}").status_code == 401
+        assert master_client.post("/api/v1/auth/login", json={
+            "username": "admin", "password": "ClusterTest123@",
+        }).status_code == 200
+        assert master_client.post(f"/api/v1/jobs/{job['id']}/cancel").status_code == 409
+        assert master_client.delete(f"/api/v1/jobs/{job['id']}").status_code == 200
     finally:
         master_app.state.cluster_master.shutdown()
         worker_app.state.cluster_master.shutdown()

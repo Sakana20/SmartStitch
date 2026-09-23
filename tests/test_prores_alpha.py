@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from conftest import authenticated_client
+
 import shutil
 import subprocess
 import time
@@ -31,7 +33,7 @@ def test_prores_alpha_api_converts_black_to_transparent(tmp_path: Path) -> None:
         ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=black:s=32x32:r=1:d=1", "-frames:v", "1", str(source)],
         check=True,
     )
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
     missing = client.post("/api/v1/tools/prores-alpha", json={"source_directory": str(tmp_path / "missing")})
     assert missing.status_code == 422
     response = client.post("/api/v1/tools/prores-alpha", json={"source_directory": str(source_dir)})
@@ -85,7 +87,7 @@ def test_each_video_can_use_a_different_shortcut_destination(tmp_path: Path) -> 
         check=True,
     )
     shutil.copyfile(first, second)
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
     libraries = client.get("/api/v1/global-assets/visual-effect-libraries").json()
     created = client.post("/api/v1/global-assets/visual-effect-libraries", json={"name": "第二特效库", "library_revision": libraries["revision"]})
     assert created.status_code == 200

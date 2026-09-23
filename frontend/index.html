@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260923-107" />
+    <link rel="stylesheet" href="/styles.css?v=20260923-116" />
   </head>
   <body>
     <div class="noise"></div>
@@ -15,7 +15,7 @@
       </a>
       <div class="topbar-actions">
         <button id="checkUpdateBtn" class="text-btn" type="button">检查更新</button>
-        <button id="userProfileBtn" class="user-profile-pill" type="button"><span class="user-avatar">?</span><strong id="userProfileName">设置用户名</strong></button>
+        <button id="userProfileBtn" class="user-profile-pill" type="button"><span class="user-avatar">?</span><strong id="userProfileName">未登录</strong></button>
         <div class="system-pill"><span id="healthDot" class="dot"></span><span id="healthText">正在检查环境</span></div>
       </div>
     </header>
@@ -292,6 +292,11 @@
             </div>
           </div>
           <div id="jobsList" class="jobs-list"></div>
+          <section class="worker-attempt-section" aria-label="本机工作机执行记录">
+            <h3>本机工作机执行记录</h3>
+            <p>显示这台电脑最近 100 条实际接收的工作任务；完整批次和成片结果在主控电脑的任务记录中。</p>
+            <div id="workerAttemptList" class="worker-attempt-list"></div>
+          </section>
         </article>
       </section>
 
@@ -392,17 +397,29 @@
       </div>
     </div>
 
+    <div id="loginOverlay" class="auth-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+      <form id="loginForm" class="auth-card">
+        <p class="eyebrow">SMARTSTITCH ACCOUNT</p><h2 id="loginTitle">登录 SmartStitch</h2>
+        <p id="loginHint">请输入管理员分配的账号和密码。</p>
+        <label class="field"><span>用户名</span><input name="username" autocomplete="username" required /></label>
+        <label class="field"><span>密码</span><input name="password" type="password" autocomplete="current-password" required /></label>
+        <button class="button primary" type="submit">登录</button>
+        <small id="loginError" class="cluster-gate-error hidden" role="alert"></small>
+      </form>
+    </div>
+
     <div id="userProfileModal" class="modal" aria-hidden="true">
       <div class="modal-backdrop" data-close-user-profile></div>
       <div class="modal-card compact-modal-card user-profile-card">
         <div class="modal-heading">
-          <div><p class="eyebrow">COLLABORATION PROFILE</p><h2>你的名字</h2></div>
+          <div><p class="eyebrow">ACCOUNT</p><h2>当前账号</h2></div>
           <button class="drawer-close" data-close-user-profile>×</button>
         </div>
-        <p>无需密码。名字会显示在配置占用提示中，方便同事知道谁正在编辑。</p>
-        <label class="field"><span>姓名</span><input id="userDisplayNameInput" type="text" maxlength="50" autocomplete="name" placeholder="例如 张三" /></label>
+        <p id="accountSummary"></p>
+        <label class="field"><span>当前密码</span><input id="currentPasswordInput" type="password" autocomplete="current-password" /></label>
+        <label class="field"><span>新密码（至少 6 位）</span><input id="newPasswordInput" type="password" minlength="6" autocomplete="new-password" /></label>
         <div class="user-device-card"><span>当前电脑</span><strong id="userDeviceName">—</strong></div>
-        <div class="actions right"><button id="switchUserProfileBtn" class="button secondary" type="button">切换为新用户</button><button id="saveUserProfileBtn" class="button primary" type="button">保存</button></div>
+        <div class="actions right"><button id="switchUserProfileBtn" class="button secondary" type="button">退出登录</button><button id="saveUserProfileBtn" class="button primary" type="button">修改密码</button></div>
       </div>
     </div>
 
@@ -422,7 +439,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260923-107" defer></script>
-    <script src="/app.js?v=20260923-107" defer></script>
+    <script src="/timeline-math.js?v=20260923-116" defer></script>
+    <script src="/app.js?v=20260923-116" defer></script>
   </body>
 </html>

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from conftest import authenticated_client
+
 import base64
 import json
 import struct
@@ -46,11 +48,6 @@ def write_config_template(config_directory, tmp_path):
 
 
 def acquire_edit_lease(client, config_id, session_id="test-browser-session"):
-    profile = client.put(
-        "/api/v1/users/me",
-        json={"display_name": "测试用户", "switch_user": False},
-    )
-    assert profile.status_code == 200
     acquired = client.post(
         f"/api/v1/configs/{config_id}/lock/acquire",
         json={"browser_session_id": session_id},
@@ -65,7 +62,7 @@ def acquire_edit_lease(client, config_id, session_id="test-browser-session"):
 
 def test_health_and_config_listing(tmp_path):
     (tmp_path / "config").mkdir()
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
     response = client.get("/api/v1/system/health")
     assert response.status_code == 200
     assert response.json()["ok"] is True
@@ -82,7 +79,7 @@ def test_batch_dedup_settings_are_independent_of_project_configs(tmp_path):
     (tmp_path / "config").mkdir()
     source = tmp_path / "videos"
     source.mkdir()
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
 
     initial = client.get("/api/v1/tools/batch-dedup/settings")
     assert initial.status_code == 200
@@ -114,7 +111,7 @@ def test_update_endpoints_use_application_release_checker(tmp_path):
 
     app = create_app(tmp_path)
     app.state.release_checker = FakeReleaseChecker()
-    client = TestClient(app)
+    client = authenticated_client(app)
 
     update = client.get("/api/v1/system/updates")
     opened = client.post("/api/v1/system/updates/open")
@@ -194,7 +191,7 @@ def test_structured_config_update(tmp_path):
     (config_directory / "visual-test.yaml").write_text(
         yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8"
     )
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
     loaded_response = client.get("/api/v1/configs/visual-test").json()
     loaded = loaded_response["config"]
     assert loaded["schema_version"] == 2
@@ -248,7 +245,7 @@ def test_source_inventory_api_includes_disabled_libraries(tmp_path):
     (config_directory / "inventory-test.yaml").write_text(
         yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8"
     )
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
 
     response = client.get("/api/v1/configs/inventory-test/source-inventory")
 
@@ -266,7 +263,7 @@ def test_create_and_delete_config_with_recoverable_backup(tmp_path):
     config_directory = tmp_path / "config"
     config_directory.mkdir()
     write_config_template(config_directory, tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
 
     response = client.post(
         "/api/v1/configs", json={"new_id": "summer-sale", "new_name": "夏日促销"}
@@ -295,7 +292,7 @@ def test_create_managed_library_and_add_benefit(tmp_path):
     (tmp_path / "config").mkdir()
     storage = tmp_path / "storage"
     storage.mkdir()
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
 
     preflight = client.post(
         "/api/v1/libraries/preflight",
@@ -355,7 +352,7 @@ def test_generic_library_pool_api_supports_crud_and_reorder(tmp_path, monkeypatc
     (tmp_path / "config").mkdir()
     storage = tmp_path / "storage"
     storage.mkdir()
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
     created = client.post(
         "/api/v1/libraries",
         json={
@@ -445,7 +442,7 @@ def test_managed_library_can_replace_overlay_image(tmp_path):
     (tmp_path / "config").mkdir()
     storage = tmp_path / "storage"
     storage.mkdir()
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
     created = client.post(
         "/api/v1/libraries",
         json={
@@ -521,7 +518,7 @@ def test_managed_library_streams_and_replaces_visual_border(tmp_path):
     (tmp_path / "config").mkdir()
     storage = tmp_path / "storage"
     storage.mkdir()
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
     created = client.post(
         "/api/v1/libraries",
         json={
@@ -570,7 +567,7 @@ def test_managed_library_streams_and_replaces_visual_border(tmp_path):
 
 def test_global_visual_border_api_streams_into_shared_config_root(tmp_path):
     (tmp_path / "config").mkdir()
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
     initial = client.get("/api/v1/global-assets/visual-borders").json()
     border = tmp_path / "全局动态边框.mov"
     subprocess.run(
@@ -624,7 +621,7 @@ def test_global_visual_effect_library_api_manages_groups_and_assets(
     tmp_path, monkeypatch
 ):
     (tmp_path / "config").mkdir()
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
     initial = client.get("/api/v1/global-assets/visual-effect-libraries").json()
 
     created = client.post(
@@ -719,7 +716,7 @@ def test_directory_picker_api_returns_selected_path(tmp_path, monkeypatch):
         "smartstitch.api.pick_directory",
         lambda: {"cancelled": False, "path": str(tmp_path)},
     )
-    client = TestClient(create_app(tmp_path))
+    client = authenticated_client(create_app(tmp_path))
 
     response = client.post("/api/v1/system/directory-picker")
 
@@ -736,7 +733,7 @@ def test_timeline_sources_lists_supported_videos_in_natural_order(tmp_path):
     (source_directory / "子目录").mkdir()
     (source_directory / "子目录" / "嵌套.mp4").write_bytes(b"video")
 
-    response = TestClient(create_app(tmp_path)).post(
+    response = authenticated_client(create_app(tmp_path)).post(
         "/api/v1/timeline/sources",
         json={"source_directory": f"'{source_directory}'"},
     )
@@ -758,7 +755,7 @@ def test_timeline_sources_rejects_a_file_path(tmp_path):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"video")
 
-    response = TestClient(create_app(tmp_path)).post(
+    response = authenticated_client(create_app(tmp_path)).post(
         "/api/v1/timeline/sources", json={"source_directory": str(source)}
     )
 
@@ -774,7 +771,7 @@ def test_timeline_slice_conflict_returns_409(tmp_path, monkeypatch):
         raise SliceConflictError("断点审核已变更")
 
     monkeypatch.setattr(app.state.timeline_slicer, "export", reject_stale_review)
-    response = TestClient(app).post(
+    response = authenticated_client(app).post(
         "/api/v1/timeline/slices",
         json={
             "analysis_id": "a" * 24,
@@ -814,7 +811,7 @@ def test_timeline_waveform_returns_downsampled_visible_range(tmp_path):
         )
     )
 
-    response = TestClient(app).get(
+    response = authenticated_client(app).get(
         f"/api/v1/timeline/waveforms/{analysis_id}",
         params={"start_frame": 0, "end_frame": 10, "width_px": 2},
     )
@@ -830,7 +827,7 @@ def test_timeline_waveform_returns_downsampled_visible_range(tmp_path):
 def test_delete_job_record_keeps_active_jobs_protected(tmp_path):
     (tmp_path / "config").mkdir()
     app = create_app(tmp_path)
-    client = TestClient(app)
+    client = authenticated_client(app)
     manager = app.state.job_manager
     manager.database.save({"id": "finished-job", "status": "completed"})
     manager.database.save({"id": "running-job", "status": "running"})

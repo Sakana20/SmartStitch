@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from conftest import authenticated_client
 
 from smartstitch.api import create_app
 from smartstitch.collaboration import (
@@ -129,10 +130,8 @@ def test_api_reports_lock_owner_across_independent_services(tmp_path):
     write_config(shared)
     root_a = tmp_path / "machine-a"
     root_b = tmp_path / "machine-b"
-    client_a = TestClient(create_app(root_a, config_directory=shared))
-    client_b = TestClient(create_app(root_b, config_directory=shared))
-    client_a.put("/api/v1/users/me", json={"display_name": "张三"})
-    client_b.put("/api/v1/users/me", json={"display_name": "李四"})
+    client_a = authenticated_client(create_app(root_a, config_directory=shared))
+    client_b = authenticated_client(create_app(root_b, config_directory=shared))
 
     acquired = client_a.post(
         "/api/v1/configs/shared-config/lock/acquire",
@@ -144,7 +143,7 @@ def test_api_reports_lock_owner_across_independent_services(tmp_path):
         json={"browser_session_id": "browser-session-b"},
     )
     assert blocked.status_code == 423
-    assert blocked.json()["detail"]["owner"]["display_name"] == "张三"
+    assert blocked.json()["detail"]["owner"]["display_name"] == "测试管理员"
 
     loaded = acquired.json()["config"]
     loaded["name"] = "张三保存"
@@ -177,14 +176,15 @@ def test_api_requires_user_and_lease_before_config_write(tmp_path):
     config_directory = tmp_path / "config"
     config_directory.mkdir()
     write_config(config_directory)
-    client = TestClient(create_app(tmp_path))
+    app = create_app(tmp_path)
+    client = TestClient(app)
 
     missing_user = client.post(
         "/api/v1/configs/shared-config/lock/acquire",
         json={"browser_session_id": "browser-session-a"},
     )
-    assert missing_user.status_code == 428
-    assert missing_user.json()["detail"]["code"] == "user_required"
+    assert missing_user.status_code == 401
+    client = authenticated_client(app)
 
     loaded = client.get("/api/v1/configs/shared-config").json()
     loaded["config"]["name"] = "不应保存"

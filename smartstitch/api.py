@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -9,10 +10,11 @@ import tempfile
 import threading
 import urllib.parse
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -27,7 +29,7 @@ from .collaboration import (
     UserProfileRequiredError,
     UserProfileStore,
 )
-from .cluster_auth import ClusterAccess, ClusterUnlockRequest, SESSION_SECONDS
+from .accounts import AccountError, AccountStore, public_account
 from .cluster import ClusterMaster, ClusterWorker, NodeRegistration
 from .config import ConfigError, ConfigStore
 from .database import SQLiteStore
@@ -46,6 +48,7 @@ from .library import (
     LibraryService,
     open_directory_in_file_manager,
     pick_directory,
+    pick_video_file,
 )
 from .media import DisconnectSafeFileResponse
 from .models import (
@@ -85,6 +88,8 @@ from .models import (
 from .planner import PlanError, build_plan
 from .probe_cache import MediaProbeCache
 from .prores_alpha import ProResAlphaManager
+from .video_upscale import VideoUpscaleManager
+from .cluster_upscale import ClusterUpscaleBatchManager, ClusterUpscaleManager
 from .runtime import (
     ApplicationInstanceLock,
     configure_bundled_media_tools,
@@ -118,6 +123,43 @@ class SharedConfigUnavailableError(RuntimeError):
 class ProResAlphaRequest(BaseModel):
     source_directory: str
     destinations: dict[str, str] | None = None
+
+
+class VideoUpscaleRequest(BaseModel):
+    source: str | None = None
+    output_directory: str | None = None
+    mode: str = "local"
+    model: str = "x2plus"
+
+
+class VideoUpscaleModelRequest(BaseModel):
+    model: str = "x2plus"
+
+
+class WorkerTokenProtectionRequest(BaseModel):
+    enabled: bool
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class PasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+class AccountCreateRequest(BaseModel):
+    username: str
+    display_name: str
+    password: str
+    role: str = "user"
+
+
+class AccountActionRequest(BaseModel):
+    action: str
+    value: str | None = None
 
 
 def alternate_shared_config_directories(parent: Path) -> list[Path]:
@@ -231,9 +273,13 @@ def create_app(
         timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
         slice_job_manager = SliceJobManager(timeline_slicer, database_store)
         prores_alpha_manager = ProResAlphaManager(visual_border_library)
-        cluster_access = ClusterAccess()
+        video_upscale_manager = VideoUpscaleManager(resolved_data_directory)
+        accounts = AccountStore(config_store.directory)
         cluster_worker = ClusterWorker(resolved_data_directory, config_store, database_store, user_profiles)
+        cluster_worker.local_upscale_manager = video_upscale_manager
         cluster_master = ClusterMaster(cluster_worker, job_manager, config_store, resolved_data_directory)
+        cluster_upscale_manager = ClusterUpscaleManager(cluster_master, database_store)
+        cluster_upscale_batch_manager = ClusterUpscaleBatchManager(cluster_upscale_manager, database_store)
         release_checker = NASUpdateChecker(
             None if resolved_config_directory == local_config_directory
             else resolved_config_directory,
@@ -244,16 +290,20 @@ def create_app(
         @asynccontextmanager
         async def lifespan(_app: FastAPI):
             try:
-                if cluster_worker.settings.get("enabled"):
-                    try:
-                        cluster_worker.start()
-                    except (OSError, RuntimeError) as exc:
-                        cluster_worker.startup_error = str(exc)
+                try:
+                    cluster_worker.start()
+                except (OSError, RuntimeError) as exc:
+                    cluster_worker.startup_error = str(exc)
                 cluster_master.resume_interrupted()
+                cluster_upscale_manager.resume_interrupted()
+                cluster_upscale_batch_manager.resume_interrupted()
                 yield
             finally:
+                cluster_upscale_batch_manager.shutdown()
+                cluster_upscale_manager.shutdown()
                 cluster_master.shutdown()
                 prores_alpha_manager.shutdown()
+                video_upscale_manager.shutdown()
                 instance_lock.release()
 
         app = FastAPI(title="SmartStitch", version=__version__, lifespan=lifespan)
@@ -272,6 +322,7 @@ def create_app(
     app.state.visual_border_library = visual_border_library
     app.state.job_manager = job_manager
     app.state.prores_alpha_manager = prores_alpha_manager
+    app.state.video_upscale_manager = video_upscale_manager
     app.state.feishu_settings = feishu_settings
     app.state.feishu_sync_manager = feishu_sync_manager
     app.state.feishu_client_factory = FeishuBaseClient
@@ -280,10 +331,117 @@ def create_app(
     app.state.timeline_analyzer = timeline_analyzer
     app.state.timeline_slicer = timeline_slicer
     app.state.slice_job_manager = slice_job_manager
-    app.state.cluster_access = cluster_access
+    app.state.accounts = accounts
     app.state.cluster_worker = cluster_worker
     app.state.cluster_master = cluster_master
+    app.state.cluster_upscale_manager = cluster_upscale_manager
+    app.state.cluster_upscale_batch_manager = cluster_upscale_batch_manager
     app.state.release_checker = release_checker
+
+    def account_error(exc: AccountError) -> HTTPException:
+        return HTTPException(exc.status, str(exc))
+
+    def authenticated(request: Request) -> dict:
+        try:
+            return accounts.authenticate(request.cookies.get("smartstitch_session", ""))
+        except AccountError as exc:
+            raise account_error(exc) from exc
+
+    @app.middleware("http")
+    async def account_guard(request: Request, call_next):
+        path = request.url.path
+        exempt = path in ("/api/v1/system/health", "/api/v1/auth/login", "/api/v1/auth/status")
+        if path.startswith("/api/v1/") and not exempt:
+            try:
+                account = authenticated(request)
+                if account["must_change_password"] and path not in ("/api/v1/auth/me", "/api/v1/auth/password", "/api/v1/auth/logout"):
+                    raise AccountError("请先修改初始密码", 403)
+                if path.startswith("/api/v1/tools/cluster-control/") or path.startswith("/api/v1/admin/"):
+                    if account["role"] != "admin":
+                        raise AccountError("仅管理员可以访问", 403)
+                if request.method not in ("GET", "HEAD", "OPTIONS"):
+                    origin = request.headers.get("origin")
+                    if origin and origin != f"{request.url.scheme}://{request.headers.get('host')}":
+                        raise AccountError("请求来源无效", 403)
+                request.state.account = account
+            except (AccountError, HTTPException) as exc:
+                return JSONResponse({"detail": str(exc.detail) if isinstance(exc, HTTPException) else str(exc)}, status_code=exc.status_code if isinstance(exc, HTTPException) else exc.status)
+        return await call_next(request)
+
+    @app.get("/api/v1/auth/status")
+    def auth_status(request: Request) -> dict:
+        try:
+            account = authenticated(request)
+            return {"authenticated": True, "user": public_account(account)}
+        except AccountError:
+            return {"authenticated": False, "initialized": accounts.initialized()}
+        except HTTPException:
+            return {"authenticated": False, "initialized": accounts.initialized()}
+
+    def sync_worker_display_name(account: dict) -> None:
+        try:
+            profile = user_profiles.get()["user"]
+            if profile is None or profile.get("display_name") != account["display_name"]:
+                user_profiles.update(account["display_name"], switch_user=True)
+                cluster_worker.refresh_advertisement()
+        except (CollaborationError, OSError) as exc:
+            logging.getLogger(__name__).warning("无法更新本机集群节点名称：%s", exc)
+
+    @app.post("/api/v1/auth/login")
+    def login(body: LoginRequest, response: Response) -> dict:
+        try:
+            token, account = accounts.login(body.username, body.password)
+        except AccountError as exc:
+            raise account_error(exc) from exc
+        sync_worker_display_name(account)
+        response.set_cookie("smartstitch_session", token, httponly=True, samesite="strict", max_age=8 * 3600, path="/")
+        return {"user": account}
+
+    @app.post("/api/v1/auth/logout")
+    def logout(request: Request, response: Response) -> dict:
+        accounts.logout(request.cookies.get("smartstitch_session", ""))
+        response.delete_cookie("smartstitch_session", path="/")
+        return {"ok": True}
+
+    @app.get("/api/v1/auth/me")
+    def auth_me(request: Request) -> dict:
+        return {"user": public_account(request.state.account), "device": user_profiles.get()["device"]}
+
+    @app.post("/api/v1/auth/password")
+    def change_password(body: PasswordRequest, request: Request, response: Response) -> dict:
+        try:
+            accounts.change_password(request.state.account["account_id"], body.old_password, body.new_password)
+        except AccountError as exc:
+            raise account_error(exc) from exc
+        accounts.logout(request.cookies.get("smartstitch_session", ""))
+        response.delete_cookie("smartstitch_session", path="/")
+        return {"ok": True}
+
+    @app.get("/api/v1/admin/users")
+    def list_accounts() -> list[dict]:
+        return accounts.list_accounts()
+
+    @app.post("/api/v1/admin/users")
+    def create_account(body: AccountCreateRequest, request: Request) -> dict:
+        try:
+            return accounts.create(request.state.account["account_id"], body.username, body.display_name, body.password, body.role)
+        except AccountError as exc:
+            raise account_error(exc) from exc
+
+    @app.post("/api/v1/admin/users/{account_id}/actions")
+    def account_action(account_id: str, body: AccountActionRequest, request: Request) -> dict:
+        try:
+            result = accounts.update(request.state.account["account_id"], account_id, action=body.action, value=body.value)
+            if body.action == "rename" and account_id == request.state.account["account_id"]:
+                sync_worker_display_name(result)
+            if body.action in ("suspend", "delete", "demote", "reset_password"):
+                try:
+                    config_leases.revoke_user(account_id)
+                except (OSError, CollaborationError):
+                    pass  # Revoked sessions cannot renew or save; the lease still expires.
+            return result
+        except AccountError as exc:
+            raise account_error(exc) from exc
 
     def collaboration_http_error(exc: CollaborationError) -> HTTPException:
         if isinstance(exc, ConfigLockHeldError):
@@ -324,20 +482,9 @@ def create_app(
             "config_path_mapped": config_store.has_path_alias,
         }
 
-    def cluster_token(request: Request) -> str:
-        scheme, _, token = request.headers.get("Authorization", "").partition(" ")
-        return token.strip() if scheme.lower() == "bearer" else ""
-
     def require_cluster(request: Request) -> None:
-        if not cluster_access.authorized(cluster_token(request)):
-            raise HTTPException(401, "集群控制未解锁或登录已过期")
-
-    @app.post("/api/v1/tools/cluster-control/unlock")
-    def unlock_cluster(request: ClusterUnlockRequest) -> dict[str, object]:
-        token = cluster_access.unlock(request.password.get_secret_value())
-        if token is None:
-            raise HTTPException(401, "密码错误")
-        return {"access_token": token, "expires_in": SESSION_SECONDS}
+        if request.state.account["role"] != "admin":
+            raise HTTPException(403, "仅管理员可以访问")
 
     @app.get("/api/v1/tools/cluster-control/status")
     def cluster_status(http_request: Request) -> dict[str, object]:
@@ -364,6 +511,12 @@ def create_app(
         cluster_worker.stop(disable=True)
         return {"enabled": False}
 
+    @app.post("/api/v1/tools/cluster-control/worker/token-protection")
+    def set_cluster_worker_token_protection(request: WorkerTokenProtectionRequest, http_request: Request) -> dict[str, bool]:
+        require_cluster(http_request)
+        cluster_worker.set_token_required(request.enabled)
+        return {"token_required": request.enabled}
+
     @app.get("/api/v1/tools/cluster-control/discover")
     def discover_cluster_workers(http_request: Request) -> list[dict[str, object]]:
         require_cluster(http_request)
@@ -374,7 +527,7 @@ def create_app(
         require_cluster(http_request)
         try:
             return cluster_master.add_node(registration.url, registration.token)
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.delete("/api/v1/tools/cluster-control/nodes/{node_id}")
@@ -412,10 +565,6 @@ def create_app(
             raise HTTPException(409, str(exc)) from exc
         return {"deleted": True}
 
-    @app.post("/api/v1/tools/cluster-control/lock")
-    def lock_cluster(http_request: Request) -> dict[str, bool]:
-        cluster_access.lock(cluster_token(http_request))
-        return {"locked": True}
 
     @app.get("/api/v1/system/updates")
     def check_for_updates() -> dict[str, object]:
@@ -435,6 +584,13 @@ def create_app(
     def directory_picker() -> dict[str, object]:
         try:
             return pick_directory()
+        except (LibraryError, OSError, subprocess.SubprocessError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/system/video-file-picker")
+    def video_file_picker() -> dict[str, object]:
+        try:
+            return pick_video_file()
         except (LibraryError, OSError, subprocess.SubprocessError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -495,22 +651,13 @@ def create_app(
             ) from exc
 
     @app.get("/api/v1/users/me")
-    def get_current_user() -> dict[str, object]:
-        try:
-            return user_profiles.get()
-        except CollaborationError as exc:
-            raise collaboration_http_error(exc) from exc
+    def get_current_user(request: Request) -> dict[str, object]:
+        account = request.state.account
+        return {"configured": True, "user": {"user_id": account["account_id"], **public_account(account)}, "device": user_profiles.get()["device"]}
 
     @app.put("/api/v1/users/me")
     def update_current_user(request: UserProfileUpdateRequest) -> dict[str, object]:
-        try:
-            result = user_profiles.update(
-                request.display_name, switch_user=request.switch_user
-            )
-            cluster_worker.refresh_advertisement()
-            return result
-        except CollaborationError as exc:
-            raise collaboration_http_error(exc) from exc
+        raise HTTPException(403, "请由管理员在用户管理中修改显示名称")
 
     @app.post("/api/v1/libraries/preflight")
     def preflight_library(request: LibraryPreflightRequest) -> dict[str, object]:
@@ -998,10 +1145,11 @@ def create_app(
             raise collaboration_http_error(exc) from exc
 
     def acquire_config_lock(
-        config_id: str, request: ConfigLockAcquireRequest, *, takeover: bool
+        config_id: str, request: ConfigLockAcquireRequest, account: dict, *, takeover: bool
     ) -> dict[str, object]:
         try:
-            profile, device = user_profiles.require()
+            profile = {"user_id": account["account_id"], "display_name": account["display_name"]}
+            device = user_profiles.get()["device"]
             result = config_leases.acquire(
                 config_id,
                 profile,
@@ -1023,15 +1171,15 @@ def create_app(
 
     @app.post("/api/v1/configs/{config_id}/lock/acquire")
     def acquire_config_lock_route(
-        config_id: str, request: ConfigLockAcquireRequest
+        config_id: str, request: ConfigLockAcquireRequest, http_request: Request
     ) -> dict[str, object]:
-        return acquire_config_lock(config_id, request, takeover=False)
+        return acquire_config_lock(config_id, request, http_request.state.account, takeover=False)
 
     @app.post("/api/v1/configs/{config_id}/lock/takeover")
     def takeover_config_lock_route(
-        config_id: str, request: ConfigLockAcquireRequest
+        config_id: str, request: ConfigLockAcquireRequest, http_request: Request
     ) -> dict[str, object]:
-        return acquire_config_lock(config_id, request, takeover=True)
+        return acquire_config_lock(config_id, request, http_request.state.account, takeover=True)
 
     @app.post("/api/v1/configs/{config_id}/lock/renew")
     def renew_config_lock(
@@ -1482,6 +1630,91 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(404, "ProRes 4444 任务不存在") from exc
 
+    @app.get("/api/v1/tools/video-upscale/model")
+    def video_upscale_model(model: str = "x2plus") -> dict[str, object]:
+        from .video_upscale import model_status
+        try:
+            return model_status(resolved_data_directory, model)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/video-upscale/model")
+    def prepare_video_upscale_model(request: VideoUpscaleModelRequest | None = None) -> dict[str, object]:
+        try:
+            return video_upscale_manager.prepare_model(model_name=request.model if request else "x2plus")
+        except (ValueError, OSError, TimeoutError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/video-upscale/preview")
+    def preview_video_upscale(request: VideoUpscaleRequest) -> dict[str, object]:
+        try:
+            if not request.source:
+                raise ValueError("请选择源视频")
+            return video_upscale_manager.preview(request.source, request.model)
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/tools/video-upscale/nodes")
+    def video_upscale_nodes() -> list[dict[str, object]]:
+        return cluster_upscale_manager.nodes()
+
+    @app.get("/api/v1/tools/video-upscale/nas")
+    def video_upscale_nas(model: str = "x2plus") -> dict[str, object]:
+        try:
+            return cluster_upscale_batch_manager.preview(model)
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/video-upscale")
+    def create_video_upscale(request: VideoUpscaleRequest) -> dict[str, object]:
+        try:
+            if request.mode == "cluster":
+                return cluster_upscale_batch_manager.create(request.model)
+            if not request.source:
+                raise ValueError("请选择源视频")
+            if request.mode == "local":
+                return video_upscale_manager.create(request.source, request.output_directory, request.model)
+            if request.mode == "cluster-single":
+                return cluster_upscale_manager.create(request.source, request.output_directory, request.model)
+            raise ValueError("未知超分执行位置")
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/tools/video-upscale/latest")
+    def latest_video_upscale() -> dict[str, object] | None:
+        local = video_upscale_manager.latest()
+        cluster = cluster_upscale_manager.latest()
+        batch = cluster_upscale_batch_manager.latest()
+        candidates = [entry for entry in (local, cluster, batch) if entry]
+        return max(candidates, key=lambda entry: datetime.fromisoformat(entry["created_at"]).timestamp()
+                   if isinstance(entry["created_at"], str) else entry["created_at"]) if candidates else None
+
+    @app.get("/api/v1/tools/video-upscale/{job_id}")
+    def get_video_upscale(job_id: str) -> dict[str, object]:
+        try:
+            return video_upscale_manager.get(job_id)
+        except KeyError as exc:
+            try:
+                return cluster_upscale_batch_manager.get(job_id)
+            except KeyError:
+                try:
+                    return cluster_upscale_manager.get(job_id)
+                except KeyError:
+                    raise HTTPException(404, "超分任务不存在") from exc
+
+    @app.post("/api/v1/tools/video-upscale/{job_id}/cancel")
+    def cancel_video_upscale(job_id: str) -> dict[str, object]:
+        try:
+            try:
+                return video_upscale_manager.cancel(job_id)
+            except ValueError:
+                try:
+                    return cluster_upscale_batch_manager.cancel(job_id)
+                except ValueError:
+                    return cluster_upscale_manager.cancel(job_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/v1/tools/batch-dedup/settings")
     def get_batch_dedup_settings() -> dict[str, object]:
         try:
@@ -1499,6 +1732,10 @@ def create_app(
     @app.get("/api/v1/jobs")
     def list_jobs() -> list[dict[str, object]]:
         return job_manager.list_jobs()
+
+    @app.get("/api/v1/tools/cluster-worker/attempts")
+    def list_local_cluster_attempts(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, object]]:
+        return cluster_worker.list_attempts(limit)
 
     @app.delete("/api/v1/jobs")
     def delete_all_jobs(http_request: Request) -> dict[str, object]:

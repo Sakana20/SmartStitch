@@ -106,6 +106,9 @@ def _application_managers(app: Any) -> list[Any]:
             getattr(state, "job_manager", None),
             getattr(state, "slice_job_manager", None),
             getattr(state, "prores_alpha_manager", None),
+            getattr(state, "video_upscale_manager", None),
+            getattr(state, "cluster_upscale_manager", None),
+            getattr(state, "cluster_upscale_batch_manager", None),
             getattr(state, "feishu_sync_manager", None),
             getattr(state, "cluster_master", None),
         )

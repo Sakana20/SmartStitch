@@ -1,7 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="640" height="480" viewBox="0 0 640 480" fill="none">
   <defs><linearGradient id="bg" x1="0" y1="0" x2="640" y2="480" gradientUnits="userSpaceOnUse"><stop stop-color="#E0EDE3"/><stop offset="1" stop-color="#F8F6E9"/></linearGradient></defs>
   <rect width="640" height="480" fill="url(#bg)"/>
-  <circle cx="521" cy="87" r="150" fill="#D9F172" fill-opacity=".29"/>
+  <circle cx="320" cy="240" r="190" fill="#D9F172" fill-opacity=".22"/>
+  <g transform="translate(-26 42)">
   <rect x="118" y="137" width="236" height="184" rx="19" fill="#FFF" stroke="#B7CEC0" stroke-width="4"/>
   <rect x="139" y="159" width="194" height="140" rx="8" fill="#D9EADF"/>
   <path d="m198 265 32-37 27 25 25-29 30 41H198Z" fill="#8DB99B"/>
@@ -12,4 +13,5 @@
   <path d="m434 282 35-50 30 32 25-41 21 59H434Z" fill="#69A67E"/>
   <circle cx="458" cy="164" r="18" fill="#81BA92"/>
   <path d="M482 101V61m-20 20h40" stroke="#1D5C43" stroke-width="9" stroke-linecap="round"/>
+  </g>
 </svg>

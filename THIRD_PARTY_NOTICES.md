@@ -12,3 +12,14 @@ The DMG includes the applicable license texts, the exact source archives used to
 the binaries, and the build scripts under `Open Source Licenses`. SmartStitch invokes
 `ffmpeg` and `ffprobe` as separate subprocesses; it does not link their libraries into
 the Python application.
+
+The video upscaler uses the official CoreML conversion of Real-ESRGAN x2plus from
+[hanxiao/real-esrgan-coreml](https://github.com/hanxiao/real-esrgan-coreml). The
+upstream README states MIT for its code and BSD-3-Clause for weights obtained from
+[xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN). SmartStitch downloads
+the pinned v1.0.0 model ZIPs on demand and verifies SHA-256:
+`x2plus` = `4acf0afa2828e82b88e1d712b4b7604977698c99aa1505276c943922be6b3938`,
+`animevideo` = `0e83446f03b4c0a60c970da02d70d10af14949c169714f9ad8e8ea3e479b145b`;
+the model is not included in the app bundle. Runtime dependencies include
+`coremltools`, NumPy, and Pillow. Before redistributing a bundle with a preinstalled
+model, include the applicable upstream copyright and license texts.

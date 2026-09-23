@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from conftest import authenticated_client
+
 import json
 import sqlite3
 import threading
@@ -102,7 +104,7 @@ def test_async_slice_job_persists_and_is_idempotent(tmp_path, monkeypatch):
     payload = request_payload(
         "a" * 24, review_revision, config_hash, "async-slice-request-1"
     )
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         created = client.post("/api/v1/timeline/slice-jobs", json=payload)
         assert created.status_code == 202
         job_id = created.json()["id"]
@@ -156,7 +158,7 @@ def test_queued_slice_job_can_be_cancelled_while_previous_job_runs(tmp_path, mon
         )
 
     monkeypatch.setattr(app.state.timeline_slicer, "runner", runner)
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         first = client.post(
             "/api/v1/timeline/slice-jobs",
             json=request_payload(
@@ -208,7 +210,7 @@ def test_failed_slice_job_can_retry_from_persisted_snapshot(tmp_path, monkeypatc
         )
 
     monkeypatch.setattr(app.state.timeline_slicer, "runner", runner)
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         created = client.post(
             "/api/v1/timeline/slice-jobs",
             json=request_payload(
@@ -240,7 +242,7 @@ def test_unexpected_worker_error_does_not_leave_slice_job_running(
         raise RuntimeError("state persistence failed")
 
     monkeypatch.setattr(app.state.timeline_slicer, "execute", fail_execute)
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         created = client.post(
             "/api/v1/timeline/slice-jobs",
             json=request_payload(
@@ -272,7 +274,7 @@ def test_background_worker_requests_low_process_priority(tmp_path, monkeypatch):
         return job
 
     monkeypatch.setattr(app.state.timeline_slicer, "execute", execute)
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         response = client.post(
             "/api/v1/timeline/slice-jobs",
             json=request_payload(

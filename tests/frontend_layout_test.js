@@ -16,7 +16,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260923-107"/,
+  /href="\/styles\.css\?v=20260923-116"/,
   "前端交互或样式更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -176,8 +176,8 @@ assert.match(
 );
 assert.match(
   html,
-  /<span>姓名<\/span><input id="userDisplayNameInput"/,
-  "登录资料弹窗必须使用姓名作为字段名称",
+  /<span>当前密码<\/span><input id="currentPasswordInput"[\s\S]*<span>新密码（至少 6 位）<\/span><input id="newPasswordInput"/,
+  "当前账号弹窗必须提供密码修改字段",
 );
 assert.doesNotMatch(
   html,

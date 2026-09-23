@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import hashlib
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ from pydantic import BaseModel, field_validator
 from . import __version__
 from .models import AppConfig, Asset, JobCreateRequest, PlannedVisualEffect, PlanItem
 from .renderer import render_item
+from .video_upscale import MODEL_CONFIGS, model_config, model_status, probe_video, process_segment
 
 
 DEFAULT_WORKER_PORT = 8767
@@ -39,6 +41,14 @@ LOGGER = logging.getLogger(__name__)
 
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _safe_write(path: Path, value: dict[str, Any], *, secret: bool = False) -> None:
@@ -126,7 +136,7 @@ def _node_url(value: str) -> str:
 
 def _request(url: str, token: str, *, method: str = "GET", payload: dict[str, Any] | None = None) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     if body is not None:
         headers["Content-Type"] = "application/json"
     request = Request(url, data=body, method=method, headers=headers)
@@ -136,13 +146,13 @@ def _request(url: str, token: str, *, method: str = "GET", payload: dict[str, An
 
 class NodeRegistration(BaseModel):
     url: str
-    token: str
+    token: str = ""
 
     @field_validator("token")
     @classmethod
     def validate_token(cls, value: str) -> str:
         value = value.strip()
-        if len(value) < 16:
+        if value and len(value) < 16:
             raise ValueError("请填写工作机启用后显示的随机令牌（通常为 32 位），不要填写集群控制页面的解锁密码")
         return value
 
@@ -153,8 +163,11 @@ class ClusterWorker:
         self.config_store = config_store
         self.store = sqlite_store
         self.user_profiles = user_profiles
+        self.local_upscale_manager: Any | None = None
         self.settings_path = data_directory / "cluster-worker.json"
-        self.settings = _load_json(self.settings_path, {"enabled": False, "token": uuid.uuid4().hex, "node_id": uuid.uuid4().hex})
+        self.settings = _load_json(self.settings_path, {"enabled": True, "token": uuid.uuid4().hex,
+                                                         "token_required": False, "node_id": uuid.uuid4().hex})
+        self.settings.setdefault("token_required", False)
         self.startup_error: str | None = None
         self.lock = threading.RLock()
         self.events: dict[str, threading.Event] = {}
@@ -186,6 +199,13 @@ class ClusterWorker:
             row = connection.execute("SELECT payload FROM cluster_attempts WHERE id=?", (attempt_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def list_attempts(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.store.lock, self.store.connection() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM cluster_attempts ORDER BY rowid DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
     def _update(self, attempt_id: str, **updates: Any) -> None:
         with self.lock:
             value = self.get(attempt_id)
@@ -197,19 +217,23 @@ class ClusterWorker:
     def status(self) -> dict[str, Any]:
         with self.lock:
             active = sum(thread.is_alive() for thread in self.threads.values())
+            if self.local_upscale_manager is not None:
+                active += self.local_upscale_manager.active_count()
             profile = self.user_profiles.get()["user"]
             return {
                 "node_id": self.settings["node_id"], "name": socket.gethostname(),
                 "display_name": profile["display_name"] if profile else "",
                 "version": __version__, "active": active, "capacity": 1,
                 "canonical_root": str(self.config_store.canonical_directory),
+                "video_upscale": {**model_status(self.data_directory), "protocol": 2,
+                                  "models": {name: model_status(self.data_directory, name) for name in MODEL_CONFIGS}},
             }
 
     def _app(self) -> FastAPI:
         app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
         def authorize(request: APIRequest) -> None:
-            if request.headers.get("Authorization", "") != f"Bearer {self.settings['token']}":
+            if self.settings["token_required"] and request.headers.get("Authorization", "") != f"Bearer {self.settings['token']}":
                 raise HTTPException(401, "工作机令牌无效")
 
         @app.get("/hello")
@@ -224,7 +248,7 @@ class ClusterWorker:
             if value is None:
                 raise HTTPException(404, "执行记录不存在")
             return {key: value.get(key) for key in (
-                "attempt_id", "status", "progress", "error", "result", "stage_path", "updated_at"
+                "attempt_id", "status", "progress", "processed_frames", "error", "result", "stage_path", "updated_at"
             )}
 
         @app.post("/attempts")
@@ -233,6 +257,14 @@ class ClusterWorker:
             try:
                 return self.submit(payload)
             except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+
+        @app.post("/upscale-attempts")
+        def create_upscale_attempt(payload: dict[str, Any], request: APIRequest) -> dict[str, Any]:
+            authorize(request)
+            try:
+                return self.submit_upscale(payload)
+            except (ValueError, KeyError, OSError) as exc:
                 raise HTTPException(422, str(exc)) from exc
 
         @app.post("/attempts/{attempt_id}/cancel")
@@ -302,7 +334,13 @@ class ClusterWorker:
     def connection_info(self) -> dict[str, Any]:
         port = self.listener.getsockname()[1] if self.listener else None
         return {**self.status(), "enabled": bool(self.server and self.server.started),
-                "port": port, "token": self.settings["token"], "startup_error": self.startup_error}
+                "port": port, "token": self.settings["token"],
+                "token_required": self.settings["token_required"], "startup_error": self.startup_error}
+
+    def set_token_required(self, required: bool) -> None:
+        with self.lock:
+            self.settings["token_required"] = required
+            _safe_write(self.settings_path, self.settings, secret=True)
 
     def stop(self, *, disable: bool = False) -> None:
         with self.lock:
@@ -341,7 +379,7 @@ class ClusterWorker:
             existing = self.get(attempt_id)
             if existing:
                 return {"attempt_id": attempt_id, "status": existing["status"]}
-            if any(thread.is_alive() for thread in self.threads.values()):
+            if any(thread.is_alive() for thread in self.threads.values()) or (self.local_upscale_manager and self.local_upscale_manager.active_count()):
                 raise ValueError("工作机正在渲染，请稍后派发")
             canonical = Path(str(payload["canonical_root"]))
             if canonical != self.config_store.canonical_directory:
@@ -373,8 +411,10 @@ class ClusterWorker:
                     if asset.modified_at is not None and abs(stat.st_mtime - asset.modified_at) > 1:
                         raise ValueError(f"素材已在计划后修改：{asset.path}")
             value = {"attempt_id": attempt_id, "batch_id": payload["batch_id"],
-                     "item_index": item["index"], "status": "queued", "progress": 0.0,
-                     "error": None, "result": None, "stage_path": str(stage), "updated_at": _now()}
+                     "item_index": item["index"], "config_name": config.name,
+                     "output_name": planned.output_name, "status": "queued", "progress": 0.0,
+                     "error": None, "result": None, "stage_path": str(stage),
+                     "created_at": _now(), "updated_at": _now()}
             self._save(value)
             event = threading.Event()
             self.events[attempt_id] = event
@@ -382,6 +422,104 @@ class ClusterWorker:
             self.threads[attempt_id] = thread
             thread.start()
             return {"attempt_id": attempt_id, "status": "queued"}
+
+    def submit_upscale(self, payload: dict[str, Any]) -> dict[str, Any]:
+        required = {"kind", "protocol", "attempt_id", "job_id", "canonical_root", "source_relative",
+                    "source_sha256", "stage_relative", "start", "end", "frames", "width", "height",
+                    "fps", "model", "model_sha256"}
+        if set(payload) != required or payload["kind"] != "video_upscale" or payload["protocol"] != 2:
+            raise ValueError("超分任务协议不匹配")
+        attempt_id = payload["attempt_id"]
+        if not isinstance(attempt_id, str) or len(attempt_id) != 32 or any(c not in "0123456789abcdef" for c in attempt_id):
+            raise ValueError("执行标识无效")
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        with self.lock:
+            existing = self.get(attempt_id)
+            if existing:
+                if existing.get("request_digest") != digest:
+                    raise ValueError("执行标识已被不同的请求使用")
+                return {"attempt_id": attempt_id, "status": existing["status"]}
+            if any(thread.is_alive() for thread in self.threads.values()) or (self.local_upscale_manager and self.local_upscale_manager.active_count()):
+                raise ValueError("工作机正在渲染，请稍后派发")
+            if payload["canonical_root"] != str(self.config_store.canonical_directory):
+                raise ValueError("共享目录不匹配")
+            model_name = str(payload["model"])
+            if payload["model_sha256"] != model_config(model_name)["sha256"] or not model_status(self.data_directory, model_name)["available"]:
+                raise ValueError("工作机超分模型不可用或版本不匹配")
+            root = self.config_store.directory.resolve()
+            source_relative = Path(str(payload["source_relative"]))
+            stage_relative = Path(str(payload["stage_relative"]))
+            if (source_relative.is_absolute() or ".." in source_relative.parts
+                    or stage_relative.is_absolute() or ".." in stage_relative.parts
+                    or len(stage_relative.parts) != 3
+                    or stage_relative.parts[:2] != (".video-upscale", str(payload["job_id"]))):
+                raise ValueError("超分共享路径无效")
+            staged_source = (len(source_relative.parts) == 3
+                             and source_relative.parts == (".video-upscale", str(payload["job_id"]), "source.mp4"))
+            nas_source = (len(source_relative.parts) >= 3 and source_relative.parts[:2] == ("超分", "原素材"))
+            if not staged_source and not nas_source:
+                raise ValueError("超分输入必须位于共享原素材目录")
+            source = (root / source_relative).resolve()
+            stage = (root / stage_relative).resolve()
+            if not source.is_relative_to(root) or not stage.is_relative_to(root):
+                raise ValueError("超分路径越过共享目录")
+            if not source.is_file() or stage.exists() or stage.name != f"{attempt_id}.mp4":
+                raise ValueError("超分输入或暂存文件名无效")
+            info = probe_video(source)
+            if any(info[key] != payload[key] for key in ("frames", "width", "height", "fps")):
+                raise ValueError("超分输入视频参数不一致")
+            from .video_upscale import _sha256
+            if _sha256(source) != payload["source_sha256"]:
+                raise ValueError("超分输入校验失败")
+            start, end = payload["start"], payload["end"]
+            if not isinstance(start, int) or not isinstance(end, int) or not 0 <= start < end <= info["frames"]:
+                raise ValueError("超分帧范围无效")
+            value = {"attempt_id": attempt_id, "kind": "video_upscale", "request_digest": digest,
+                     "batch_id": payload["job_id"], "output_name": source.name,
+                     "start_frame": start, "end_frame": end, "status": "queued", "progress": 0.0,
+                     "processed_frames": 0, "total_frames": end-start, "error": None, "result": None,
+                     "stage_path": str(stage), "created_at": _now(), "updated_at": _now()}
+            self._save(value)
+            event = threading.Event()
+            self.events[attempt_id] = event
+            thread = threading.Thread(target=self._run_upscale, args=(attempt_id, source, stage, info, start, end, event, model_name), daemon=True)
+            self.threads[attempt_id] = thread
+            thread.start()
+            return {"attempt_id": attempt_id, "status": "queued"}
+
+    def _run_upscale(self, attempt_id: str, source: Path, stage: Path, info: dict[str, Any],
+                     start: int, end: int, event: threading.Event, model_name: str) -> None:
+        upload = stage.with_name(stage.name + ".upload")
+        try:
+            self._update(attempt_id, status="running")
+            with tempfile.TemporaryDirectory(prefix="smartstitch-upscale-worker-") as directory:
+                local = Path(directory) / "segment.mp4"
+                process_segment(source, local, info, start, end, self.data_directory, event,
+                                progress=lambda count: self._update(attempt_id, processed_frames=count,
+                                                                    progress=count/(end-start)),
+                                process_callback=lambda process: self._track_process(attempt_id, process),
+                                model_name=model_name)
+                if event.is_set():
+                    raise RuntimeError("任务已取消")
+                verified = probe_video(local)
+                if (verified["frames"] != end-start or verified["width"] != info["width"]
+                        or verified["height"] != info["height"] or verified["fps"] != info["fps"]
+                        or verified["has_audio"]):
+                    raise RuntimeError("超分片段校验失败")
+                stage.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(local, upload)
+                if event.is_set() or upload.stat().st_size != local.stat().st_size:
+                    raise RuntimeError("超分片段上传未完成")
+                os.replace(upload, stage)
+            self._update(attempt_id, status="succeeded", progress=1.0, result={"frames": end-start,
+                         "size_bytes": stage.stat().st_size, "sha256": _file_sha256(stage)})
+        except Exception as exc:
+            self._update(attempt_id, status="cancelled" if event.is_set() else "failed", error=str(exc))
+        finally:
+            upload.unlink(missing_ok=True)
+            with self.lock:
+                self.events.pop(attempt_id, None)
+                self.threads.pop(attempt_id, None)
 
     def _run(self, attempt_id: str, config: AppConfig, planned: PlanItem, stage: Path, event: threading.Event) -> None:
         upload = stage.with_name(f"{stage.name}.upload")
@@ -478,7 +616,12 @@ class ClusterMaster:
 
     def add_node(self, url: str, token: str) -> dict[str, Any]:
         url = _node_url(url)
-        hello = _request(f"{url}/hello", token)
+        try:
+            hello = _request(f"{url}/hello", token)
+        except HTTPError as exc:
+            if exc.code == 401:
+                raise ValueError("该工作机已开启令牌保护，请填写工作机令牌") from exc
+            raise
         if hello.get("version") != __version__:
             raise ValueError(f"工作机版本 {hello.get('version', '未知')} 与主控 {__version__} 不一致")
         if hello.get("canonical_root") != str(self.config_store.canonical_directory):

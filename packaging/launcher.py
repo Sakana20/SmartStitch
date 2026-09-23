@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
 import uvicorn
 
@@ -16,6 +17,10 @@ HOST = "127.0.0.1"
 
 
 def main() -> None:
+    if "--bootstrap-admin" in sys.argv:
+        from smartstitch.cli import main as cli_main
+        cli_main()
+        return
     root = resource_root()
     configure_bundled_media_tools(root)
     support_root = application_support_root()

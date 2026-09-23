@@ -158,6 +158,22 @@ class ConfigLeaseManager:
         self._validate_config_id(config_id)
         return self.root / f"{config_id}.edit.lock"
 
+    def revoke_user(self, user_id: str) -> None:
+        """Release the suspended account's leases without disturbing other owners."""
+        if not self.root.is_dir():
+            return
+        for directory in self.root.glob("*.edit.lock"):
+            config_id = directory.name.removesuffix(".edit.lock")
+            if not CONFIG_ID_PATTERN.fullmatch(config_id):
+                continue
+            with self.commit_guard(config_id):
+                owner = self._read_owner(directory)
+                if owner is None or owner.get("user_id") != user_id:
+                    continue
+                released = directory.with_name(f"{directory.name}.released-{uuid.uuid4().hex}")
+                directory.replace(released)
+                shutil.rmtree(released, ignore_errors=True)
+
     def _commit_path(self, config_id: str) -> Path:
         self._validate_config_id(config_id)
         return self.root / f"{config_id}.commit.lock"

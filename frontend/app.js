@@ -20,6 +20,8 @@ const state = {
   assetEditSnapshot: null,
   preview: null,
   jobs: [],
+  workerAttempts: [],
+  workerAttemptTimer: null,
   sliceJobs: [],
   activeJob: null,
   eventSource: null,
@@ -116,14 +118,16 @@ const configLeaseMaxDurationMs = 5 * 60 * 1000;
 const pathQuotePairs = { "'": "'", '"': '"', "‘": "’", "“": "”" };
 // Add tools here; each tool owns its panel through mount(container) when ready.
 const toolboxTools = [
-  { id: "cluster-control", title: "SmartStitch 集群控制", description: "连接在线工作机，统一派发和查看批量渲染。", cover: "/assets/tools/cluster-control.svg", order: 0, protected: true, mount: mountClusterControlTool },
+  { id: "cluster-control", title: "SmartStitch 集群控制", description: "连接在线工作机，统一派发和查看批量渲染。", cover: "/assets/tools/cluster-control.svg", order: 0, adminOnly: true, mount: mountClusterControlTool },
+  { id: "user-management", title: "用户管理", description: "添加、暂停和管理登录账号。", cover: "/assets/tools/user-management.svg", order: 2, adminOnly: true, mount: mountUserManagementTool },
   { id: "jianying-prores-4444", title: "ProRes 4444 处理", description: "将黑底视频批量转换为带透明通道的 ProRes 4444 MOV。", cover: "/assets/tools/jianying-prores-4444.svg", order: 5, mount: mountProResAlphaTool },
-  { id: "video-upscale", title: "超分", description: "视频超分处理入口，具体功能即将加入。", cover: "/assets/tools/video-upscale.svg", order: 6, mount: null },
+  { id: "video-upscale", title: "超分", description: "2 倍超分后按源视频的宽高和帧率输出，支持本机和集群处理。", cover: "/assets/tools/video-upscale.svg?v=2", order: 6, mount: mountVideoUpscaleTool },
   { id: "folder-concat", title: "文件夹拼接", description: "选择两个文件夹，批量拼接视频。", cover: "/assets/tools/folder-concat.svg", order: 10, mount: mountFolderConcatTool },
   { id: "batch-dedup", title: "批量去重", description: "选择文件夹，逐条应用现有视觉去重效果。", cover: "/assets/tools/batch-dedup.svg", order: 20, mount: mountBatchDedupTool },
 ];
 let toolboxCleanup = null;
 let proresAlphaJobId = null;
+let videoUpscaleJobId = null;
 
 function normalizePathInput(value) {
   const normalized = String(value ?? "").trim();
@@ -185,6 +189,7 @@ async function api(path, options = {}) {
     const error = new Error(detail);
     error.status = response.status;
     error.detail = payloadDetail;
+    if (response.status === 401 && !path.startsWith("/auth/")) showLogin();
     throw error;
   }
   return response.json();
@@ -200,7 +205,7 @@ function toast(message, error = false) {
 }
 
 function renderCurrentUser() {
-  const name = state.user?.display_name || "设置用户名";
+  const name = state.user?.display_name || "未登录";
   const device = state.device?.device_name || "用于配置协作锁";
   $("#userProfileName").textContent = name;
   $("#userProfileBtn .user-avatar").textContent = state.user?.display_name?.trim()?.[0] || "?";
@@ -209,29 +214,31 @@ function renderCurrentUser() {
 
 async function loadCurrentUser() {
   try {
-    const result = await api("/users/me");
+    const result = await api("/auth/me");
     state.user = result.user;
     state.device = result.device;
     renderCurrentUser();
-    if (!result.configured) openUserProfile(true);
+    renderToolbox();
   } catch (error) {
-    toast(error.message, true);
+    showLogin();
   }
 }
 
 function openUserProfile(required = false) {
   $("#userProfileModal").dataset.required = required ? "true" : "false";
-  $("#userDisplayNameInput").value = state.user?.display_name || "";
-  $("#switchUserProfileBtn").classList.toggle("hidden", !state.user);
+  $("#accountSummary").textContent = `${state.user?.display_name || ""} · ${state.user?.username || ""} · ${state.user?.role === "admin" ? "管理员" : "普通用户"}${required ? " · 请先修改初始密码" : ""}`;
+  $("#currentPasswordInput").value = "";
+  $("#newPasswordInput").value = "";
+  $("#switchUserProfileBtn").classList.toggle("hidden", required);
   $$('[data-close-user-profile]').forEach(element => element.classList.toggle("hidden", required));
   $("#userProfileModal").classList.add("open");
   $("#userProfileModal").setAttribute("aria-hidden", "false");
-  requestAnimationFrame(() => $("#userDisplayNameInput").focus());
+  requestAnimationFrame(() => $("#currentPasswordInput").focus());
 }
 
 function closeUserProfile() {
-  if ($("#userProfileModal").dataset.required === "true" && !state.user) {
-    toast("请先输入用户名", true);
+  if ($("#userProfileModal").dataset.required === "true") {
+    toast("请先修改初始密码", true);
     return;
   }
   $("#userProfileModal").classList.remove("open");
@@ -244,26 +251,16 @@ async function saveUserProfile(switchUser) {
     toast("请先保存或关闭正在编辑的配置", true);
     return;
   }
-  const name = $("#userDisplayNameInput").value.trim();
-  if (!name) {
-    toast("请输入用户名", true);
-    $("#userDisplayNameInput").focus();
+  if (switchUser) {
+    await api("/auth/logout", { method: "POST" }).catch(() => {});
+    window.location.reload();
     return;
   }
-  if (switchUser && state.user && !window.confirm(`切换为新用户“${name}”？`)) return;
   const button = switchUser ? $("#switchUserProfileBtn") : $("#saveUserProfileBtn");
   button.disabled = true;
   try {
-    const result = await api("/users/me", {
-      method: "PUT",
-      body: JSON.stringify({ display_name: name, switch_user: switchUser }),
-    });
-    state.user = result.user;
-    state.device = result.device;
-    renderCurrentUser();
-    $("#userProfileModal").dataset.required = "false";
-    closeUserProfile();
-    toast(switchUser ? `已切换为 ${name}` : `用户名已保存为 ${name}`);
+    await api("/auth/password", { method: "POST", body: JSON.stringify({ old_password: $("#currentPasswordInput").value, new_password: $("#newPasswordInput").value }) });
+    window.location.reload();
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -273,9 +270,32 @@ async function saveUserProfile(switchUser) {
 
 function ensureCurrentUser() {
   if (state.user) return true;
-  openUserProfile(true);
-  toast("请先输入用户名", true);
+  showLogin();
   return false;
+}
+
+function showLogin() {
+  $("#loginOverlay").classList.remove("hidden");
+  api("/auth/status").then(status => {
+    $("#loginHint").textContent = status.initialized === false
+      ? "尚未设置管理员。请在受控电脑运行 smartstitch --bootstrap-admin，再返回登录。"
+      : "请输入管理员分配的账号和密码。";
+  }).catch(() => {});
+}
+
+async function submitLogin(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const fields = new FormData(form);
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    await api("/auth/login", { method: "POST", body: JSON.stringify({ username: fields.get("username"), password: fields.get("password") }) });
+    window.location.reload();
+  } catch (error) {
+    $("#loginError").textContent = error.message;
+    $("#loginError").classList.remove("hidden");
+  } finally { button.disabled = false; }
 }
 
 function configLeaseHeaders(lease = state.configLease, configHash = state.configHash) {
@@ -515,13 +535,14 @@ function statusInfo(status) {
 
 async function init() {
   bindEvents();
-  renderToolbox();
   try {
     const health = await api("/system/health");
     $("#healthDot").classList.add("ok");
     $("#healthText").textContent = health.ffmpeg ? `FFmpeg 已就绪 · v${health.version}` : "FFmpeg 未找到";
   } catch (error) { $("#healthText").textContent = "后端连接失败"; }
   await loadCurrentUser();
+  if (!state.user) return;
+  if (state.user.must_change_password) { openUserProfile(true); return; }
   await loadConfigs();
   await Promise.all([loadJobs(), loadSliceJobs()]);
   connectSliceJobEvents();
@@ -646,9 +667,7 @@ function bindEvents() {
   $("#userProfileBtn").addEventListener("click", () => openUserProfile(false));
   $("#saveUserProfileBtn").addEventListener("click", () => saveUserProfile(false));
   $("#switchUserProfileBtn").addEventListener("click", () => saveUserProfile(true));
-  $("#userDisplayNameInput").addEventListener("keydown", event => {
-    if (event.key === "Enter") saveUserProfile(false);
-  });
+  $("#loginForm").addEventListener("submit", submitLogin);
   $$('[data-close-user-profile]').forEach(element => element.addEventListener("click", closeUserProfile));
   $$(".config-mode-tab").forEach(button => button.addEventListener("click", () => setConfigMode(button.dataset.configMode)));
   $$('[data-close-modal]').forEach(element => element.addEventListener("click", () => closeConfig()));
@@ -669,21 +688,28 @@ async function switchView(view) {
   if (previousView === "toolbox" && view !== "toolbox") closeToolboxTool(false);
   $("#timelineSliceQueue").classList.toggle("hidden", view !== "timeline");
   if (view === "assets" && previousView !== "assets") await openAssetWeightEditor();
-  if (view === "jobs") loadJobs();
+  if (view === "jobs") {
+    loadJobs();
+    if (!state.workerAttemptTimer) state.workerAttemptTimer = setInterval(loadWorkerAttempts, 3000);
+  } else if (state.workerAttemptTimer) {
+    clearInterval(state.workerAttemptTimer);
+    state.workerAttemptTimer = null;
+  }
   if (view === "timeline") refreshTimelineConfig();
 }
 
 function renderToolbox() {
   const grid = $("#toolboxGrid");
   grid.replaceChildren();
-  if (!toolboxTools.length) {
+  const visibleTools = toolboxTools.filter(tool => !tool.adminOnly || state.user?.role === "admin");
+  if (!visibleTools.length) {
     const empty = document.createElement("div");
     empty.className = "toolbox-empty";
     empty.innerHTML = "<strong>工具即将加入</strong><span>新的小工具会显示在这里。</span>";
     grid.append(empty);
     return;
   }
-  [...toolboxTools].sort((a, b) => a.order - b.order).forEach(tool => {
+  [...visibleTools].sort((a, b) => a.order - b.order).forEach(tool => {
     const available = typeof tool.mount === "function";
     const card = document.createElement("button");
     card.type = "button";
@@ -707,7 +733,7 @@ function renderToolbox() {
     description.textContent = tool.description;
     const status = document.createElement("span");
     status.className = "toolbox-card-status";
-    status.textContent = available ? (tool.protected ? "密码保护 · 打开 →" : "打开工具 →") : "即将加入";
+    status.textContent = available ? "打开工具 →" : "即将加入";
     body.append(title, description, status);
     card.append(cover, body);
     grid.append(card);
@@ -715,43 +741,18 @@ function renderToolbox() {
 }
 
 function mountClusterControlTool(container) {
-  let token = "";
   let disposed = false;
   let timer = null;
   let updating = false;
-  const form = document.createElement("form");
+  const form = document.createElement("div");
   form.className = "cluster-gate";
-  form.innerHTML = `
-    <strong>输入集群控制密码</strong>
-    <p>解锁后可启用本机工作节点、连接其他电脑并创建集群渲染任务。</p>
-    <label class="field"><span>密码</span><input type="password" required autocomplete="off" aria-label="集群控制密码" autofocus /></label>
-    <button class="button primary" type="submit">解锁</button>
-    <small class="cluster-gate-error hidden" role="alert"></small>
-  `;
+  form.innerHTML = `<p>正在加载集群控制…</p><small class="cluster-gate-error hidden" role="alert"></small>`;
   container.append(form);
-  const input = form.querySelector("input");
-  const button = form.querySelector("button");
   const error = form.querySelector(".cluster-gate-error");
-  form.addEventListener("submit", async event => {
-    event.preventDefault();
-    const password = input.value;
-    input.value = "";
-    button.disabled = true;
+  const start = async () => {
     error.classList.add("hidden");
     try {
-      const unlock = await api("/tools/cluster-control/unlock", {
-        method: "POST", body: JSON.stringify({ password }),
-      });
-      token = unlock.access_token;
-      if (disposed) {
-        api("/tools/cluster-control/lock", {
-          method: "POST", headers: { Authorization: `Bearer ${token}` },
-        }).catch(() => {});
-        return;
-      }
-      const status = await api("/tools/cluster-control/status", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const status = await api("/tools/cluster-control/status");
       if (disposed) return;
       const panel = document.createElement("div");
       panel.className = "cluster-control-tool";
@@ -762,8 +763,8 @@ function mountClusterControlTool(container) {
           <section class="cluster-control-card"><h3>连接工作机</h3>
             <form data-cluster-node-form class="cluster-control-form">
               <label class="field"><span>工作机地址</span><input name="url" required placeholder="http://剪辑室-Mac.local:端口"></label>
-              <label class="field"><span>工作机令牌</span><input name="token" required type="password" autocomplete="off" placeholder="粘贴工作机显示的随机令牌"></label>
-              <p class="cluster-control-hint">先在另一台电脑启用“本机工作机”，复制那里显示的 32 位令牌。它不是解锁本页面的密码。</p>
+              <label class="field"><span>工作机令牌（可选）</span><input name="token" type="password" autocomplete="one-time-code" placeholder="对方开启令牌保护时填写"></label>
+              <p class="cluster-control-hint">局域网工作机默认无需令牌；如果对方开启了令牌保护，再粘贴其显示的令牌。</p>
               <div class="actions"><button class="button secondary small" type="button" data-cluster-discover>搜索局域网</button><button class="button primary small" type="submit">连接工作机</button></div>
             </form><div data-cluster-discovered></div><div data-cluster-nodes></div>
           </section>
@@ -784,8 +785,7 @@ function mountClusterControlTool(container) {
       const configs = await api("/configs");
       configSelect.innerHTML = configs.filter(config => config.valid).map(config => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name)}</option>`).join("");
       if (state.configId && configs.some(config => config.id === state.configId && config.valid)) configSelect.value = state.configId;
-      const auth = () => ({ Authorization: `Bearer ${token}` });
-      const clusterApi = (path, options = {}) => api(`/tools/cluster-control${path}`, { ...options, headers: { ...auth(), ...(options.headers || {}) } });
+      const clusterApi = (path, options = {}) => api(`/tools/cluster-control${path}`, options);
       const showError = cause => {
         const box = panel.querySelector("[data-cluster-error]");
         box.textContent = cause.message || String(cause);
@@ -802,7 +802,10 @@ function mountClusterControlTool(container) {
           panel.querySelector("[data-cluster-worker]").innerHTML = `
             <p>${worker.enabled ? `<span class="cluster-live">已上线</span> · 端口 ${worker.port} · 正在渲染 ${worker.active}/${worker.capacity}` : "当前未作为工作机上线"}</p>
             ${worker.startup_error ? `<p class="cluster-control-error">自动上线失败：${escapeHtml(worker.startup_error)}</p>` : ""}
-            ${worker.enabled ? `<p>${worker.display_name ? `${escapeHtml(worker.display_name)} · ` : ""}节点：${escapeHtml(worker.name)} · 令牌：<button class="cluster-token" type="button" data-cluster-copy-token title="点击复制令牌" aria-label="复制工作机令牌">${escapeHtml(worker.token)}</button></p><p>供主控连接的地址：<code>http://${escapeHtml(workerHost)}:${worker.port}</code></p>` : ""}
+            ${worker.enabled ? `<p>${worker.display_name ? `${escapeHtml(worker.display_name)} · ` : ""}节点：${escapeHtml(worker.name)}</p><p>供主控连接的地址：<code>http://${escapeHtml(workerHost)}:${worker.port}</code></p>` : ""}
+            <p>令牌保护：${worker.token_required ? "已开启" : "已关闭（局域网内可直接连接）"}</p>
+            ${worker.token_required ? `<p>工作机令牌：<button class="cluster-token" type="button" data-cluster-copy-token title="点击复制令牌" aria-label="复制工作机令牌">${escapeHtml(worker.token)}</button></p>` : ""}
+            <button class="button secondary small" type="button" data-cluster-token-toggle="${worker.token_required ? "off" : "on"}">${worker.token_required ? "关闭令牌保护" : "开启令牌保护"}</button>
             <button class="button secondary small" type="button" data-cluster-worker-toggle="${worker.enabled ? "stop" : "start"}">${worker.enabled ? "下线本机工作机" : "启用本机工作机"}</button>`;
           panel.querySelector("[data-cluster-nodes]").innerHTML = data.nodes.length ? data.nodes.map(node => `
             <div class="cluster-node-row"><div><strong>${node.display_name ? `${escapeHtml(node.display_name)} · ` : ""}${escapeHtml(node.name)}</strong><small>${escapeHtml(node.url)} · ${node.online ? `在线 · ${node.active}/${node.capacity} 正在渲染` : "离线"}</small></div><button class="text-btn" type="button" data-cluster-remove="${escapeHtml(node.node_id)}">移除</button></div>`).join("") : "<p>尚未连接工作机。</p>";
@@ -812,7 +815,7 @@ function mountClusterControlTool(container) {
         finally { updating = false; }
       };
       panel.addEventListener("click", async event => {
-        const action = event.target.closest("[data-cluster-copy-token], [data-cluster-worker-toggle], [data-cluster-discover], [data-cluster-remove], [data-cluster-cancel], [data-cluster-delete], [data-cluster-detail], [data-cluster-found]");
+        const action = event.target.closest("[data-cluster-copy-token], [data-cluster-token-toggle], [data-cluster-worker-toggle], [data-cluster-discover], [data-cluster-remove], [data-cluster-cancel], [data-cluster-delete], [data-cluster-detail], [data-cluster-found]");
         if (!action) return;
         try {
           if (action.hasAttribute("data-cluster-copy-token")) {
@@ -833,16 +836,28 @@ function mountClusterControlTool(container) {
             }
             toast("工作机令牌已复制");
             return;
+          } else if (action.dataset.clusterTokenToggle) {
+            await clusterApi("/worker/token-protection", { method: "POST", body: JSON.stringify({ enabled: action.dataset.clusterTokenToggle === "on" }) });
           } else if (action.dataset.clusterWorkerToggle) {
             await clusterApi(`/worker/${action.dataset.clusterWorkerToggle}`, { method: "POST" });
           } else if (action.hasAttribute("data-cluster-discover")) {
             action.disabled = true;
             const found = await clusterApi("/discover");
-            panel.querySelector("[data-cluster-discovered]").innerHTML = found.length ? found.map(node => `<button class="text-btn cluster-found" type="button" data-cluster-found="${escapeHtml(node.url)}">${escapeHtml(node.name)} · ${escapeHtml(node.url)}</button>`).join("") : "<p>没有发现工作机，可手动填写地址。</p>";
+            panel.querySelector("[data-cluster-discovered]").innerHTML = found.length ? found.map(node => `<button class="text-btn cluster-found" type="button" data-cluster-found="${escapeHtml(node.url)}">连接 ${escapeHtml(node.name)} · ${escapeHtml(node.url)}</button>`).join("") : "<p>没有发现工作机，可手动填写地址。</p>";
             action.disabled = false;
           } else if (action.dataset.clusterFound) {
-            panel.querySelector('[name="url"]').value = action.dataset.clusterFound;
-            panel.querySelector('[name="token"]').focus();
+            const nodeForm = panel.querySelector("[data-cluster-node-form]");
+            nodeForm.querySelector('[name="url"]').value = action.dataset.clusterFound;
+            const workerToken = nodeForm.querySelector('[name="token"]').value.trim();
+            try {
+              await clusterApi("/nodes", { method: "POST", body: JSON.stringify({ url: action.dataset.clusterFound, token: workerToken }) });
+              nodeForm.reset();
+              panel.querySelector("[data-cluster-error]").classList.add("hidden");
+              toast("工作机已连接");
+            } catch (cause) {
+              if (!workerToken) nodeForm.querySelector('[name="token"]').focus();
+              throw cause;
+            }
           } else if (action.dataset.clusterRemove) {
             await clusterApi(`/nodes/${encodeURIComponent(action.dataset.clusterRemove)}`, { method: "DELETE" });
           } else if (action.dataset.clusterCancel) {
@@ -862,13 +877,14 @@ function mountClusterControlTool(container) {
         const nodeForm = event.currentTarget;
         const fields = new FormData(nodeForm);
         const workerToken = String(fields.get("token") || "").trim();
-        if (workerToken.length < 16) {
-          showError(new Error("工作机令牌至少需要 16 个字符。请复制工作机启用后显示的 32 位随机令牌，不要填写集群控制页面的解锁密码。"));
+        if (workerToken && workerToken.length < 16) {
+          showError(new Error("工作机令牌至少需要 16 个字符；未开启令牌保护的工作机可以留空。"));
           return;
         }
         try {
           await clusterApi("/nodes", { method: "POST", body: JSON.stringify({ url: fields.get("url"), token: workerToken }) });
           nodeForm.reset();
+          panel.querySelector("[data-cluster-error]").classList.add("hidden");
           await refresh();
         } catch (cause) { showError(cause); }
       });
@@ -893,18 +909,106 @@ function mountClusterControlTool(container) {
       if (disposed) return;
       error.textContent = cause.message;
       error.classList.remove("hidden");
-      input.focus();
-    } finally {
-      button.disabled = false;
     }
-  });
+  };
+  start();
   return () => {
     disposed = true;
     if (timer) clearInterval(timer);
-    if (token) api("/tools/cluster-control/lock", {
-      method: "POST", headers: { Authorization: `Bearer ${token}` },
-    }).catch(() => {});
   };
+}
+
+function mountUserManagementTool(container) {
+  container.innerHTML = `
+    <section class="cluster-control-card">
+      <h3>添加用户</h3>
+      <form data-user-create class="cluster-control-form">
+        <label class="field"><span>用户名（英文、数字，3–32 位）</span><input name="username" required autocomplete="off"></label>
+        <label class="field"><span>显示名称</span><input name="display_name" required maxlength="50"></label>
+        <label class="field"><span>初始密码（至少 6 位）</span><input name="password" type="password" required minlength="6" autocomplete="new-password"></label>
+        <label class="field"><span>角色</span><select name="role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label>
+        <button class="button primary" type="submit">添加用户</button>
+      </form>
+    </section>
+    <section class="cluster-control-card"><h3>用户列表</h3><div data-user-list>正在加载…</div>
+      <form data-password-reset class="cluster-control-form hidden">
+        <p data-reset-target></p>
+        <label class="field"><span>新的临时密码（至少 6 位）</span><input name="password" type="password" required minlength="6" autocomplete="new-password"></label>
+        <div class="actions"><button class="button primary small" type="submit">确认重置</button><button class="button secondary small" type="button" data-reset-cancel>取消</button></div>
+      </form>
+    </section>
+    <p class="cluster-control-error hidden" data-user-error role="alert"></p>`;
+  const errorBox = container.querySelector("[data-user-error]");
+  const resetForm = container.querySelector("[data-password-reset]");
+  const showError = error => { errorBox.textContent = error.message || String(error); errorBox.classList.remove("hidden"); };
+  const refresh = async () => {
+    try {
+      const users = await api("/admin/users");
+      container.querySelector("[data-user-list]").innerHTML = users.length ? users.map(user => `
+        <div class="cluster-node-row" data-account-id="${escapeHtml(user.account_id)}">
+          <div><strong>${escapeHtml(user.display_name)} · ${escapeHtml(user.username)}</strong>
+            <small>${user.role === "admin" ? "管理员" : "普通用户"} · ${user.status === "active" ? "已启用" : "已暂停"}${user.must_change_password ? " · 待修改初始密码" : ""}</small></div>
+          <div class="inline-actions">
+            <button class="text-btn" type="button" data-account-action="rename">修改名称</button>
+            <button class="text-btn" type="button" data-account-action="${user.status === "active" ? "suspend" : "enable"}">${user.status === "active" ? "暂停" : "恢复"}</button>
+            <button class="text-btn" type="button" data-account-action="${user.role === "admin" ? "demote" : "promote"}">${user.role === "admin" ? "撤销管理员" : "设为管理员"}</button>
+            <button class="text-btn" type="button" data-account-action="reset_password">重置密码</button>
+            <button class="text-btn danger-text" type="button" data-account-action="delete">删除</button>
+          </div>
+        </div>`).join("") : "<p>暂无用户。</p>";
+    } catch (error) { showError(error); }
+  };
+  container.querySelector("[data-user-create]").addEventListener("submit", async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const fields = Object.fromEntries(new FormData(form));
+    try {
+      await api("/admin/users", { method: "POST", body: JSON.stringify(fields) });
+      form.reset();
+      errorBox.classList.add("hidden");
+      await refresh();
+      toast("用户已添加");
+    } catch (error) { showError(error); }
+  });
+  container.querySelector("[data-user-list]").addEventListener("click", async event => {
+    const button = event.target.closest("[data-account-action]");
+    if (!button) return;
+    const accountId = button.closest("[data-account-id]")?.dataset.accountId;
+    const action = button.dataset.accountAction;
+    let value = null;
+    if (action === "reset_password") {
+      resetForm.dataset.accountId = accountId;
+      resetForm.querySelector("[data-reset-target]").textContent = `重置 ${button.closest("[data-account-id]").querySelector("strong").textContent} 的密码。用户下次登录后必须修改密码。`;
+      resetForm.classList.remove("hidden");
+      resetForm.querySelector('[name="password"]').focus();
+      return;
+    } else if (action === "rename") {
+      value = window.prompt("输入新的显示名称");
+      if (value === null) return;
+    } else if (!window.confirm(`确认${button.textContent}该用户？`)) return;
+    button.disabled = true;
+    try {
+      await api(`/admin/users/${encodeURIComponent(accountId)}/actions`, { method: "POST", body: JSON.stringify({ action, value }) });
+      errorBox.classList.add("hidden");
+      await refresh();
+      toast("用户已更新");
+    } catch (error) { showError(error); button.disabled = false; }
+  });
+  resetForm.querySelector("[data-reset-cancel]").addEventListener("click", () => { resetForm.reset(); resetForm.classList.add("hidden"); });
+  resetForm.addEventListener("submit", async event => {
+    event.preventDefault();
+    const accountId = resetForm.dataset.accountId;
+    const value = resetForm.querySelector('[name="password"]').value;
+    try {
+      await api(`/admin/users/${encodeURIComponent(accountId)}/actions`, { method: "POST", body: JSON.stringify({ action: "reset_password", value }) });
+      resetForm.reset();
+      resetForm.classList.add("hidden");
+      errorBox.classList.add("hidden");
+      await refresh();
+      toast("密码已重置");
+    } catch (error) { showError(error); }
+  });
+  refresh();
 }
 
 function openToolboxTool(id) {
@@ -1012,6 +1116,193 @@ function mountFolderConcatTool(container) {
     } catch (error) { toast(error.message, true); button.disabled = false; }
   });
   return () => { disposed = true; };
+}
+
+function mountVideoUpscaleTool(container) {
+  let disposed = false;
+  let timer = null;
+  let preview = null;
+  let job = null;
+  let model = null;
+  container.innerHTML = `<div class="prores-tool">
+    <label id="upscaleSourceRow" class="field"><span>源视频</span><div class="directory-picker-row">
+      <input id="upscaleSource" type="text" data-path-input placeholder="选择或粘贴 MP4、MOV、M4V、MKV 文件路径">
+      <button id="upscaleChooseVideo" class="button secondary small" type="button">选择视频</button>
+    </div></label>
+    <label id="upscaleOutputRow" class="field"><span>输出文件夹 <small>留空则保存在源视频旁边</small></span><div class="directory-picker-row">
+      <input id="upscaleOutput" type="text" data-path-input placeholder="可选择输出文件夹">
+      <button id="upscaleChooseOutput" class="button secondary small" type="button">选择文件夹</button>
+    </div></label>
+    <label class="field"><span>超分模型</span><select id="upscaleModelSelect"><option value="x2plus">x2plus · 通用/3D（原生 2 倍）</option><option value="animevideo">animevideo · 2D 动漫视频（原生 4 倍）</option></select></label>
+    <label class="field"><span>执行位置</span><select id="upscaleMode"><option value="local">本机</option><option value="cluster">渲染集群</option></select></label>
+    <div id="upscaleNas" class="toolbox-intro" hidden></div>
+    <div id="upscaleNodes" class="toolbox-intro" hidden></div>
+    <p class="toolbox-intro">x2plus 适合数字人和欧美风格 3D 动画；animevideo 适合线条、平涂为主的 2D 动漫。按所选模型原生倍率推理后缩回源视频宽高，输出帧率跟随源视频，保留音频并生成独立 MP4。</p>
+    <div id="upscaleModel" class="toolbox-intro"></div>
+    <div class="actions"><button id="upscalePreview" class="button secondary" type="button">预检视频</button><button id="upscaleStart" class="button primary" type="button" disabled>开始超分</button></div>
+    <div id="upscalePreviewResult" aria-live="polite"></div>
+    <div id="upscaleResult" aria-live="polite"></div>
+  </div>`;
+  const source = container.querySelector("#upscaleSource");
+  const output = container.querySelector("#upscaleOutput");
+  const modelBox = container.querySelector("#upscaleModel");
+  const modelSelect = container.querySelector("#upscaleModelSelect");
+  const mode = container.querySelector("#upscaleMode");
+  const nasBox = container.querySelector("#upscaleNas");
+  const sourceRow = container.querySelector("#upscaleSourceRow");
+  const outputRow = container.querySelector("#upscaleOutputRow");
+  const previewButton = container.querySelector("#upscalePreview");
+  const nodesBox = container.querySelector("#upscaleNodes");
+  let clusterNodes = [];
+  const previewBox = container.querySelector("#upscalePreviewResult");
+  const resultBox = container.querySelector("#upscaleResult");
+  const startButton = container.querySelector("#upscaleStart");
+  const terminal = new Set(["completed", "partial_failed", "failed", "cancelled", "interrupted"]);
+  const sourcePath = () => normalizePathInput(source.value);
+  const outputPath = () => normalizePathInput(output.value) || null;
+  const selectedModel = () => modelSelect.value;
+  const modelReadyOnNode = node => node.online && node.video_upscale?.models?.[selectedModel()]?.available;
+  const canRun = () => mode.value === "cluster" ? clusterNodes.some(modelReadyOnNode) && preview?.pending_count > 0 && !preview?.invalid_count : Boolean(model?.available && model.model === selectedModel());
+  const refreshNodes = async () => {
+    if (mode.value !== "cluster") { nodesBox.hidden = true; return; }
+    nodesBox.hidden = false;
+    try {
+      clusterNodes = await api("/tools/video-upscale/nodes");
+      const readyCount = clusterNodes.filter(modelReadyOnNode).length;
+      nodesBox.innerHTML = clusterNodes.length ? `${escapeHtml(selectedModel())} 可用工作机：${readyCount} 台${readyCount === 1 ? "；单台工作机没有并行提速" : ""}<br>${clusterNodes.map(node => `${escapeHtml(node.name || node.node_id)}：${node.online ? modelReadyOnNode(node) ? "所选模型就绪" : "所选模型未安装" : "离线"}`).join("<br>")}` : "尚未添加工作机，请先到集群控制页连接。";
+    } catch (error) { nodesBox.textContent = error.message; clusterNodes = []; }
+    startButton.disabled = !preview || !canRun() || Boolean(job && !terminal.has(job.status));
+  };
+  const refreshNas = async () => {
+    if (mode.value !== "cluster") return;
+    nasBox.textContent = "正在扫描 NAS 原素材…";
+    try {
+      const result = await api(`/tools/video-upscale/nas?model=${encodeURIComponent(selectedModel())}`);
+      if (disposed || mode.value !== "cluster" || result.model !== selectedModel()) return;
+      preview = result;
+      nasBox.innerHTML = `<strong>NAS 集群批次</strong><br>原素材：${escapeHtml(result.source_directory)}<br>已处理：${escapeHtml(result.output_directory)}<br>待处理 ${result.pending_count} 条 · 已有结果 ${result.skipped_count} 条 · 不可处理 ${result.invalid_count} 条`;
+      previewBox.innerHTML = result.items.length ? `<section class="prores-result">${result.items.slice(0, 30).map(item => `<p>${escapeHtml(item.name)} · ${item.status === "pending" ? `${item.width}×${item.height} · ${escapeHtml(item.fps)} fps · ${item.frames} 帧` : item.status === "skipped" ? "已有同模型结果，跳过" : `不可处理：${escapeHtml(item.error || "未知原因")}`}</p>`).join("")}${result.items.length > 30 ? `<p>另有 ${result.items.length - 30} 条</p>` : ""}</section>` : "<p>原素材文件夹中没有视频。</p>";
+      startButton.disabled = !canRun() || Boolean(job && !terminal.has(job.status));
+    } catch (error) { preview = null; nasBox.textContent = error.message; previewBox.replaceChildren(); startButton.disabled = true; }
+  };
+  const updateMode = () => {
+    const clusterMode = mode.value === "cluster";
+    sourceRow.hidden = clusterMode; outputRow.hidden = clusterMode; nasBox.hidden = !clusterMode;
+    modelBox.hidden = clusterMode;
+    previewButton.textContent = clusterMode ? "刷新 NAS 视频" : "预检视频";
+    preview = null; previewBox.replaceChildren(); startButton.disabled = true;
+    refreshNodes();
+    if (clusterMode) refreshNas();
+  };
+  mode.addEventListener("change", updateMode);
+  const renderModel = () => {
+    if (!model || disposed || model.model !== selectedModel()) return;
+    const label = escapeHtml(selectedModel());
+    const size = selectedModel() === "animevideo" ? "约 1.1 MB" : "约 30 MB";
+    modelBox.innerHTML = model.available ? `<span class="cluster-live">${label} 模型已就绪</span>` :
+      `${model.platform_supported ? `本机尚未安装 ${label} 模型。` : "当前设备不支持 CoreML 超分。"} ${model.platform_supported ? `<button id="upscaleDownloadModel" class="button secondary small" type="button">下载官方模型（${size}）</button>` : ""}`;
+    modelBox.querySelector("#upscaleDownloadModel")?.addEventListener("click", async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      button.textContent = "正在下载和校验…";
+      try {
+        model = await api("/tools/video-upscale/model", { method: "POST", body: JSON.stringify({ model: selectedModel() }) });
+        renderModel();
+        startButton.disabled = !preview || !canRun() || Boolean(job && !terminal.has(job.status));
+      } catch (error) { toast(error.message, true); button.disabled = false; button.textContent = "重试下载模型"; }
+    });
+  };
+  const loadModel = async () => {
+    const requested = selectedModel();
+    modelBox.textContent = "检查模型中…";
+    try {
+      const value = await api(`/tools/video-upscale/model?model=${encodeURIComponent(requested)}`);
+      if (!disposed && requested === selectedModel()) { model = value; renderModel(); startButton.disabled = !preview || !canRun() || Boolean(job && !terminal.has(job.status)); }
+    } catch (error) { if (!disposed && requested === selectedModel()) modelBox.textContent = error.message; }
+  };
+  modelSelect.addEventListener("change", () => {
+    model = null; preview = null; previewBox.replaceChildren(); startButton.disabled = true;
+    loadModel(); refreshNodes(); if (mode.value === "cluster") refreshNas();
+  });
+  loadModel();
+  const renderJob = () => {
+    if (!job || disposed) return;
+    const running = !terminal.has(job.status);
+    startButton.disabled = running || !preview || !canRun();
+    resultBox.innerHTML = `<section class="prores-result"><strong>${job.status === "completed" ? "超分完成" : ["failed", "partial_failed"].includes(job.status) ? "超分失败" : job.status === "cancelled" ? "已取消" : "正在超分"} · ${job.processed_frames}/${job.total_frames} 帧</strong>
+      <progress value="${job.processed_frames}" max="${job.total_frames}"></progress>
+      <p>阶段：${escapeHtml(job.phase || "等待中")}</p>
+      ${job.kind === "batch" ? `<p>NAS 批次：完成 ${job.completed_files}/${job.total_files} 条，失败 ${job.failed_files} 条</p><p>输出目录：${escapeHtml(job.output_directory)}</p>${job.items.map(item => `<p>${escapeHtml(item.name)} · ${escapeHtml(item.status)}${item.error ? ` · ${escapeHtml(item.error)}` : ""}</p>`).join("")}` : ""}
+      ${job.model ? `<p>模型：${escapeHtml(job.model)} · 原生 ${escapeHtml(String(job.scale || 2))} 倍后回缩</p>` : ""}
+      ${job.width && job.height && job.fps ? `<p>输出规格：${escapeHtml(String(job.width))}×${escapeHtml(String(job.height))} · ${escapeHtml(String(job.fps))} fps（取自源视频）</p>` : ""}
+      ${job.output_path ? `<p>输出：${escapeHtml(job.output_path)}</p>` : ""}
+      ${job.error ? `<p class="field-validation">${escapeHtml(job.error)}</p>` : ""}
+      ${running ? '<button id="upscaleCancel" class="button secondary small" type="button">取消任务</button>' : ""}
+    </section>`;
+    resultBox.querySelector("#upscaleCancel")?.addEventListener("click", async event => {
+      event.currentTarget.disabled = true;
+      try { job = await api(`/tools/video-upscale/${encodeURIComponent(job.id)}/cancel`, { method: "POST" }); renderJob(); }
+      catch (error) { toast(error.message, true); }
+    });
+  };
+  const refresh = async () => {
+    if (!videoUpscaleJobId || disposed) return;
+    try {
+      job = await api(`/tools/video-upscale/${encodeURIComponent(videoUpscaleJobId)}`);
+      renderJob();
+      if (terminal.has(job.status)) { clearInterval(timer); timer = null; }
+    } catch (error) { if (!disposed) resultBox.textContent = error.message; }
+  };
+  const scheduleRefresh = () => { clearInterval(timer); timer = setInterval(refresh, 1000); refresh(); };
+  source.addEventListener("input", () => { preview = null; previewBox.replaceChildren(); startButton.disabled = true; });
+  container.querySelector("#upscaleChooseVideo").addEventListener("click", async event => {
+    const button = event.currentTarget; button.disabled = true;
+    try {
+      const selected = await api("/system/video-file-picker", { method: "POST" });
+      if (!selected.cancelled) { source.value = selected.path; source.dispatchEvent(new Event("input")); }
+    } catch (error) { toast(error.message, true); }
+    finally { button.disabled = false; }
+  });
+  container.querySelector("#upscaleChooseOutput").addEventListener("click", async event => {
+    const button = event.currentTarget; button.disabled = true;
+    try {
+      const selected = await api("/system/directory-picker", { method: "POST" });
+      if (!selected.cancelled) output.value = selected.path;
+    } catch (error) { toast(error.message, true); }
+    finally { button.disabled = false; }
+  });
+  previewButton.addEventListener("click", async event => {
+    if (mode.value === "cluster") { event.currentTarget.disabled = true; try { await refreshNas(); await refreshNodes(); } finally { event.currentTarget.disabled = false; } return; }
+    if (!sourcePath()) return toast("请先选择视频", true);
+    const button = event.currentTarget; button.disabled = true;
+    try {
+      preview = await api("/tools/video-upscale/preview", { method: "POST", body: JSON.stringify({ source: sourcePath(), model: selectedModel() }) });
+      if (disposed) return;
+      previewBox.innerHTML = `<section class="prores-result"><strong>${escapeHtml(String(preview.width))}×${escapeHtml(String(preview.height))} · ${preview.frames} 帧 · ${preview.duration.toFixed(2)} 秒</strong><p>本次输出：${escapeHtml(String(preview.width))}×${escapeHtml(String(preview.height))} · ${escapeHtml(preview.fps)} fps · ${preview.has_audio ? "保留音频" : "无音频"}</p></section>`;
+      if (mode.value === "cluster") await refreshNodes();
+      startButton.disabled = !canRun() || Boolean(job && !terminal.has(job.status));
+    } catch (error) { preview = null; toast(error.message, true); }
+    finally { button.disabled = false; }
+  });
+  startButton.addEventListener("click", async () => {
+    if (mode.value === "cluster") {
+      if (!preview || preview.model !== selectedModel() || !preview.pending_count || preview.invalid_count) return toast("请刷新 NAS 视频", true);
+    } else if (!preview || preview.source !== sourcePath() || preview.model.model !== selectedModel()) return toast("请重新预检视频", true);
+    startButton.disabled = true;
+    try {
+      job = await api("/tools/video-upscale", { method: "POST", body: JSON.stringify({ source: mode.value === "cluster" ? null : sourcePath(), output_directory: mode.value === "cluster" ? null : outputPath(), mode: mode.value, model: selectedModel() }) });
+      videoUpscaleJobId = job.id;
+      renderJob();
+      scheduleRefresh();
+    } catch (error) { toast(error.message, true); startButton.disabled = false; }
+  });
+  api("/tools/video-upscale/latest").then(latest => {
+    if (disposed || !latest) return;
+    if (latest.kind === "batch") { mode.value = "cluster"; updateMode(); }
+    job = latest; videoUpscaleJobId = latest.id; renderJob();
+    if (!terminal.has(job.status)) scheduleRefresh();
+  }).catch(() => {});
+  return () => { disposed = true; clearInterval(timer); };
 }
 
 function mountProResAlphaTool(container) {
@@ -3699,7 +3990,50 @@ async function startJob() {
 }
 
 async function loadJobs() {
-  try { state.jobs = await api("/jobs"); renderJobs(); } catch (error) { toast(error.message, true); }
+  try {
+    [state.jobs, state.workerAttempts] = await Promise.all([
+      api("/jobs"), api("/tools/cluster-worker/attempts"),
+    ]);
+    renderJobs();
+    renderWorkerAttempts();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function loadWorkerAttempts() {
+  if (!$("#jobsView")?.classList.contains("active")) return;
+  try {
+    state.workerAttempts = await api("/tools/cluster-worker/attempts");
+    renderWorkerAttempts();
+  } catch (error) {
+    if (error.status === 401) {
+      clearInterval(state.workerAttemptTimer);
+      state.workerAttemptTimer = null;
+    } else toast(error.message, true);
+  }
+}
+
+function renderWorkerAttempts() {
+  const list = $("#workerAttemptList");
+  const expanded = new Set([...list.querySelectorAll("details[open]")].map(row => row.dataset.attemptId));
+  if (!state.workerAttempts.length) {
+    list.innerHTML = '<p class="worker-attempt-empty">本机尚未接收集群工作任务。</p>';
+    return;
+  }
+  list.innerHTML = state.workerAttempts.map(attempt => {
+    const upscale = attempt.kind === "video_upscale";
+    const [label, cls] = statusInfo(attempt.status);
+    const progress = Math.max(0, Math.min(100, Number(attempt.progress || 0) * 100));
+    const title = upscale ? "视频超分工作段" : (attempt.config_name || "集群渲染条目");
+    const detail = upscale && Number.isInteger(attempt.start_frame)
+      ? `帧 ${attempt.start_frame}–${attempt.end_frame}` : `条目 ${attempt.item_index ?? "?"}`;
+    return `<details class="worker-attempt-record" data-attempt-id="${escapeHtml(attempt.attempt_id)}" ${expanded.has(attempt.attempt_id) ? "open" : ""}>
+      <summary><div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(attempt.output_name || detail)} · ${escapeHtml(formatDate(attempt.created_at || attempt.updated_at))} · #${escapeHtml(attempt.attempt_id.slice(0, 8))}</small></div><span class="status ${cls}">${escapeHtml(label)}</span></summary>
+      <div class="worker-attempt-detail"><p>本机执行进度：${progress.toFixed(1)}%</p><div class="mini-progress"><i style="width:${progress}%"></i></div>
+        <p>主控批次：${escapeHtml(attempt.batch_id || "未知")} · ${escapeHtml(detail)}</p>
+        ${attempt.error ? `<p class="error-text">${escapeHtml(attempt.error)}</p>` : ""}
+        ${attempt.status === "succeeded" ? "<p>本机执行已完成，成片由主控归档。</p>" : ""}
+      </div></details>`;
+  }).join("");
 }
 
 function renderJobs() {
@@ -3711,7 +4045,7 @@ function renderJobs() {
   $("#deleteAllJobsBtn").disabled = state.jobs.length === 0;
   $("#deleteAllJobsCount").textContent = String(state.jobs.length);
   if (!state.jobs.length) hideDeleteAllJobsConfirm();
-  if (!combinedJobs.length) { list.innerHTML = `<div class="empty-state"><h3>还没有任务</h3><p>成片生成和时间线切片任务都会在这里显示。</p></div>`; return; }
+  if (!combinedJobs.length) { list.innerHTML = `<div class="empty-state"><h3>本机没有创建批次</h3><p>这台电脑接收的集群工作任务显示在下方。</p></div>`; return; }
   list.innerHTML = combinedJobs.map(job => {
     const isSlice = job.job_type === "timeline_slice";
     const [label, cls] = isSlice ? sliceJobStatusInfo(job) : statusInfo(job.status);

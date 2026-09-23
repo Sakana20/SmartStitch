@@ -16,7 +16,7 @@ def _now() -> str:
 class SQLiteStore:
     """Shared SQLite access and write coordination for all task tables."""
 
-    ALLOWED_TABLES = {"jobs", "slice_jobs", "output_sync_jobs"}
+    ALLOWED_TABLES = {"jobs", "slice_jobs", "output_sync_jobs", "upscale_jobs", "upscale_batches"}
     MAX_RECORDS_PER_TABLE = 100
     ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 
