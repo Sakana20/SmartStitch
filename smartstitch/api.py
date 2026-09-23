@@ -25,6 +25,7 @@ from .collaboration import (
     UserProfileRequiredError,
     UserProfileStore,
 )
+from .cluster_auth import ClusterAccess, ClusterUnlockRequest, SESSION_SECONDS
 from .config import ConfigError, ConfigStore
 from .database import SQLiteStore
 from .feishu import (
@@ -46,6 +47,7 @@ from .media import DisconnectSafeFileResponse
 from .models import (
     AddBenefitRequest,
     AddPoolRequest,
+    BatchDedupRequest,
     CloneConfigRequest,
     ConfigLockAcquireRequest,
     ConfigLockActionRequest,
@@ -71,6 +73,7 @@ from .models import (
     TimelineSliceRequest,
     UpdatePoolRequest,
     UserProfileUpdateRequest,
+    VisualDedupConfig,
     WeightUpdateRequest,
 )
 from .planner import PlanError, build_plan
@@ -88,7 +91,7 @@ from .scanner import probe_config_audio, scan_config, scan_source_inventory
 from .slice_jobs import SliceJobManager
 from .slicer import SliceConflictError, SliceError, TimelineSlicer
 from .timeline import TimelineAnalyzer, TimelineError, list_source_videos
-from .updater import GitHubReleaseChecker, UpdateCheckError
+from .updater import NASUpdateChecker, UpdateCheckError
 from .visual_borders import (
     VisualBorderLibrary,
     VisualBorderLibraryConflict,
@@ -215,7 +218,13 @@ def create_app(
         timeline_analyzer = TimelineAnalyzer(resolved_data_directory / "timelines")
         timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
         slice_job_manager = SliceJobManager(timeline_slicer, database_store)
-        release_checker = GitHubReleaseChecker()
+        cluster_access = ClusterAccess()
+        release_checker = NASUpdateChecker(
+            None if resolved_config_directory == local_config_directory
+            else resolved_config_directory,
+            resolved_data_directory / "updates",
+            allow_open=is_frozen(),
+        )
 
         @asynccontextmanager
         async def lifespan(_app: FastAPI):
@@ -246,6 +255,7 @@ def create_app(
     app.state.timeline_analyzer = timeline_analyzer
     app.state.timeline_slicer = timeline_slicer
     app.state.slice_job_manager = slice_job_manager
+    app.state.cluster_access = cluster_access
     app.state.release_checker = release_checker
 
     def collaboration_http_error(exc: CollaborationError) -> HTTPException:
@@ -286,6 +296,28 @@ def create_app(
             "shared_config": config_store.directory != local_config_directory,
             "config_path_mapped": config_store.has_path_alias,
         }
+
+    def cluster_token(request: Request) -> str:
+        scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+        return token.strip() if scheme.lower() == "bearer" else ""
+
+    @app.post("/api/v1/tools/cluster-control/unlock")
+    def unlock_cluster(request: ClusterUnlockRequest) -> dict[str, object]:
+        token = cluster_access.unlock(request.password.get_secret_value())
+        if token is None:
+            raise HTTPException(401, "密码错误")
+        return {"access_token": token, "expires_in": SESSION_SECONDS}
+
+    @app.get("/api/v1/tools/cluster-control/status")
+    def cluster_status(http_request: Request) -> dict[str, object]:
+        if not cluster_access.authorized(cluster_token(http_request)):
+            raise HTTPException(401, "集群控制未解锁或登录已过期")
+        return {"available": False, "message": "集群控制功能即将加入"}
+
+    @app.post("/api/v1/tools/cluster-control/lock")
+    def lock_cluster(http_request: Request) -> dict[str, bool]:
+        cluster_access.lock(cluster_token(http_request))
+        return {"locked": True}
 
     @app.get("/api/v1/system/updates")
     def check_for_updates() -> dict[str, object]:
@@ -1291,6 +1323,27 @@ def create_app(
         try:
             return job_manager.create(request)
         except (ConfigError, FileNotFoundError, PlanError, ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/batch-dedup")
+    def create_batch_dedup(request: BatchDedupRequest) -> dict[str, object]:
+        try:
+            return job_manager.create_batch_dedup(request)
+        except (ConfigError, FileNotFoundError, PlanError, ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/tools/batch-dedup/settings")
+    def get_batch_dedup_settings() -> dict[str, object]:
+        try:
+            return job_manager.get_batch_dedup_settings().model_dump(mode="json")
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.put("/api/v1/tools/batch-dedup/settings")
+    def save_batch_dedup_settings(settings: VisualDedupConfig) -> dict[str, object]:
+        try:
+            return job_manager.save_batch_dedup_settings(settings).model_dump(mode="json")
+        except OSError as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/v1/jobs")

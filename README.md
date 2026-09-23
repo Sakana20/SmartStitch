@@ -129,3 +129,16 @@ git push origin v0.1.4
 ```
 
 成功后 Release 附件名为 `SmartStitch-v0.1.4-macOS-arm64.dmg`。工作流会拒绝非 `main` 历史的 Tag、非 arm64 runner、版本不匹配、签名验证失败或包含 Homebrew 本地动态库依赖的构建。
+
+### 通过 NAS 发布应用更新
+
+客户端从已挂载的 Smartstitch NAS 配置根目录下的 `updates/latest.json` 检查版本，不查询 GitHub。发布者下载或取得已构建的 DMG 后，在连接 NAS 的 Mac 上执行：
+
+```bash
+.venv/bin/python packaging/publish_nas_update.py \
+  dist/SmartStitch-v0.1.7-macOS-arm64.dmg \
+  --nas-root /Volumes/home/Smartstitch \
+  --notes "本次更新摘要"
+```
+
+使用 `/Volumes/homes/<NAS 用户名>/Smartstitch` 挂载时，将 `--nas-root` 改为该实际路径。脚本验证 DMG，将文件完整复制到 `updates/releases/`，核对 SHA-256 后最后发布 `latest.json`。已安装的客户端会自动提示新版本，并将 DMG 复制到本机、校验后打开带拖拽安装引导的 Finder 窗口。安装时先完成任务并退出旧版，再将 SmartStitch 拖到 Applications。NAS 不可用时首页提示连接 NAS，可点击“重试”；其他功能仍可使用。详细协议见[设计文档](doc/23-NAS更新分发与DMG安装引导设计.md)。

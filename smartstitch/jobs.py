@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import csv
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -17,7 +18,7 @@ import yaml
 
 from .config import ConfigStore
 from .database import SQLiteStore
-from .models import AppConfig, JobCreateRequest
+from .models import AppConfig, BatchDedupRequest, JobCreateRequest, SourceMode, VisualDedupConfig
 from .planner import build_plan
 from .probe_cache import MediaProbeCache
 from .renderer import render_item
@@ -66,6 +67,7 @@ class JobManager:
         self.config_store = config_store
         self.data_directory = data_directory
         self.jobs_directory = data_directory / "jobs"
+        self.batch_dedup_settings_path = data_directory / "batch_dedup_settings.json"
         self.jobs_directory.mkdir(parents=True, exist_ok=True)
         shared_store = database_store or SQLiteStore(data_directory / "smartstitch.db")
         self.database = JobDatabase(shared_store)
@@ -88,20 +90,102 @@ class JobManager:
         return job
 
     def create(self, request: JobCreateRequest) -> dict[str, Any]:
-        config = self.config_store.load(request.config_id)
-        if not config.enabled:
-            raise ValueError("配置已停用")
-        if request.output_directory:
-            config.output.directory = request.output_directory
+        return self._create(request)
+
+    def create_batch_dedup(self, request: BatchDedupRequest) -> dict[str, Any]:
+        return self._create(
+            JobCreateRequest(config_id="batch-dedup", count=1),
+            dedup_source=request.source_directory,
+            dedup_visual=request.visual_dedup,
+        )
+
+    def get_batch_dedup_settings(self) -> VisualDedupConfig:
+        with self.lock:
+            if self.batch_dedup_settings_path.exists():
+                return VisualDedupConfig.model_validate(
+                    json.loads(self.batch_dedup_settings_path.read_text(encoding="utf-8"))
+                )
+        return VisualDedupConfig(enabled=True)
+
+    def save_batch_dedup_settings(self, settings: VisualDedupConfig) -> VisualDedupConfig:
+        path = self.batch_dedup_settings_path
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        with self.lock:
+            try:
+                temporary.write_text(
+                    settings.model_dump_json(indent=2), encoding="utf-8"
+                )
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return settings
+
+    def _create(
+        self, request: JobCreateRequest, *, dedup_source: str | None = None,
+        dedup_visual: VisualDedupConfig | None = None,
+    ) -> dict[str, Any]:
+        if dedup_source is not None:
+            source = Path(dedup_source).expanduser().resolve()
+            if not source.is_dir():
+                raise ValueError("源视频文件夹不存在或不是文件夹")
+            if dedup_visual is None or not dedup_visual.enabled:
+                raise ValueError("请先开启视觉去重")
+            if not any(
+                layer.enabled and layer.opacity_percent > 0
+                for layer in dedup_visual.effect_layers
+            ):
+                raise ValueError("请至少启用一个透明度大于 0 的特效层")
+            config = self._dedup_config(dedup_visual, source)
+        else:
+            config = self.config_store.load(request.config_id)
+            if not config.enabled:
+                raise ValueError("配置已停用")
+            if request.output_directory:
+                config.output.directory = request.output_directory
         global_borders = (
             self.visual_border_library.assets_for_effect_layers(config)
             if self.visual_border_library is not None
             else None
         )
         scan = scan_config(config, global_borders, self.media_probe_cache)
+        dedup_assets = []
+        if dedup_source is not None:
+            invalid = [
+                asset for asset in scan.assets.get("pool_1", [])
+                if not asset.selectable
+            ]
+            if invalid:
+                details = "；".join(
+                    f"{asset.name}: {asset.error or '不可用'}" for asset in invalid[:5]
+                )
+                raise ValueError(f"源文件夹中有不可用视频，请先处理：{details}")
+            dedup_assets = sorted(
+                (asset for asset in scan.assets.get("pool_1", []) if asset.selectable),
+                key=lambda asset: (asset.name.casefold(), asset.name),
+            )
+            if not dedup_assets:
+                raise ValueError("所选文件夹没有可用视频")
         job_id = uuid.uuid4().hex
         short_id = job_id[:8]
-        plan = build_plan(config, scan, request.count, request.seed, short_id)
+        plan = build_plan(
+            config, scan, len(dedup_assets) if dedup_source is not None else request.count,
+            request.seed, short_id,
+        )
+        if dedup_source is not None:
+            used_names: set[str] = set()
+            for planned, asset in zip(plan.items, dedup_assets, strict=True):
+                planned.selections = {"pool_1": asset}
+                planned.estimated_duration = round(asset.probe.duration, 3)
+                base_name = f"{Path(asset.name).stem}_去重"
+                output_name = f"{base_name}.mp4"
+                suffix = 2
+                while output_name.casefold() in used_names:
+                    output_name = f"{base_name}_{suffix}.mp4"
+                    suffix += 1
+                used_names.add(output_name.casefold())
+                planned.output_name = output_name
+            plan.distribution["pool_1"] = {asset.name: 1 for asset in dedup_assets}
+            self.save_batch_dedup_settings(dedup_visual)
         batch_directory = self._batch_directory(config, short_id)
         batch_directory.parent.mkdir(parents=True, exist_ok=True)
         free_gb = shutil.disk_usage(batch_directory.parent).free / (1024**3)
@@ -152,6 +236,8 @@ class JobManager:
             )
         job = {
             "id": job_id,
+            "job_type": "batch_dedup" if dedup_source is not None else "render",
+            "source_directory": str(source) if dedup_source is not None else None,
             "short_id": short_id,
             "config_id": config.id,
             "config_name": config.name,
@@ -188,6 +274,30 @@ class JobManager:
         if request.auto_start:
             self.start(job_id)
         return self.get_job(job_id)
+
+    @staticmethod
+    def _dedup_config(visual: VisualDedupConfig, source: Path) -> AppConfig:
+        return AppConfig.model_validate({
+            "schema_version": 3,
+            "workflow_type": "generic",
+            "id": "batch-dedup",
+            "name": "批量去重",
+            "source_root": str(source),
+            "timeline": ["pool_1"],
+            "sources": {
+                "pool_1": {
+                    "label": "源视频",
+                    "mode": SourceMode.REQUIRED,
+                    "directory": ".",
+                    "extensions": [".mp4", ".mov", ".mkv", ".m4v", ".webm"],
+                }
+            },
+            "benefit_overlays": {"mode": SourceMode.DISABLED, "file": ""},
+            "visual_dedup": visual.model_dump(mode="json"),
+            "output": {"directory": str(source.parent)},
+            "batch": {"minimum_free_space_gb": 0.5},
+            "randomization": {"duplicate_policy": "strict"},
+        })
 
     def start(self, job_id: str) -> dict[str, Any]:
         with self.lock:

@@ -36,6 +36,7 @@ const state = {
   device: null,
   configLease: null,
   availableUpdate: null,
+  announcedUpdateVersion: null,
   timeline: {
     sourceDirectory: "",
     sourceVideos: [],
@@ -110,6 +111,13 @@ const configUiStoragePrefix = "smartstitch.config-ui.";
 const browserSessionStorageKey = "smartstitch.browser_session_id";
 const configLeaseMaxDurationMs = 5 * 60 * 1000;
 const pathQuotePairs = { "'": "'", '"': '"', "‘": "’", "“": "”" };
+// Add tools here; each tool owns its panel through mount(container) when ready.
+const toolboxTools = [
+  { id: "cluster-control", title: "SmartStitch 集群控制", description: "管理多机协作的入口。输入密码后查看功能占位。", cover: "/assets/tools/cluster-control.svg", order: 0, protected: true, mount: mountClusterControlTool },
+  { id: "folder-concat", title: "文件夹拼接", description: "选择两个文件夹，批量拼接视频。", cover: "/assets/tools/folder-concat.svg", order: 10, mount: null },
+  { id: "batch-dedup", title: "批量去重", description: "选择文件夹，逐条应用现有视觉去重效果。", cover: "/assets/tools/batch-dedup.svg", order: 20, mount: mountBatchDedupTool },
+];
+let toolboxCleanup = null;
 
 function normalizePathInput(value) {
   const normalized = String(value ?? "").trim();
@@ -501,6 +509,7 @@ function statusInfo(status) {
 
 async function init() {
   bindEvents();
+  renderToolbox();
   try {
     const health = await api("/system/health");
     $("#healthDot").classList.add("ok");
@@ -510,17 +519,32 @@ async function init() {
   await loadConfigs();
   await Promise.all([loadJobs(), loadSliceJobs()]);
   connectSliceJobEvents();
-  // checkForUpdates(); // 暂停启动时通过 GitHub Releases 自动检查更新。
+  checkForUpdates();
 }
 
-async function checkForUpdates() {
+async function checkForUpdates(manual = false) {
+  checkForUpdates.lastRun = Date.now();
   try {
     const update = await api("/system/updates");
-    if (!update.update_available) return;
+    const banner = $("#updateStatus");
+    banner.classList.toggle("hidden", update.status !== "nas_unavailable" && update.status !== "available");
+    $("#updateStatusText").textContent = update.status === "nas_unavailable"
+      ? "未连接 NAS，请连接 NAS 后检查更新"
+      : update.status === "available" ? `SmartStitch v${update.latest_version} 已在 NAS 发布` : "";
+    $("#retryUpdateBtn").textContent = update.status === "available" ? "查看更新" : "重试";
+    if (!update.update_available) {
+      if (manual && update.status === "up_to_date") toast("当前已是最新版本");
+      if (manual && update.status === "not_published") toast("NAS 尚未发布更新");
+      return;
+    }
     state.availableUpdate = update;
-    showAvailableUpdate();
-  } catch (_) {
-    // Update checks are best-effort and must never interrupt local workflows.
+    if (manual || state.announcedUpdateVersion !== update.latest_version) {
+      state.announcedUpdateVersion = update.latest_version;
+      showAvailableUpdate();
+    }
+  } catch (error) {
+    $("#updateStatus").classList.remove("hidden");
+    $("#updateStatusText").textContent = error.message;
   }
 }
 
@@ -529,6 +553,7 @@ function showAvailableUpdate() {
   if (!update || $$(".modal.open").some(modal => modal.id !== "updateModal")) return;
   $("#latestVersion").textContent = `v${update.latest_version}`;
   $("#currentVersion").textContent = `v${update.current_version}`;
+  $("#updateNotes").textContent = update.notes || "本次更新已准备就绪。";
   $("#updateModal").classList.add("open");
   $("#updateModal").setAttribute("aria-hidden", "false");
   requestAnimationFrame(() => $("#openUpdateBtn").focus());
@@ -543,6 +568,7 @@ function closeUpdateModal() {
 async function openLatestRelease() {
   const button = $("#openUpdateBtn");
   button.disabled = true;
+  button.textContent = "正在从 NAS 获取并校验…";
   try {
     await api("/system/updates/open", { method: "POST" });
     closeUpdateModal();
@@ -550,6 +576,7 @@ async function openLatestRelease() {
     toast(error.message, true);
   } finally {
     button.disabled = false;
+    button.innerHTML = '打开安装包 <span>↗</span>';
   }
 }
 
@@ -557,6 +584,11 @@ function bindEvents() {
   $("#laterUpdateBtn").addEventListener("click", closeUpdateModal);
   $("[data-close-update]").addEventListener("click", closeUpdateModal);
   $("#openUpdateBtn").addEventListener("click", openLatestRelease);
+  $("#retryUpdateBtn").addEventListener("click", () => checkForUpdates(true));
+  $("#checkUpdateBtn").addEventListener("click", () => checkForUpdates(true));
+  window.addEventListener("focus", () => {
+    if (Date.now() - (checkForUpdates.lastRun || 0) > 60000) checkForUpdates();
+  });
   document.addEventListener("paste", event => {
     const input = event.target.closest?.("[data-path-input]");
     if (!input) return;
@@ -573,6 +605,7 @@ function bindEvents() {
     if (input) normalizePathField(input);
   });
   $$(".section-tab").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
+  $("#toolboxBackBtn").addEventListener("click", closeToolboxTool);
   $("#configSelect").addEventListener("change", () => selectConfig($("#configSelect").value));
   $("#scanBtn").addEventListener("click", refreshAssetScan);
   $("#saveWeightsBtn").addEventListener("click", saveWeights);
@@ -626,10 +659,304 @@ async function switchView(view) {
   }
   $$(".section-tab").forEach(button => button.classList.toggle("active", button.dataset.view === view));
   $$(".view").forEach(element => element.classList.toggle("active", element.id === `${view}View`));
+  if (previousView === "toolbox" && view !== "toolbox") closeToolboxTool(false);
   $("#timelineSliceQueue").classList.toggle("hidden", view !== "timeline");
   if (view === "assets" && previousView !== "assets") await openAssetWeightEditor();
   if (view === "jobs") loadJobs();
   if (view === "timeline") refreshTimelineConfig();
+}
+
+function renderToolbox() {
+  const grid = $("#toolboxGrid");
+  grid.replaceChildren();
+  if (!toolboxTools.length) {
+    const empty = document.createElement("div");
+    empty.className = "toolbox-empty";
+    empty.innerHTML = "<strong>工具即将加入</strong><span>新的小工具会显示在这里。</span>";
+    grid.append(empty);
+    return;
+  }
+  [...toolboxTools].sort((a, b) => a.order - b.order).forEach(tool => {
+    const available = typeof tool.mount === "function";
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "toolbox-card";
+    card.dataset.toolId = tool.id;
+    card.disabled = !available;
+    if (available) card.addEventListener("click", () => openToolboxTool(tool.id));
+    const cover = document.createElement("img");
+    cover.className = "toolbox-card-image";
+    cover.src = tool.cover || "/assets/tools/default.svg";
+    cover.alt = "";
+    cover.loading = "lazy";
+    cover.onerror = () => { cover.onerror = null; cover.src = "/assets/tools/default.svg"; };
+    const body = document.createElement("span");
+    body.className = "toolbox-card-body";
+    const title = document.createElement("strong");
+    title.className = "toolbox-card-title";
+    title.textContent = tool.title;
+    const description = document.createElement("span");
+    description.className = "toolbox-card-description";
+    description.textContent = tool.description;
+    const status = document.createElement("span");
+    status.className = "toolbox-card-status";
+    status.textContent = available ? (tool.protected ? "密码保护 · 打开 →" : "打开工具 →") : "即将加入";
+    body.append(title, description, status);
+    card.append(cover, body);
+    grid.append(card);
+  });
+}
+
+function mountClusterControlTool(container) {
+  let token = "";
+  let disposed = false;
+  const form = document.createElement("form");
+  form.className = "cluster-gate";
+  form.innerHTML = `
+    <strong>输入集群控制密码</strong>
+    <p>此入口受密码保护。验证通过后可查看当前功能状态。</p>
+    <label class="field"><span>密码</span><input type="password" required autocomplete="off" aria-label="集群控制密码" autofocus /></label>
+    <button class="button primary" type="submit">解锁</button>
+    <small class="cluster-gate-error hidden" role="alert"></small>
+  `;
+  container.append(form);
+  const input = form.querySelector("input");
+  const button = form.querySelector("button");
+  const error = form.querySelector(".cluster-gate-error");
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const password = input.value;
+    input.value = "";
+    button.disabled = true;
+    error.classList.add("hidden");
+    try {
+      const unlock = await api("/tools/cluster-control/unlock", {
+        method: "POST", body: JSON.stringify({ password }),
+      });
+      token = unlock.access_token;
+      if (disposed) {
+        api("/tools/cluster-control/lock", {
+          method: "POST", headers: { Authorization: `Bearer ${token}` },
+        }).catch(() => {});
+        return;
+      }
+      const status = await api("/tools/cluster-control/status", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (disposed) return;
+      const placeholder = document.createElement("div");
+      placeholder.className = "cluster-placeholder";
+      const heading = document.createElement("strong");
+      heading.textContent = "已解锁 · 功能即将加入";
+      const message = document.createElement("p");
+      message.textContent = status.message;
+      placeholder.append(heading, message);
+      form.replaceWith(placeholder);
+    } catch (cause) {
+      if (disposed) return;
+      error.textContent = cause.message;
+      error.classList.remove("hidden");
+      input.focus();
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return () => {
+    disposed = true;
+    if (token) api("/tools/cluster-control/lock", {
+      method: "POST", headers: { Authorization: `Bearer ${token}` },
+    }).catch(() => {});
+  };
+}
+
+function openToolboxTool(id) {
+  const tool = toolboxTools.find(item => item.id === id);
+  if (!tool || typeof tool.mount !== "function") return;
+  const content = $("#toolboxDetailContent");
+  content.replaceChildren();
+  content.dataset.toolId = id;
+  $("#toolboxDetailTitle").textContent = tool.title;
+  $("#toolboxDetailDescription").textContent = tool.description;
+  toolboxCleanup = tool.mount(content) || null;
+  $("#toolboxCatalog").classList.add("hidden");
+  $("#toolboxDetail").classList.remove("hidden");
+  (content.querySelector("[autofocus]") || $("#toolboxBackBtn")).focus();
+}
+
+function closeToolboxTool(restoreFocus = true) {
+  if (typeof toolboxCleanup === "function") toolboxCleanup();
+  toolboxCleanup = null;
+  const activeId = $("#toolboxDetailContent").dataset.toolId;
+  $("#toolboxDetailContent").replaceChildren();
+  delete $("#toolboxDetailContent").dataset.toolId;
+  $("#toolboxCatalog").classList.remove("hidden");
+  $("#toolboxDetail").classList.add("hidden");
+  if (restoreFocus && activeId) $("#toolboxGrid").querySelector(`[data-tool-id="${activeId}"]`)?.focus();
+}
+
+function mountBatchDedupTool(container) {
+  let visual = null;
+  let sourceDirectory = "";
+  let disposed = false;
+  const render = () => {
+    if (disposed || !visual) return;
+    container.innerHTML = `<div class="batch-dedup-tool">
+      <label class="field"><span>源视频文件夹</span><div class="directory-picker-row">
+        <input id="batchDedupDirectory" type="text" data-path-input value="${escapeHtml(sourceDirectory)}" placeholder="选择或粘贴文件夹路径">
+        <button id="batchDedupChoose" class="button secondary small" type="button">选择文件夹</button>
+      </div></label>
+      <section class="simple-config-card simple-wide-card ${visual.enabled ? "is-accent" : ""}">
+        <header><span class="simple-card-number">01</span><div><h3>视觉去重</h3><p>每张卡片就是一个特效库；从上到下排列，逐条应用到所选文件夹的视频。</p></div>
+          <label class="simple-header-switch"><span>${visual.enabled ? "已启用" : "未启用"}</span><input id="batchDedupEnabled" class="switch-input" type="checkbox" ${visual.enabled ? "checked" : ""}></label></header>
+        <div class="simple-card-body simple-visual-dedup-body ${visual.enabled ? "" : "is-disabled"}">
+          <div class="simple-source-list visual-effect-layer-list">${visualEffectLayerCards({ visual_dedup: visual })}</div>
+          <div class="simple-card-footer"><button id="batchDedupAddLibrary" class="button secondary" type="button">＋ 添加特效库</button><small>拖动卡片或点击上下移动，编号会自动更新</small></div>
+        </div>
+      </section>
+      <p class="toolbox-intro">每个源视频生成一条去重成片，输出到源文件夹旁的新批次目录。源文件保留；任务进度在“任务记录”查看。</p>
+      <div class="actions"><button id="batchDedupSave" class="button secondary" type="button">保存去重设置</button><button id="batchDedupStart" class="button primary" type="button">开始批量去重</button></div>
+    </div>`;
+    const sourceInput = container.querySelector("#batchDedupDirectory");
+    sourceInput.addEventListener("input", () => { sourceDirectory = sourceInput.value; });
+    container.querySelector("#batchDedupChoose").addEventListener("click", async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const result = await api("/system/directory-picker", { method: "POST" });
+        if (!result.cancelled) { sourceDirectory = result.path; sourceInput.value = result.path; }
+      } catch (error) { toast(error.message, true); }
+      finally { button.disabled = false; }
+    });
+    container.querySelector("#batchDedupEnabled").addEventListener("change", event => {
+      visual.enabled = event.target.checked;
+      render();
+    });
+    const layer = id => visual.effect_layers.find(item => item.layer_id === id);
+    container.querySelectorAll("[data-effect-enabled]").forEach(input => input.addEventListener("change", () => {
+      layer(input.dataset.effectEnabled).enabled = input.checked;
+      render();
+    }));
+    container.querySelectorAll("[data-effect-opacity-slider]").forEach(input => input.addEventListener("input", () => {
+      const value = Number(input.value);
+      layer(input.dataset.effectOpacitySlider).opacity_percent = value;
+      container.querySelectorAll("[data-effect-opacity]").forEach(number => {
+        if (number.dataset.effectOpacity === input.dataset.effectOpacitySlider) number.value = value;
+      });
+    }));
+    container.querySelectorAll("[data-effect-opacity]").forEach(input => input.addEventListener("change", () => {
+      const value = Math.max(0, Math.min(100, Math.round(Number(input.value) || 0)));
+      layer(input.dataset.effectOpacity).opacity_percent = value;
+      render();
+    }));
+    const move = (id, target) => {
+      const layers = visual.effect_layers;
+      const index = layers.findIndex(item => item.layer_id === id);
+      if (index < 0 || target < 0 || target >= layers.length || index === target) return;
+      layers.splice(target, 0, layers.splice(index, 1)[0]);
+      render();
+    };
+    container.querySelectorAll("[data-effect-action]").forEach(button => button.addEventListener("click", async () => {
+      const id = button.dataset.effectId;
+      const index = visual.effect_layers.findIndex(item => item.layer_id === id);
+      if (button.dataset.effectAction === "up" || button.dataset.effectAction === "down") {
+        move(id, index + (button.dataset.effectAction === "up" ? -1 : 1));
+      } else if (index >= 0) {
+        const selected = visual.effect_layers[index];
+        if (selected.type === "overlay") {
+          const library = visualEffectLibrary(selected.library_id);
+          if (library && !window.confirm(`删除全局特效库“${library.name}”？其他项目引用它时也会受影响。`)) return;
+          if (library) {
+            try {
+              state.visualEffectLibraries = await api(`/global-assets/visual-effect-libraries/${encodeURIComponent(selected.library_id)}`, {
+                method: "DELETE",
+                headers: { "X-SmartStitch-Library-Revision": String(state.visualEffectLibraries.revision) },
+              });
+            } catch (error) { toast(error.message, true); return; }
+          }
+        }
+        visual.effect_layers.splice(index, 1);
+        render();
+      }
+    }));
+    let draggedId = null;
+    container.querySelectorAll("[data-effect-layer-card]").forEach(card => {
+      card.addEventListener("dragstart", event => {
+        if (event.target.closest("input, button, label")) { event.preventDefault(); return; }
+        draggedId = card.dataset.effectLayerCard;
+        event.dataTransfer.setData("text/plain", draggedId);
+      });
+      card.addEventListener("dragover", event => event.preventDefault());
+      card.addEventListener("drop", event => {
+        event.preventDefault();
+        if (draggedId) move(draggedId, visual.effect_layers.findIndex(item => item.layer_id === card.dataset.effectLayerCard));
+      });
+      card.addEventListener("dragend", () => { draggedId = null; });
+    });
+    container.querySelectorAll("[data-open-effect-library]").forEach(button => button.addEventListener("click", async () => {
+      try {
+        const result = await api(`/global-assets/visual-effect-libraries/${encodeURIComponent(button.dataset.openEffectLibrary)}/open-directory`, { method: "POST" });
+        toast(`已在${result.manager}中打开 ${result.folder_name}`);
+      } catch (error) { toast(error.message, true); }
+    }));
+    container.querySelectorAll("[data-effect-library-name]").forEach(input => input.addEventListener("change", async () => {
+      const libraryId = input.dataset.effectLibraryName;
+      const name = input.value.trim();
+      if (!name || name === visualEffectLibrary(libraryId)?.name) return;
+      try {
+        state.visualEffectLibraries = await api(`/global-assets/visual-effect-libraries/${encodeURIComponent(libraryId)}`, {
+          method: "PATCH", body: JSON.stringify({ name, library_revision: state.visualEffectLibraries.revision }),
+        });
+        layer(input.dataset.effectLayerName).name = name;
+        render();
+      } catch (error) { toast(error.message, true); }
+    }));
+    container.querySelector("#batchDedupAddLibrary").addEventListener("click", async () => {
+      if (visual.effect_layers.length >= 10) return toast("最多添加 10 个特效层", true);
+      const name = window.prompt("新特效库名称")?.trim();
+      if (!name) return;
+      try {
+        const result = await api("/global-assets/visual-effect-libraries", {
+          method: "POST", body: JSON.stringify({ name, library_revision: state.visualEffectLibraries.revision }),
+        });
+        state.visualEffectLibraries = result;
+        visual.effect_layers.push({ layer_id: `effect-${result.library.library_id}`, name, type: "overlay", enabled: true, required: true, opacity_percent: 100, library_id: result.library.library_id, scale_mode: "exact" });
+        render();
+        toast(`特效库已创建，可打开 ${result.library.library_id} 文件夹添加素材`);
+      } catch (error) { toast(error.message, true); }
+    });
+    const save = async () => {
+      visual = await api("/tools/batch-dedup/settings", { method: "PUT", body: JSON.stringify(visual) });
+      toast("去重设置已保存");
+    };
+    container.querySelector("#batchDedupSave").addEventListener("click", async () => {
+      try { await save(); } catch (error) { toast(error.message, true); }
+    });
+    container.querySelector("#batchDedupStart").addEventListener("click", async event => {
+      const directory = normalizePathInput(sourceDirectory);
+      if (!directory) return toast("请先选择源视频文件夹", true);
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const job = await api("/tools/batch-dedup", {
+          method: "POST", body: JSON.stringify({ source_directory: directory, visual_dedup: visual }),
+        });
+        toast(`已提交 ${job.count} 条视频的去重任务`);
+        await loadJobs();
+        await switchView("jobs");
+        openJob(job.id);
+      } catch (error) { toast(error.message, true); button.disabled = false; }
+    });
+  };
+  container.innerHTML = '<div class="empty-state">正在加载去重设置…</div>';
+  Promise.all([api("/tools/batch-dedup/settings"), api("/global-assets/visual-effect-libraries")])
+    .then(([settings, libraries]) => {
+      if (disposed) return;
+      visual = settings;
+      state.visualEffectLibraries = libraries;
+      render();
+    })
+    .catch(error => { if (!disposed) container.innerHTML = `<div class="warning-box">${escapeHtml(error.message)}</div>`; });
+  return () => { disposed = true; };
 }
 
 function renderAssetEditStatus(message, status) {
@@ -3041,7 +3368,7 @@ function renderJobs() {
     const pct = isSlice ? Number(job.progress || 0) * 100 : (total ? done / total * 100 : 0);
     const sourceName = job.source?.name || job.source?.path?.split(/[\\/]/).pop();
     const title = isSlice ? sourceName : job.config_name;
-    const typeLabel = isSlice ? "切片入库" : "成片渲染";
+    const typeLabel = isSlice ? "切片入库" : (job.job_type === "batch_dedup" ? "批量去重" : "成片渲染");
     return `<div class="job-row" data-job-id="${job.id}" data-job-type="${isSlice ? "slice" : "render"}"><div><strong>${escapeHtml(title || "未命名任务")}</strong><small>${typeLabel} · ${formatDate(job.created_at)} · #${job.short_id}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${done}/${total} 已处理</small></div><span class="status ${cls}">${label}</span><span class="job-count">成功 ${job.success_count || 0} · 失败 ${job.failure_count || 0}</span><b>›</b></div>`;
   }).join("");
   $$(".job-row").forEach(row => row.addEventListener("click", () => {
@@ -3153,7 +3480,7 @@ function renderJobDetail(job) {
       const [itemLabel,itemCls] = statusInfo(item.status);
       const selections = Object.entries(item.selections || {})
         .filter(([, asset]) => asset)
-        .map(([category, asset]) => `${categoryLabel(category)}：${asset.name}`)
+        .map(([category, asset]) => `${job.job_type === "batch_dedup" ? "源视频" : categoryLabel(category)}：${asset.name}`)
         .join("　·　");
       return `<div class="item-row"><b>${String(item.index).padStart(2,"0")}</b><div><strong>${escapeHtml(item.output_name)}</strong><small class="item-selections">${escapeHtml(selections)}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${item.progress*100}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
     }).join("")}</div>`;

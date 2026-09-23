@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260923-92" />
+    <link rel="stylesheet" href="/styles.css?v=20260923-96" />
   </head>
   <body>
     <div class="noise"></div>
@@ -14,6 +14,7 @@
         <span><strong>SmartStitch</strong><small>本地智能混剪</small></span>
       </a>
       <div class="topbar-actions">
+        <button id="checkUpdateBtn" class="text-btn" type="button">检查更新</button>
         <button id="userProfileBtn" class="user-profile-pill" type="button"><span class="user-avatar">?</span><strong id="userProfileName">设置用户名</strong></button>
         <div class="system-pill"><span id="healthDot" class="dot"></span><span id="healthText">正在检查环境</span></div>
       </div>
@@ -33,11 +34,17 @@
         </div>
       </section>
 
+      <div id="updateStatus" class="update-status hidden" role="status">
+        <span id="updateStatusText"></span>
+        <button id="retryUpdateBtn" class="text-btn" type="button">重试</button>
+      </div>
+
       <nav class="section-tabs" aria-label="页面区域">
         <button class="section-tab active" data-view="create">创建任务</button>
         <button class="section-tab" data-view="timeline">时间线切片</button>
         <button class="section-tab" data-view="assets">素材权重</button>
         <button class="section-tab" data-view="jobs">任务记录</button>
+        <button class="section-tab toolbox-nav-tab" data-view="toolbox">工具台</button>
       </nav>
 
       <section id="createView" class="view active">
@@ -287,6 +294,22 @@
           <div id="jobsList" class="jobs-list"></div>
         </article>
       </section>
+
+      <section id="toolboxView" class="view" aria-label="工具台">
+        <article class="panel full-panel toolbox-panel">
+          <div id="toolboxCatalog">
+            <div class="panel-heading toolbox-heading"><div><span class="step">工具</span><h2>工具台</h2></div></div>
+            <p class="toolbox-intro">常用的小工具集中在这里。选择卡片，完成一次操作。</p>
+            <div id="toolboxGrid" class="toolbox-grid"></div>
+          </div>
+          <div id="toolboxDetail" class="hidden">
+            <button id="toolboxBackBtn" class="text-btn toolbox-back" type="button">← 返回工具台</button>
+            <div class="panel-heading toolbox-heading"><div><span class="step">工具</span><h2 id="toolboxDetailTitle"></h2></div></div>
+            <p id="toolboxDetailDescription" class="toolbox-intro"></p>
+            <div id="toolboxDetailContent"></div>
+          </div>
+        </article>
+      </section>
     </main>
 
     <section id="timelineSliceQueue" class="timeline-slice-queue hidden" aria-label="切片队列，移入展开" tabindex="0">
@@ -390,16 +413,16 @@
         <p class="eyebrow">SOFTWARE UPDATE</p>
         <h2 id="updateTitle">发现新版本</h2>
         <p>SmartStitch <strong id="latestVersion">—</strong> 已发布，你正在使用 <span id="currentVersion">—</span>。</p>
-        <div class="update-note">点击“查看更新”将在系统浏览器中打开 GitHub Releases。下载并安装前，你可以先查看本次更新说明。</div>
+        <div class="update-note"><span id="updateNotes"></span><br />点击“打开安装包”会从 NAS 复制并校验 DMG。请先完成当前任务、退出 SmartStitch，再将应用拖到“应用程序”文件夹。</div>
         <div class="actions right">
           <button id="laterUpdateBtn" class="button secondary" type="button">稍后提醒</button>
-          <button id="openUpdateBtn" class="button primary" type="button">查看更新 <span>↗</span></button>
+          <button id="openUpdateBtn" class="button primary" type="button">打开安装包 <span>↗</span></button>
         </div>
       </div>
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260923-92" defer></script>
-    <script src="/app.js?v=20260923-92" defer></script>
+    <script src="/timeline-math.js?v=20260923-96" defer></script>
+    <script src="/app.js?v=20260923-96" defer></script>
   </body>
 </html>

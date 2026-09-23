@@ -926,6 +926,15 @@ class JobCreateRequest(PreviewRequest):
     auto_start: bool = True
 
 
+class BatchDedupRequest(BaseModel):
+    source_directory: str
+    visual_dedup: VisualDedupConfig
+
+    _normalize_source_directory = field_validator("source_directory", mode="before")(
+        normalize_path_input
+    )
+
+
 class ConfigUpdateRequest(BaseModel):
     yaml_text: str
 

@@ -8,7 +8,7 @@ import yaml
 
 from smartstitch.config import ConfigStore
 from smartstitch.jobs import JobManager
-from smartstitch.models import JobCreateRequest
+from smartstitch.models import BatchDedupRequest, JobCreateRequest, VisualDedupConfig
 
 
 def generate_clip(path: Path, color: str) -> None:
@@ -22,6 +22,41 @@ def generate_clip(path: Path, color: str) -> None:
         ],
         check=True,
     )
+
+
+def test_batch_dedup_renders_each_video_once_and_keeps_sources(tmp_path):
+    source = tmp_path / "待去重"
+    generate_clip(source / "a.mp4", "red")
+    generate_clip(source / "b.mp4", "blue")
+    config_directory = tmp_path / "config"
+    config_directory.mkdir()
+    manager = JobManager(ConfigStore(config_directory), tmp_path / "data")
+    visual = VisualDedupConfig.model_validate({
+        "enabled": True,
+        "effect_layers": [{
+            "layer_id": "blur-frame", "name": "模糊背景", "type": "blur_frame",
+            "foreground_scale": 0.9, "sigma": 2, "steps": 1,
+            "opacity_percent": 43,
+        }],
+    })
+    job = manager.create_batch_dedup(BatchDedupRequest(
+        source_directory=str(source), visual_dedup=visual
+    ))
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        job = manager.get_job(job["id"])
+        if job["status"] in {"completed", "partial_failed", "failed", "cancelled"}:
+            break
+        time.sleep(0.05)
+    assert job["status"] == "completed", [item["error"] for item in job["items"]]
+    assert job["job_type"] == "batch_dedup"
+    assert job["config_id"] == "batch-dedup"
+    assert [item["selections"]["pool_1"]["name"] for item in job["items"]] == ["a.mp4", "b.mp4"]
+    assert {path.name for path in Path(job["output_directory"]).glob("*.mp4")} == {"a_去重.mp4", "b_去重.mp4"}
+    assert {path.name for path in source.glob("*.mp4")} == {"a.mp4", "b.mp4"}
+    assert all(item["visual_effects"] for item in job["items"])
+    assert job["visual_dedup"]["effect_layers"][0]["opacity_percent"] == 43
+    assert manager.get_batch_dedup_settings().enabled is True
 
 
 def test_job_manager_writes_outputs_and_manifests(tmp_path):

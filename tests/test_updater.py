@@ -1,88 +1,67 @@
 from __future__ import annotations
 
-import io
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
-from smartstitch.updater import (
-    GitHubReleaseChecker,
-    UpdateCheckError,
-    is_newer_version,
-)
+from smartstitch.updater import NASUpdateChecker, UpdateCheckError, is_newer_version
 
 
-class JsonResponse(io.BytesIO):
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
-
-
-def github_response(**overrides):
-    payload = {
-        "tag_name": "v0.2.0",
-        "name": "SmartStitch 0.2.0",
-        "html_url": "https://github.com/Sakana20/SmartStitch/releases/tag/v0.2.0",
-        "published_at": "2026-09-21T08:00:00Z",
-        **overrides,
-    }
-    return JsonResponse(json.dumps(payload).encode())
+def release(root: Path, content: bytes = b"disk image") -> Path:
+    updates = root / "updates"
+    target = updates / "releases" / "SmartStitch-v0.2.0-macOS-arm64.dmg"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(content)
+    (updates / "latest.json").write_text(json.dumps({
+        "schema_version": 1, "version": "0.2.0", "platform": "macos",
+        "architecture": "arm64", "filename": target.name,
+        "size_bytes": len(content), "sha256": hashlib.sha256(content).hexdigest(),
+    }))
+    return target
 
 
-@pytest.mark.parametrize(
-    ("candidate", "current", "expected"),
-    [
-        ("v0.1.3", "0.1.2", True),
-        ("0.1.2", "0.1.2", False),
-        ("0.1.1", "0.1.2", False),
-        ("1.0.0", "0.9.9", True),
-        ("1.0.0", "1.0.0-rc.1", True),
-        ("1.0.0-rc.2", "1.0.0-rc.1", True),
-    ],
-)
+@pytest.mark.parametrize(("candidate", "current", "expected"), [
+    ("v0.1.3", "0.1.2", True), ("0.1.2", "0.1.2", False),
+    ("0.1.1", "0.1.2", False), ("1.0.0", "0.9.9", True),
+])
 def test_version_comparison(candidate, current, expected):
     assert is_newer_version(candidate, current) is expected
 
 
-def test_check_returns_latest_release_and_caches_safe_url():
-    requests = []
-
-    def opener(request, timeout):
-        requests.append((request, timeout))
-        return github_response()
-
-    checker = GitHubReleaseChecker(opener=opener)
-    result = checker.check("0.1.2")
-
-    assert result["update_available"] is True
-    assert result["latest_version"] == "0.2.0"
-    assert checker.latest_release_url == result["release_url"]
-    assert requests[0][1] == 4.0
-    assert requests[0][0].get_header("User-agent") == "SmartStitch/0.1.2"
+def test_missing_nas_and_unpublished_update(tmp_path):
+    checker = NASUpdateChecker(None, tmp_path / "cache")
+    assert checker.check("0.1.0")["status"] == "nas_unavailable"
+    checker = NASUpdateChecker(tmp_path, tmp_path / "cache")
+    assert checker.check("0.1.0")["status"] == "not_published"
 
 
-def test_rejects_release_url_outside_expected_github_repository():
-    checker = GitHubReleaseChecker(
-        opener=lambda *_args, **_kwargs: github_response(
-            html_url="https://example.com/download"
-        )
-    )
-
-    with pytest.raises(UpdateCheckError, match="无效"):
-        checker.check("0.1.2")
-
-
-def test_open_latest_release_uses_cached_release_url():
+def test_update_check_and_verified_local_copy(tmp_path, monkeypatch):
+    source = release(tmp_path)
+    checker = NASUpdateChecker(tmp_path, tmp_path / "cache")
+    assert checker.check("0.1.0")["update_available"] is True
     opened = []
-    checker = GitHubReleaseChecker(
-        opener=lambda *_args, **_kwargs: github_response(),
-        browser_opener=lambda url: opened.append(url) or True,
-    )
-    checker.check("0.1.2")
+    monkeypatch.setattr("smartstitch.updater.sys.platform", "darwin")
+    monkeypatch.setattr("smartstitch.updater.subprocess.run", lambda args, **kwargs: opened.append(args))
+    assert checker.open_latest_release()["opened"] is True
+    assert opened[0][1] == str(tmp_path / "cache" / source.name)
+    assert (tmp_path / "cache" / source.name).read_bytes() == source.read_bytes()
 
-    result = checker.open_latest_release()
 
-    assert result["opened"] is True
-    assert opened == ["https://github.com/Sakana20/SmartStitch/releases/tag/v0.2.0"]
+def test_rejects_damaged_and_unsafe_release(tmp_path, monkeypatch):
+    source = release(tmp_path)
+    checker = NASUpdateChecker(tmp_path, tmp_path / "cache")
+    checker.check("0.1.0")
+    source.write_bytes(b"bad image!")
+    monkeypatch.setattr("smartstitch.updater.sys.platform", "darwin")
+    with pytest.raises(UpdateCheckError, match="校验失败"):
+        checker.open_latest_release()
+    assert not list((tmp_path / "cache").glob("*.part"))
+
+    manifest = tmp_path / "updates" / "latest.json"
+    payload = json.loads(manifest.read_text())
+    payload["filename"] = "../other.dmg"
+    manifest.write_text(json.dumps(payload))
+    with pytest.raises(UpdateCheckError, match="清单无效"):
+        checker.check("0.1.0")

@@ -72,6 +72,32 @@ def test_health_and_config_listing(tmp_path):
     assert response.json()["config_directory"] == str(tmp_path / "config")
     assert response.json()["shared_config"] is False
     assert client.get("/api/v1/configs").json() == []
+    updates = client.get("/api/v1/system/updates")
+    assert updates.status_code == 200
+    assert updates.json()["status"] == "nas_unavailable"
+    assert "请连接 NAS" in updates.json()["message"]
+
+
+def test_batch_dedup_settings_are_independent_of_project_configs(tmp_path):
+    (tmp_path / "config").mkdir()
+    source = tmp_path / "videos"
+    source.mkdir()
+    client = TestClient(create_app(tmp_path))
+
+    initial = client.get("/api/v1/tools/batch-dedup/settings")
+    assert initial.status_code == 200
+    settings = initial.json()
+    assert settings["enabled"] is True
+    settings["effect_layers"][0]["opacity_percent"] = 43
+    saved = client.put("/api/v1/tools/batch-dedup/settings", json=settings)
+    assert saved.status_code == 200
+    assert client.get("/api/v1/tools/batch-dedup/settings").json()["effect_layers"][0]["opacity_percent"] == 43
+
+    submitted = client.post("/api/v1/tools/batch-dedup", json={
+        "source_directory": str(source), "visual_dedup": settings,
+    })
+    assert submitted.status_code == 422
+    assert "没有可用视频" in submitted.json()["detail"]
 
 
 def test_update_endpoints_use_application_release_checker(tmp_path):
@@ -84,7 +110,7 @@ def test_update_endpoints_use_application_release_checker(tmp_path):
             }
 
         def open_latest_release(self):
-            return {"opened": True, "release_url": "https://github.com/release"}
+            return {"opened": True, "version": "9.0.0"}
 
     app = create_app(tmp_path)
     app.state.release_checker = FakeReleaseChecker()
