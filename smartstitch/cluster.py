@@ -24,7 +24,7 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHand
 import uvicorn
 import yaml
 from fastapi import FastAPI, HTTPException, Request as APIRequest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, field_validator
 
 from . import __version__
 from .models import AppConfig, Asset, JobCreateRequest, PlannedVisualEffect, PlanItem
@@ -136,14 +136,23 @@ def _request(url: str, token: str, *, method: str = "GET", payload: dict[str, An
 
 class NodeRegistration(BaseModel):
     url: str
-    token: str = Field(min_length=16)
+    token: str
+
+    @field_validator("token")
+    @classmethod
+    def validate_token(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 16:
+            raise ValueError("请填写工作机启用后显示的随机令牌（通常为 32 位），不要填写集群控制页面的解锁密码")
+        return value
 
 
 class ClusterWorker:
-    def __init__(self, data_directory: Path, config_store: Any, sqlite_store: Any):
+    def __init__(self, data_directory: Path, config_store: Any, sqlite_store: Any, user_profiles: Any):
         self.data_directory = data_directory
         self.config_store = config_store
         self.store = sqlite_store
+        self.user_profiles = user_profiles
         self.settings_path = data_directory / "cluster-worker.json"
         self.settings = _load_json(self.settings_path, {"enabled": False, "token": uuid.uuid4().hex, "node_id": uuid.uuid4().hex})
         self.startup_error: str | None = None
@@ -188,8 +197,10 @@ class ClusterWorker:
     def status(self) -> dict[str, Any]:
         with self.lock:
             active = sum(thread.is_alive() for thread in self.threads.values())
+            profile = self.user_profiles.get()["user"]
             return {
                 "node_id": self.settings["node_id"], "name": socket.gethostname(),
+                "display_name": profile["display_name"] if profile else "",
                 "version": __version__, "active": active, "capacity": 1,
                 "canonical_root": str(self.config_store.canonical_directory),
             }
@@ -263,14 +274,30 @@ class ClusterWorker:
     def _advertise(self) -> None:
         try:
             if self.listener and shutil.which("dns-sd"):
+                display_name = self.status()["display_name"]
+                prefix = display_name.encode("utf-8")[:36].decode("utf-8", "ignore").strip()
+                service_name = f"{prefix} · SmartStitch-{self.settings['node_id'][:8]}" if prefix else f"SmartStitch-{self.settings['node_id'][:8]}"
                 self.advertiser = subprocess.Popen(
-                    ["dns-sd", "-R", f"SmartStitch-{self.settings['node_id'][:8]}",
+                    ["dns-sd", "-R", service_name,
                      "_smartstitch._tcp", "local.", str(self.listener.getsockname()[1]),
                      f"node_id={self.settings['node_id']}", f"version={__version__}"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True,
                 )
         except OSError:
             self.advertiser = None
+
+    def refresh_advertisement(self) -> None:
+        with self.lock:
+            if not self.listener or not self.server or not self.server.started:
+                return
+            if self.advertiser:
+                self.advertiser.terminate()
+                try:
+                    self.advertiser.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.advertiser.kill()
+                self.advertiser = None
+            self._advertise()
 
     def connection_info(self) -> dict[str, Any]:
         port = self.listener.getsockname()[1] if self.listener else None
@@ -456,7 +483,8 @@ class ClusterMaster:
             raise ValueError(f"工作机版本 {hello.get('version', '未知')} 与主控 {__version__} 不一致")
         if hello.get("canonical_root") != str(self.config_store.canonical_directory):
             raise ValueError("节点挂载的共享目录与主控不一致")
-        node = {"node_id": hello["node_id"], "name": hello["name"], "url": url, "token": token}
+        node = {"node_id": hello["node_id"], "name": hello["name"],
+                "display_name": hello.get("display_name", ""), "url": url, "token": token}
         with self.lock:
             self.nodes = [entry for entry in self.nodes if entry["node_id"] != node["node_id"]]
             self.nodes.append(node)
@@ -476,6 +504,7 @@ class ClusterMaster:
                 result.append({**status, "url": node["url"], "online": True})
             except Exception as exc:
                 result.append({"node_id": node["node_id"], "name": node["name"],
+                               "display_name": node.get("display_name", ""),
                                "url": node["url"], "online": False, "error": str(exc)})
         return result
 

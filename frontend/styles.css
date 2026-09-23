@@ -95,7 +95,8 @@ h1 em { color: var(--green); font-weight: 500; }
 .cluster-control-form .field { margin: 0; }
 .cluster-control-form .actions { justify-content: flex-end; }
 .cluster-job-form { grid-template-columns: minmax(180px, 2fr) minmax(100px, 1fr) minmax(150px, 1fr) auto; align-items: end; }
-.cluster-token { display: inline-block; max-width: 100%; padding: 3px 6px; border-radius: 5px; background: var(--mint); user-select: all; overflow-wrap: anywhere; }
+.cluster-token { display: inline-block; max-width: 100%; padding: 3px 6px; border: 1px solid transparent; border-radius: 5px; background: var(--mint); color: inherit; font: inherit; text-align: left; cursor: pointer; user-select: all; overflow-wrap: anywhere; }
+.cluster-token:hover, .cluster-token:focus-visible { border-color: var(--green); outline: none; }
 .cluster-live { color: var(--green); font-weight: 700; }
 .cluster-node-row, .cluster-job-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line); }
 .cluster-node-row:first-child, .cluster-job-row:first-child { margin-top: 12px; }

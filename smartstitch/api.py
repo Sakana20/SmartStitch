@@ -232,7 +232,7 @@ def create_app(
         slice_job_manager = SliceJobManager(timeline_slicer, database_store)
         prores_alpha_manager = ProResAlphaManager(visual_border_library)
         cluster_access = ClusterAccess()
-        cluster_worker = ClusterWorker(resolved_data_directory, config_store, database_store)
+        cluster_worker = ClusterWorker(resolved_data_directory, config_store, database_store, user_profiles)
         cluster_master = ClusterMaster(cluster_worker, job_manager, config_store, resolved_data_directory)
         release_checker = NASUpdateChecker(
             None if resolved_config_directory == local_config_directory
@@ -504,9 +504,11 @@ def create_app(
     @app.put("/api/v1/users/me")
     def update_current_user(request: UserProfileUpdateRequest) -> dict[str, object]:
         try:
-            return user_profiles.update(
+            result = user_profiles.update(
                 request.display_name, switch_user=request.switch_user
             )
+            cluster_worker.refresh_advertisement()
+            return result
         except CollaborationError as exc:
             raise collaboration_http_error(exc) from exc
 

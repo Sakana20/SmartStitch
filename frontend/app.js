@@ -118,6 +118,7 @@ const pathQuotePairs = { "'": "'", '"': '"', "‘": "’", "“": "”" };
 const toolboxTools = [
   { id: "cluster-control", title: "SmartStitch 集群控制", description: "连接在线工作机，统一派发和查看批量渲染。", cover: "/assets/tools/cluster-control.svg", order: 0, protected: true, mount: mountClusterControlTool },
   { id: "jianying-prores-4444", title: "ProRes 4444 处理", description: "将黑底视频批量转换为带透明通道的 ProRes 4444 MOV。", cover: "/assets/tools/jianying-prores-4444.svg", order: 5, mount: mountProResAlphaTool },
+  { id: "video-upscale", title: "超分", description: "视频超分处理入口，具体功能即将加入。", cover: "/assets/tools/video-upscale.svg", order: 6, mount: null },
   { id: "folder-concat", title: "文件夹拼接", description: "选择两个文件夹，批量拼接视频。", cover: "/assets/tools/folder-concat.svg", order: 10, mount: mountFolderConcatTool },
   { id: "batch-dedup", title: "批量去重", description: "选择文件夹，逐条应用现有视觉去重效果。", cover: "/assets/tools/batch-dedup.svg", order: 20, mount: mountBatchDedupTool },
 ];
@@ -761,7 +762,8 @@ function mountClusterControlTool(container) {
           <section class="cluster-control-card"><h3>连接工作机</h3>
             <form data-cluster-node-form class="cluster-control-form">
               <label class="field"><span>工作机地址</span><input name="url" required placeholder="http://剪辑室-Mac.local:端口"></label>
-              <label class="field"><span>工作机令牌</span><input name="token" required type="password" autocomplete="off" placeholder="在工作机的集群控制中查看"></label>
+              <label class="field"><span>工作机令牌</span><input name="token" required type="password" autocomplete="off" placeholder="粘贴工作机显示的随机令牌"></label>
+              <p class="cluster-control-hint">先在另一台电脑启用“本机工作机”，复制那里显示的 32 位令牌。它不是解锁本页面的密码。</p>
               <div class="actions"><button class="button secondary small" type="button" data-cluster-discover>搜索局域网</button><button class="button primary small" type="submit">连接工作机</button></div>
             </form><div data-cluster-discovered></div><div data-cluster-nodes></div>
           </section>
@@ -800,20 +802,38 @@ function mountClusterControlTool(container) {
           panel.querySelector("[data-cluster-worker]").innerHTML = `
             <p>${worker.enabled ? `<span class="cluster-live">已上线</span> · 端口 ${worker.port} · 正在渲染 ${worker.active}/${worker.capacity}` : "当前未作为工作机上线"}</p>
             ${worker.startup_error ? `<p class="cluster-control-error">自动上线失败：${escapeHtml(worker.startup_error)}</p>` : ""}
-            ${worker.enabled ? `<p>节点：${escapeHtml(worker.name)} · 令牌：<code class="cluster-token">${escapeHtml(worker.token)}</code></p><p>供主控连接的地址：<code>http://${escapeHtml(workerHost)}:${worker.port}</code></p>` : ""}
+            ${worker.enabled ? `<p>${worker.display_name ? `${escapeHtml(worker.display_name)} · ` : ""}节点：${escapeHtml(worker.name)} · 令牌：<button class="cluster-token" type="button" data-cluster-copy-token title="点击复制令牌" aria-label="复制工作机令牌">${escapeHtml(worker.token)}</button></p><p>供主控连接的地址：<code>http://${escapeHtml(workerHost)}:${worker.port}</code></p>` : ""}
             <button class="button secondary small" type="button" data-cluster-worker-toggle="${worker.enabled ? "stop" : "start"}">${worker.enabled ? "下线本机工作机" : "启用本机工作机"}</button>`;
           panel.querySelector("[data-cluster-nodes]").innerHTML = data.nodes.length ? data.nodes.map(node => `
-            <div class="cluster-node-row"><div><strong>${escapeHtml(node.name)}</strong><small>${escapeHtml(node.url)} · ${node.online ? `在线 · ${node.active}/${node.capacity} 正在渲染` : "离线"}</small></div><button class="text-btn" type="button" data-cluster-remove="${escapeHtml(node.node_id)}">移除</button></div>`).join("") : "<p>尚未连接工作机。</p>";
+            <div class="cluster-node-row"><div><strong>${node.display_name ? `${escapeHtml(node.display_name)} · ` : ""}${escapeHtml(node.name)}</strong><small>${escapeHtml(node.url)} · ${node.online ? `在线 · ${node.active}/${node.capacity} 正在渲染` : "离线"}</small></div><button class="text-btn" type="button" data-cluster-remove="${escapeHtml(node.node_id)}">移除</button></div>`).join("") : "<p>尚未连接工作机。</p>";
           panel.querySelector("[data-cluster-jobs]").innerHTML = data.jobs.length ? data.jobs.map(job => `
             <div class="cluster-job-row"><div><strong>${escapeHtml(job.config_name)}</strong><small>${escapeHtml(job.status)} · 成功 ${job.success_count}/${job.count} · 失败 ${job.failure_count} · ${escapeHtml(job.created_at)}</small></div><div class="actions"><button class="text-btn" type="button" data-cluster-detail="${escapeHtml(job.id)}">查看任务</button>${["queued", "running"].includes(job.status) ? `<button class="text-btn" type="button" data-cluster-cancel="${escapeHtml(job.id)}">取消</button>` : `<button class="text-btn" type="button" data-cluster-delete="${escapeHtml(job.id)}">删除记录</button>`}</div></div>`).join("") : "<p>暂无集群任务。</p>";
         } catch (cause) { if (!disposed) showError(cause); }
         finally { updating = false; }
       };
       panel.addEventListener("click", async event => {
-        const action = event.target.closest("[data-cluster-worker-toggle], [data-cluster-discover], [data-cluster-remove], [data-cluster-cancel], [data-cluster-delete], [data-cluster-detail], [data-cluster-found]");
+        const action = event.target.closest("[data-cluster-copy-token], [data-cluster-worker-toggle], [data-cluster-discover], [data-cluster-remove], [data-cluster-cancel], [data-cluster-delete], [data-cluster-detail], [data-cluster-found]");
         if (!action) return;
         try {
-          if (action.dataset.clusterWorkerToggle) {
+          if (action.hasAttribute("data-cluster-copy-token")) {
+            const value = action.textContent.trim();
+            try {
+              if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+              await navigator.clipboard.writeText(value);
+            } catch (_) {
+              const copyInput = document.createElement("textarea");
+              copyInput.value = value;
+              copyInput.style.position = "fixed";
+              copyInput.style.opacity = "0";
+              document.body.append(copyInput);
+              copyInput.select();
+              const copied = document.execCommand("copy");
+              copyInput.remove();
+              if (!copied) throw new Error("复制失败，请手动选中令牌复制");
+            }
+            toast("工作机令牌已复制");
+            return;
+          } else if (action.dataset.clusterWorkerToggle) {
             await clusterApi(`/worker/${action.dataset.clusterWorkerToggle}`, { method: "POST" });
           } else if (action.hasAttribute("data-cluster-discover")) {
             action.disabled = true;
@@ -839,10 +859,16 @@ function mountClusterControlTool(container) {
       });
       panel.querySelector("[data-cluster-node-form]").addEventListener("submit", async event => {
         event.preventDefault();
-        const fields = new FormData(event.currentTarget);
+        const nodeForm = event.currentTarget;
+        const fields = new FormData(nodeForm);
+        const workerToken = String(fields.get("token") || "").trim();
+        if (workerToken.length < 16) {
+          showError(new Error("工作机令牌至少需要 16 个字符。请复制工作机启用后显示的 32 位随机令牌，不要填写集群控制页面的解锁密码。"));
+          return;
+        }
         try {
-          await clusterApi("/nodes", { method: "POST", body: JSON.stringify({ url: fields.get("url"), token: fields.get("token") }) });
-          event.currentTarget.reset();
+          await clusterApi("/nodes", { method: "POST", body: JSON.stringify({ url: fields.get("url"), token: workerToken }) });
+          nodeForm.reset();
           await refresh();
         } catch (cause) { showError(cause); }
       });

@@ -49,6 +49,7 @@ def test_cluster_renders_one_item_using_worker_local_database(tmp_path, monkeypa
     (shared / "cluster-test.yaml").write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
     master_app = create_app(base_directory=tmp_path, config_directory=shared, data_directory=tmp_path / "master-data")
     worker_app = create_app(base_directory=tmp_path, config_directory=shared, data_directory=tmp_path / "worker-data")
+    worker_app.state.user_profiles.update("张三")
     worker = worker_app.state.cluster_worker
     peer_client = TestClient(worker._app())
     assert peer_client.get("/hello").status_code == 401
@@ -68,6 +69,10 @@ def test_cluster_renders_one_item_using_worker_local_database(tmp_path, monkeypa
         master = master_app.state.cluster_master
         node = master.add_node("http://127.0.0.1:9876", worker.settings["token"])
         assert node["node_id"] == worker.settings["node_id"]
+        assert node["display_name"] == "张三"
+        assert master.node_statuses()[0]["display_name"] == "张三"
+        worker_app.state.user_profiles.update("李四")
+        assert master.node_statuses()[0]["display_name"] == "李四"
         assert worker.get("bad") is None
         job = master.create(JobCreateRequest(config_id="cluster-test", count=1, seed=7, auto_start=True))
         deadline = time.monotonic() + 20

@@ -43,3 +43,18 @@ def test_cluster_password_can_be_overridden_and_session_expires(monkeypatch):
     assert token and access.authorized(token)
     clock["now"] += SESSION_SECONDS
     assert not access.authorized(token)
+
+
+def test_short_worker_token_explains_which_token_to_use(tmp_path):
+    (tmp_path / "config").mkdir()
+    client = TestClient(create_app(tmp_path))
+    session = client.post(
+        "/api/v1/tools/cluster-control/unlock", json={"password": "SmartStitch123@"}
+    ).json()["access_token"]
+    response = client.post(
+        "/api/v1/tools/cluster-control/nodes",
+        headers={"Authorization": f"Bearer {session}"},
+        json={"url": "http://127.0.0.1:8767", "token": "SmartStitch123@"},
+    )
+    assert response.status_code == 422
+    assert "工作机启用后显示的随机令牌" in response.json()["detail"][0]["msg"]
