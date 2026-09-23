@@ -935,6 +935,22 @@ class BatchDedupRequest(BaseModel):
     )
 
 
+class FolderConcatRequest(BaseModel):
+    directory_a: str
+    directory_b: str
+    output_directory: str | None = None
+
+    _normalize_directory_a = field_validator("directory_a", mode="before")(
+        normalize_path_input
+    )
+    _normalize_directory_b = field_validator("directory_b", mode="before")(
+        normalize_path_input
+    )
+    _normalize_output_directory = field_validator("output_directory", mode="before")(
+        normalize_path_input
+    )
+
+
 class ConfigUpdateRequest(BaseModel):
     yaml_text: str
 

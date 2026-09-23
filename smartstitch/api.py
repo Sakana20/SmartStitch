@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from . import __version__
 from .audio_preview import AudioPreviewError, create_audio_preview
@@ -34,6 +35,7 @@ from .feishu import (
     FeishuSettingsStore,
     FeishuSyncManager,
 )
+from .folder_concat import inspect_folders
 from .jobs import JobManager, TERMINAL_STATES
 from .library import (
     MAX_VISUAL_BORDER_BYTES,
@@ -57,6 +59,7 @@ from .models import (
     DeletePoolRequest,
     FeishuConnectionTestRequest,
     FeishuSettingsUpdateRequest,
+    FolderConcatRequest,
     GlobalVisualEffectLibraryCreateRequest,
     GlobalVisualEffectLibraryUpdateRequest,
     GlobalVisualBorderUpdateRequest,
@@ -78,6 +81,7 @@ from .models import (
 )
 from .planner import PlanError, build_plan
 from .probe_cache import MediaProbeCache
+from .prores_alpha import ProResAlphaManager
 from .runtime import (
     ApplicationInstanceLock,
     configure_bundled_media_tools,
@@ -106,6 +110,11 @@ CONFIG_DIRECTORY_ENV = "SMARTSTITCH_CONFIG_DIRECTORY"
 
 class SharedConfigUnavailableError(RuntimeError):
     pass
+
+
+class ProResAlphaRequest(BaseModel):
+    source_directory: str
+    destinations: dict[str, str] | None = None
 
 
 def alternate_shared_config_directories(parent: Path) -> list[Path]:
@@ -218,6 +227,7 @@ def create_app(
         timeline_analyzer = TimelineAnalyzer(resolved_data_directory / "timelines")
         timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
         slice_job_manager = SliceJobManager(timeline_slicer, database_store)
+        prores_alpha_manager = ProResAlphaManager(visual_border_library)
         cluster_access = ClusterAccess()
         release_checker = NASUpdateChecker(
             None if resolved_config_directory == local_config_directory
@@ -231,6 +241,7 @@ def create_app(
             try:
                 yield
             finally:
+                prores_alpha_manager.shutdown()
                 instance_lock.release()
 
         app = FastAPI(title="SmartStitch", version=__version__, lifespan=lifespan)
@@ -247,6 +258,7 @@ def create_app(
     app.state.library_service = library_service
     app.state.visual_border_library = visual_border_library
     app.state.job_manager = job_manager
+    app.state.prores_alpha_manager = prores_alpha_manager
     app.state.feishu_settings = feishu_settings
     app.state.feishu_sync_manager = feishu_sync_manager
     app.state.feishu_client_factory = FeishuBaseClient
@@ -1331,6 +1343,45 @@ def create_app(
             return job_manager.create_batch_dedup(request)
         except (ConfigError, FileNotFoundError, PlanError, ValueError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/folder-concat/preview")
+    def preview_folder_concat(request: FolderConcatRequest) -> dict[str, object]:
+        try:
+            return inspect_folders(request)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/folder-concat")
+    def create_folder_concat(request: FolderConcatRequest) -> dict[str, object]:
+        try:
+            return job_manager.create_folder_concat(request)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/prores-alpha")
+    def create_prores_alpha(request: ProResAlphaRequest) -> dict[str, object]:
+        try:
+            return prores_alpha_manager.create(request.source_directory, request.destinations)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/prores-alpha/preview")
+    def preview_prores_alpha(request: ProResAlphaRequest) -> dict[str, object]:
+        try:
+            return prores_alpha_manager.preview(request.source_directory)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/tools/prores-alpha/latest")
+    def latest_prores_alpha() -> dict[str, object] | None:
+        return prores_alpha_manager.latest()
+
+    @app.get("/api/v1/tools/prores-alpha/{job_id}")
+    def get_prores_alpha(job_id: str) -> dict[str, object]:
+        try:
+            return prores_alpha_manager.get(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "ProRes 4444 任务不存在") from exc
 
     @app.get("/api/v1/tools/batch-dedup/settings")
     def get_batch_dedup_settings() -> dict[str, object]:

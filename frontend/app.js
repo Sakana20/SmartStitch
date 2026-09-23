@@ -114,11 +114,12 @@ const pathQuotePairs = { "'": "'", '"': '"', "‘": "’", "“": "”" };
 // Add tools here; each tool owns its panel through mount(container) when ready.
 const toolboxTools = [
   { id: "cluster-control", title: "SmartStitch 集群控制", description: "管理多机协作的入口。输入密码后查看功能占位。", cover: "/assets/tools/cluster-control.svg", order: 0, protected: true, mount: mountClusterControlTool },
-  { id: "jianying-prores-4444", title: "剪映 ProRes 4444 处理", description: "处理剪映导出的 ProRes 4444 视频；具体流程待确定。", cover: "/assets/tools/jianying-prores-4444.svg", order: 5, mount: null },
-  { id: "folder-concat", title: "文件夹拼接", description: "选择两个文件夹，批量拼接视频。", cover: "/assets/tools/folder-concat.svg", order: 10, mount: null },
+  { id: "jianying-prores-4444", title: "ProRes 4444 处理", description: "将黑底视频批量转换为带透明通道的 ProRes 4444 MOV。", cover: "/assets/tools/jianying-prores-4444.svg", order: 5, mount: mountProResAlphaTool },
+  { id: "folder-concat", title: "文件夹拼接", description: "选择两个文件夹，批量拼接视频。", cover: "/assets/tools/folder-concat.svg", order: 10, mount: mountFolderConcatTool },
   { id: "batch-dedup", title: "批量去重", description: "选择文件夹，逐条应用现有视觉去重效果。", cover: "/assets/tools/batch-dedup.svg", order: 20, mount: mountBatchDedupTool },
 ];
 let toolboxCleanup = null;
+let proresAlphaJobId = null;
 
 function normalizePathInput(value) {
   const normalized = String(value ?? "").trim();
@@ -793,6 +794,219 @@ function closeToolboxTool(restoreFocus = true) {
   $("#toolboxCatalog").classList.remove("hidden");
   $("#toolboxDetail").classList.add("hidden");
   if (restoreFocus && activeId) $("#toolboxGrid").querySelector(`[data-tool-id="${activeId}"]`)?.focus();
+}
+
+function mountFolderConcatTool(container) {
+  let preview = null;
+  let disposed = false;
+  container.innerHTML = `<div class="folder-concat-tool">
+    <label class="field"><span>A 文件夹 · 拼接在前</span><div class="directory-picker-row">
+      <input id="folderConcatA" type="text" data-path-input placeholder="选择或粘贴文件夹路径">
+      <button class="button secondary small" type="button" data-pick-folder="folderConcatA">选择文件夹</button>
+    </div></label>
+    <label class="field"><span>B 文件夹 · 拼接在后</span><div class="directory-picker-row">
+      <input id="folderConcatB" type="text" data-path-input placeholder="选择或粘贴文件夹路径">
+      <button class="button secondary small" type="button" data-pick-folder="folderConcatB">选择文件夹</button>
+    </div></label>
+    <label class="field"><span>输出位置 <small>留空则保存到 A 文件夹的上级目录</small></span><div class="directory-picker-row">
+      <input id="folderConcatOutput" type="text" data-path-input placeholder="可选择输出文件夹">
+      <button class="button secondary small" type="button" data-pick-folder="folderConcatOutput">选择文件夹</button>
+    </div></label>
+    <p class="toolbox-intro">仅读取各文件夹第一层的 MP4、MOV、M4V、MKV、WebM 视频。按文件名排序后逐条配对，先 A 后 B；多出的视频不处理。每组生成一条 MP4，保存到新的批次目录，源视频保留。</p>
+    <div class="actions"><button id="folderConcatPreview" class="button secondary" type="button">预览配对</button><button id="folderConcatStart" class="button primary" type="button">开始拼接</button></div>
+    <div id="folderConcatResult" aria-live="polite"></div>
+  </div>`;
+  const input = id => container.querySelector(`#${id}`);
+  const resultBox = input("folderConcatResult");
+  const values = () => ({
+    directory_a: normalizePathInput(input("folderConcatA").value),
+    directory_b: normalizePathInput(input("folderConcatB").value),
+    output_directory: normalizePathInput(input("folderConcatOutput").value) || null,
+  });
+  const requireFolders = payload => {
+    if (!payload.directory_a || !payload.directory_b) {
+      toast("请先选择 A 和 B 文件夹", true);
+      return false;
+    }
+    return true;
+  };
+  container.querySelectorAll("[data-pick-folder]").forEach(button => button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const result = await api("/system/directory-picker", { method: "POST" });
+      if (!result.cancelled) {
+        input(button.dataset.pickFolder).value = result.path;
+        preview = null;
+        resultBox.replaceChildren();
+      }
+    } catch (error) { toast(error.message, true); }
+    finally { button.disabled = false; }
+  }));
+  container.querySelectorAll("input").forEach(field => field.addEventListener("input", () => {
+    preview = null;
+    resultBox.replaceChildren();
+  }));
+  input("folderConcatPreview").addEventListener("click", async event => {
+    const payload = values();
+    if (!requireFolders(payload)) return;
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      preview = await api("/tools/folder-concat/preview", { method: "POST", body: JSON.stringify(payload) });
+      if (disposed) return;
+      resultBox.innerHTML = `<section class="prores-result">
+        <strong>可拼接 ${preview.pair_count} 组 · A ${preview.count_a} 条 · B ${preview.count_b} 条</strong>
+        ${preview.unpaired_a || preview.unpaired_b ? `<p>A 多出 ${preview.unpaired_a} 条，B 多出 ${preview.unpaired_b} 条；这些视频不会参与本次任务。</p>` : ""}
+        <ul>${preview.pairs.map((pair, index) => `<li><span>${index + 1}. ${escapeHtml(pair.a_name)} → ${escapeHtml(pair.b_name)}</span></li>`).join("")}</ul>
+      </section>`;
+    } catch (error) { preview = null; toast(error.message, true); }
+    finally { button.disabled = false; }
+  });
+  input("folderConcatStart").addEventListener("click", async event => {
+    const payload = values();
+    if (!requireFolders(payload)) return;
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const job = await api("/tools/folder-concat", { method: "POST", body: JSON.stringify(payload) });
+      toast(`已提交 ${job.count} 组视频拼接任务`);
+      await loadJobs();
+      await switchView("jobs");
+      openJob(job.id);
+    } catch (error) { toast(error.message, true); button.disabled = false; }
+  });
+  return () => { disposed = true; };
+}
+
+function mountProResAlphaTool(container) {
+  let job = null;
+  let preview = null;
+  let previewRequestedSource = "";
+  let effectLibraries = [];
+  const destinations = {};
+  let disposed = false;
+  let timer = null;
+  container.innerHTML = `<div class="prores-tool">
+    <label class="field"><span>源视频文件夹</span><div class="directory-picker-row">
+      <input id="proresSourceDirectory" type="text" data-path-input placeholder="选择或粘贴文件夹路径">
+      <button id="proresChooseDirectory" class="button secondary small" type="button">选择文件夹</button>
+    </div></label>
+    <p class="toolbox-intro">读取所选文件夹第一层的 MP4、MOV、M4V、MKV 视频。逐条选择保存位置，将黑色转为透明并去除音频；源视频保留。</p>
+    <div class="actions"><button id="proresPreview" class="button secondary" type="button">读取待转换视频</button><button id="proresStart" class="button primary" type="button" disabled>开始批量转换</button></div>
+    <div id="proresPreviewList"></div>
+    <div id="proresResult" aria-live="polite"></div>
+  </div>`;
+  const sourceInput = container.querySelector("#proresSourceDirectory");
+  const startButton = container.querySelector("#proresStart");
+  const previewButton = container.querySelector("#proresPreview");
+  const previewBox = container.querySelector("#proresPreviewList");
+  const resultBox = container.querySelector("#proresResult");
+  const availableDestinations = () => [
+    { id: "alpha_output", label: "Alpha输出", path: "源文件夹/Alpha输出" },
+    ...["effect_1", "effect_2"].map(id => {
+      const library = effectLibraries.find(item => item.library_id === id);
+      return { id, label: library ? `${id} · ${library.name}` : `${id} · 未创建`, path: library?.directory || "", disabled: !library };
+    }),
+  ];
+  const renderPreview = () => {
+    if (!preview || disposed) return;
+    const options = availableDestinations();
+    previewBox.innerHTML = `<section class="prores-result prores-preview">
+      <strong>待转换 ${preview.count} 条</strong>
+      <p>保存位置与切片分类一样，可逐条选择。选择 effect_1 或 effect_2 时，文件直接进入对应全局特效库。</p>
+      <div class="prores-preview-list">${preview.files.map((name, index) => `<div class="prores-preview-row">
+        <b>${String(index + 1).padStart(2, "0")}</b><span>${escapeHtml(name)}</span>
+        <select class="segment-type-select" data-prores-destination="${escapeHtml(name)}" aria-label="${escapeHtml(name)} 保存位置">
+          ${options.map(option => `<option value="${option.id}" ${destinations[name] === option.id ? "selected" : ""} ${option.disabled ? "disabled" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+        </select>
+      </div>`).join("")}</div>
+      <p>快捷位置：${options.slice(1).map(option => escapeHtml(option.path || `${option.id} 尚未创建`)).join(" · ")}</p>
+    </section>`;
+    previewBox.querySelectorAll("[data-prores-destination]").forEach(select => select.addEventListener("change", () => {
+      destinations[select.dataset.proresDestination] = select.value;
+    }));
+  };
+  const loadPreview = async () => {
+    const source = normalizePathInput(sourceInput.value);
+    if (!source) return toast("请先选择源视频文件夹", true);
+    previewButton.disabled = true;
+    try {
+      const [nextPreview, libraries] = await Promise.all([
+        api("/tools/prores-alpha/preview", { method: "POST", body: JSON.stringify({ source_directory: source }) }),
+        api("/global-assets/visual-effect-libraries"),
+      ]);
+      if (disposed) return;
+      preview = nextPreview;
+      previewRequestedSource = source;
+      effectLibraries = libraries.libraries || [];
+      Object.keys(destinations).forEach(key => { if (!preview.files.includes(key)) delete destinations[key]; });
+      preview.files.forEach(name => { if (!destinations[name] || !availableDestinations().some(item => item.id === destinations[name] && !item.disabled)) destinations[name] = "alpha_output"; });
+      renderPreview();
+      startButton.disabled = Boolean(job && !["completed", "partial_failed", "failed", "interrupted"].includes(job.status));
+    } catch (error) { preview = null; previewBox.replaceChildren(); startButton.disabled = true; toast(error.message, true); }
+    finally { previewButton.disabled = false; }
+  };
+  sourceInput.addEventListener("input", () => { preview = null; previewRequestedSource = ""; previewBox.replaceChildren(); startButton.disabled = true; });
+  previewButton.addEventListener("click", loadPreview);
+  const render = () => {
+    if (disposed || !job) return;
+    const active = !["completed", "partial_failed", "failed", "interrupted"].includes(job.status);
+    startButton.disabled = active || !preview;
+    const status = job.status === "completed" ? "转换完成" : job.status === "partial_failed" ? "部分转换失败" : job.status === "failed" ? "转换失败" : job.status === "interrupted" ? "任务已中断" : "正在转换";
+    resultBox.innerHTML = `<section class="prores-result">
+      <strong>${status} · ${job.completed}/${job.total}</strong>
+      <progress value="${job.completed}" max="${job.total}"></progress>
+      <p>成功 ${job.succeeded} 条 · 失败 ${job.failed} 条${job.current_file ? ` · 当前：${escapeHtml(job.current_file)}` : ""}</p>
+      ${job.error ? `<p class="field-validation">${escapeHtml(job.error)}</p>` : ""}
+      <ul>${job.files.map(file => `<li><span>${escapeHtml(file.source)} → ${escapeHtml(file.output_directory)}/${escapeHtml(file.output)}</span><small>${file.status === "completed" ? "成功" : file.status === "failed" ? `失败：${escapeHtml(file.error || "未知错误")}` : file.status === "running" ? "处理中" : "等待中"}</small></li>`).join("")}</ul>
+    </section>`;
+  };
+  const refresh = async () => {
+    if (!proresAlphaJobId || disposed) return;
+    try {
+      job = await api(`/tools/prores-alpha/${encodeURIComponent(proresAlphaJobId)}`);
+      if (disposed) return;
+      render();
+      if (["completed", "partial_failed", "failed", "interrupted"].includes(job.status)) { clearInterval(timer); timer = null; }
+    } catch (error) {
+      if (!disposed) { clearInterval(timer); timer = null; resultBox.textContent = error.message; }
+    }
+  };
+  container.querySelector("#proresChooseDirectory").addEventListener("click", async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const result = await api("/system/directory-picker", { method: "POST" });
+      if (!result.cancelled) { sourceInput.value = result.path; await loadPreview(); }
+    } catch (error) { toast(error.message, true); }
+    finally { button.disabled = false; }
+  });
+  startButton.addEventListener("click", async () => {
+    const source = normalizePathInput(sourceInput.value);
+    if (!source || !preview || previewRequestedSource !== source) return toast("请先读取待转换视频", true);
+    startButton.disabled = true;
+    try {
+      job = await api("/tools/prores-alpha", { method: "POST", body: JSON.stringify({ source_directory: source, destinations }) });
+      proresAlphaJobId = job.id;
+      render();
+      clearInterval(timer);
+      timer = setInterval(refresh, 1000);
+      await refresh();
+    } catch (error) { toast(error.message, true); startButton.disabled = false; }
+  });
+  if (!proresAlphaJobId) {
+    api("/tools/prores-alpha/latest").then(latest => {
+      if (disposed || !latest) return;
+      proresAlphaJobId = latest.id;
+      job = latest;
+      render();
+      if (!["completed", "partial_failed", "failed", "interrupted"].includes(job.status)) timer = setInterval(refresh, 1000);
+    }).catch(error => { if (!disposed) resultBox.textContent = error.message; });
+  } else {
+    timer = setInterval(refresh, 1000);
+    refresh();
+  }
+  return () => { disposed = true; clearInterval(timer); };
 }
 
 function mountBatchDedupTool(container) {
@@ -3369,7 +3583,7 @@ function renderJobs() {
     const pct = isSlice ? Number(job.progress || 0) * 100 : (total ? done / total * 100 : 0);
     const sourceName = job.source?.name || job.source?.path?.split(/[\\/]/).pop();
     const title = isSlice ? sourceName : job.config_name;
-    const typeLabel = isSlice ? "切片入库" : (job.job_type === "batch_dedup" ? "批量去重" : "成片渲染");
+    const typeLabel = isSlice ? "切片入库" : (job.job_type === "batch_dedup" ? "批量去重" : job.job_type === "folder_concat" ? "文件夹拼接" : "成片渲染");
     return `<div class="job-row" data-job-id="${job.id}" data-job-type="${isSlice ? "slice" : "render"}"><div><strong>${escapeHtml(title || "未命名任务")}</strong><small>${typeLabel} · ${formatDate(job.created_at)} · #${job.short_id}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${done}/${total} 已处理</small></div><span class="status ${cls}">${label}</span><span class="job-count">成功 ${job.success_count || 0} · 失败 ${job.failure_count || 0}</span><b>›</b></div>`;
   }).join("");
   $$(".job-row").forEach(row => row.addEventListener("click", () => {
@@ -3464,7 +3678,7 @@ function renderJobDetail(job) {
   const [label, cls] = statusInfo(job.status); const done = job.success_count + job.failure_count; const totalProgress = job.items.reduce((sum, item) => sum + item.progress, 0) / job.count * 100;
   $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">BATCH #${job.short_id}</p><h2>${escapeHtml(job.config_name)}</h2><span class="status ${cls}">${label}</span><p>${escapeHtml(job.output_directory)}</p></div>
     <div class="big-progress"><div><span>总体进度</span><b>${totalProgress.toFixed(1)}%</b></div><div class="bar"><i style="width:${totalProgress}%"></i></div></div>
-    <div class="seed-card"><span>随机种子</span><strong>${job.seed}</strong></div>
+    ${job.job_type === "folder_concat" ? "" : `<div class="seed-card"><span>随机种子</span><strong>${job.seed}</strong></div>`}
     ${renderFeishuSyncPanel(job)}
     ${!terminalStates.has(job.status) ? `<button id="cancelJobBtn" class="button secondary" style="width:100%">取消剩余任务</button>` : ""}
     ${terminalStates.has(job.status) ? `<div class="record-delete-zone">
@@ -3481,7 +3695,7 @@ function renderJobDetail(job) {
       const [itemLabel,itemCls] = statusInfo(item.status);
       const selections = Object.entries(item.selections || {})
         .filter(([, asset]) => asset)
-        .map(([category, asset]) => `${job.job_type === "batch_dedup" ? "源视频" : categoryLabel(category)}：${asset.name}`)
+        .map(([category, asset]) => `${job.job_type === "batch_dedup" ? "源视频" : job.job_type === "folder_concat" ? (category === "pool_1" ? "A" : "B") : categoryLabel(category)}：${asset.name}`)
         .join("　·　");
       return `<div class="item-row"><b>${String(item.index).padStart(2,"0")}</b><div><strong>${escapeHtml(item.output_name)}</strong><small class="item-selections">${escapeHtml(selections)}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${item.progress*100}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
     }).join("")}</div>`;

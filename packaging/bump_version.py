@@ -51,6 +51,11 @@ def main() -> int:
         nargs="?",
         help="可选的指定版本，例如 0.2.0 或 v1.0.0；省略时自动递增补丁版本",
     )
+    parser.add_argument(
+        "--no-tag-hint",
+        action="store_true",
+        help="只输出版本更新结果，不显示 GitHub Tag 发布提示",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -122,9 +127,10 @@ def main() -> int:
         raise RuntimeError("uv.lock 未正确更新，已恢复原文件")
 
     print(f"SmartStitch 版本已从 {project_version} 更新为 {new_version}")
-    print("请检查变更、提交到 main，然后创建并推送 Tag：")
-    print(f"  git tag v{new_version}")
-    print(f"  git push origin v{new_version}")
+    if not args.no_tag_hint:
+        print("请检查变更、提交到 main，然后创建并推送 Tag：")
+        print(f"  git tag v{new_version}")
+        print(f"  git push origin v{new_version}")
     return 0
 
 

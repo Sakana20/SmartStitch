@@ -18,7 +18,8 @@ import yaml
 
 from .config import ConfigStore
 from .database import SQLiteStore
-from .models import AppConfig, BatchDedupRequest, JobCreateRequest, SourceMode, VisualDedupConfig
+from .folder_concat import VIDEO_SUFFIXES, inspect_folders
+from .models import AppConfig, BatchDedupRequest, FolderConcatRequest, JobCreateRequest, SourceMode, VisualDedupConfig
 from .planner import build_plan
 from .probe_cache import MediaProbeCache
 from .renderer import render_item
@@ -98,6 +99,126 @@ class JobManager:
             dedup_source=request.source_directory,
             dedup_visual=request.visual_dedup,
         )
+
+    def create_folder_concat(self, request: FolderConcatRequest) -> dict[str, Any]:
+        preview = inspect_folders(request)
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            raise ValueError("找不到 FFmpeg 或 ffprobe")
+        output_root = (
+            Path(request.output_directory).expanduser().resolve()
+            if request.output_directory else Path(preview["directory_a"]).parent
+        )
+        if not output_root.is_dir():
+            raise ValueError("输出位置不存在或不是文件夹")
+        config = self._folder_concat_config(preview, output_root)
+        scan = scan_config(config, probe_cache=self.media_probe_cache)
+        assets_by_path = {
+            category: {asset.path: asset for asset in scan.assets[category]}
+            for category in ("pool_1", "pool_2")
+        }
+        invalid = [
+            asset
+            for pair in preview["pairs"]
+            for category, path in (("pool_1", pair["a"]), ("pool_2", pair["b"]))
+            if not (asset := assets_by_path[category][path]).selectable
+        ]
+        if invalid:
+            details = "；".join(f"{asset.name}: {asset.error or '不可用'}" for asset in invalid[:5])
+            raise ValueError(f"文件夹中有不可用视频，请先处理：{details}")
+        first = assets_by_path["pool_1"][preview["pairs"][0]["a"]].probe
+        if first.width and first.height:
+            config.output.width = max(2, first.width // 2 * 2)
+            config.output.height = max(2, first.height // 2 * 2)
+        if first.fps:
+            config.output.fps = first.fps
+        job_id = uuid.uuid4().hex
+        short_id = job_id[:8]
+        batch_directory = self._batch_directory(config, short_id)
+        free_gb = shutil.disk_usage(output_root).free / (1024**3)
+        if free_gb < config.batch.minimum_free_space_gb:
+            raise OSError(f"输出磁盘剩余空间 {free_gb:.2f} GB，低于配置要求")
+        batch_directory.mkdir(parents=True, exist_ok=False)
+        snapshot_path = batch_directory / "config.snapshot.yaml"
+        snapshot_path.write_text(
+            yaml.safe_dump(config.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        items = []
+        used_names: set[str] = set()
+        for index, pair in enumerate(preview["pairs"], start=1):
+            a = assets_by_path["pool_1"][pair["a"]]
+            b = assets_by_path["pool_2"][pair["b"]]
+            base = f"{Path(pair['a_name']).stem}_拼接"
+            output_name = f"{base}.mp4"
+            suffix = 2
+            while output_name.casefold() in used_names:
+                output_name = f"{base}_{suffix}.mp4"
+                suffix += 1
+            used_names.add(output_name.casefold())
+            items.append({
+                "index": index, "status": "pending", "progress": 0.0,
+                "output_name": output_name,
+                "output_path": str(batch_directory / output_name),
+                "estimated_duration": round(a.probe.duration + b.probe.duration, 3),
+                "actual_duration": None,
+                "planned_video_encoder": config.output.video_codec,
+                "actual_video_encoder": None,
+                "hardware_acceleration": False,
+                "encoder_fallback_reason": None,
+                "attempts": 0, "error": None,
+                "selections": {
+                    "pool_1": a.model_dump(mode="json"),
+                    "pool_2": b.model_dump(mode="json"),
+                },
+                "overlay": None, "visual_border": None,
+                "visual_effects": [], "naming": None,
+            })
+        job = {
+            "id": job_id, "job_type": "folder_concat",
+            "source_directory": preview["directory_a"],
+            "source_directory_b": preview["directory_b"],
+            "short_id": short_id, "config_id": config.id,
+            "config_name": config.name, "schema_version": config.schema_version,
+            "workflow_type": config.workflow_type,
+            "timeline": list(config.timeline),
+            "pool_labels": {"pool_1": "A 文件夹", "pool_2": "B 文件夹"},
+            "status": "draft", "count": len(items), "seed": None,
+            "algorithm": "filename_order_pairing", "algorithm_version": 1,
+            "distribution": {},
+            "warnings": [f"多出的 {preview['unpaired_a']} 条 A 视频和 {preview['unpaired_b']} 条 B 视频未配对"]
+            if preview["unpaired_a"] or preview["unpaired_b"] else [],
+            "output_directory": str(batch_directory),
+            "config_snapshot_path": str(snapshot_path),
+            "visual_dedup": config.visual_dedup.model_dump(mode="json"),
+            "feishu_base_sync": config.output.feishu_base_sync.model_dump(mode="json"),
+            "concurrency": config.batch.concurrency,
+            "retry_count": config.batch.retry_count,
+            "success_count": 0, "failure_count": 0,
+            "created_at": _now(), "started_at": None,
+            "finished_at": None, "items": items,
+        }
+        self.database.save(job)
+        self._write_manifest(job)
+        self.start(job_id)
+        return self.get_job(job_id)
+
+    @staticmethod
+    def _folder_concat_config(preview: dict[str, Any], output_root: Path) -> AppConfig:
+        return AppConfig.model_validate({
+            "schema_version": 3, "workflow_type": "generic",
+            "id": "folder-concat", "name": "文件夹拼接",
+            "source_root": preview["directory_a"],
+            "timeline": ["pool_1", "pool_2"],
+            "sources": {
+                "pool_1": {"label": "A 文件夹", "mode": "required",
+                           "directory": preview["directory_a"], "extensions": sorted(VIDEO_SUFFIXES)},
+                "pool_2": {"label": "B 文件夹", "mode": "required",
+                           "directory": preview["directory_b"], "extensions": sorted(VIDEO_SUFFIXES)},
+            },
+            "benefit_overlays": {"mode": "disabled", "file": ""},
+            "output": {"directory": str(output_root), "video_codec": "libx264"},
+            "batch": {"minimum_free_space_gb": 0.5, "retry_count": 0},
+        })
 
     def get_batch_dedup_settings(self) -> VisualDedupConfig:
         with self.lock:

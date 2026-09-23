@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import platform
 import subprocess
 import sys
 import tomllib
@@ -34,14 +36,16 @@ def choose_version(current: str, latest: str | None, current_tag_exists: bool) -
 def run_release(nas_root: Path, notes: str) -> str:
     if not nas_root.is_dir():
         raise RuntimeError(f"未连接 NAS：{nas_root}")
-    if sys.platform != "darwin":
-        raise RuntimeError("只能在 macOS 上构建和发布 DMG")
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        raise RuntimeError("只能在 Apple Silicon Mac 上构建和发布 arm64 DMG")
     venv = PROJECT_ROOT / ".venv" / "bin"
     python = venv / "python"
     if not python.is_file():
         raise RuntimeError("找不到 .venv/bin/python，请先安装项目的发布依赖")
     if not (PROJECT_ROOT / "build/ffmpeg-arm64/bin/ffmpeg").is_file():
         raise RuntimeError("找不到内置 FFmpeg，请先构建 build/ffmpeg-arm64")
+    environment = os.environ.copy()
+    environment["PATH"] = f"{venv}:{environment.get('PATH', '')}"
 
     current = tomllib.loads(
         (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -71,17 +75,14 @@ def run_release(nas_root: Path, notes: str) -> str:
     if target != current:
         print(f"自动递增版本：v{current} → v{target}", flush=True)
         subprocess.run(
-            [str(python), "packaging/bump_version.py", target],
+            [str(python), "packaging/bump_version.py", target, "--no-tag-hint"],
             cwd=PROJECT_ROOT,
+            env=environment,
             check=True,
         )
     else:
         print(f"继续未发布的版本 v{current}", flush=True)
 
-    import os
-
-    environment = os.environ.copy()
-    environment["PATH"] = f"{venv}:{environment.get('PATH', '')}"
     version_tag = f"v{target}"
     subprocess.run(
         ["bash", "packaging/build_app.sh", version_tag],

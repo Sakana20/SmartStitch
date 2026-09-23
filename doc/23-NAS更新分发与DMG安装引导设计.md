@@ -1,6 +1,6 @@
 # NAS 更新分发与 DMG 安装引导设计
 
-> 状态：首期实现于 2026-09-23。发布包由现有构建流程生成，发布者用 `packaging/publish_nas_update.py` 将 DMG 发布到 NAS；客户端不查询 GitHub 更新。首期的“自动分发”指自动发现、下载和校验，安装仍由用户在 DMG 中拖拽完成。真实 NAS 双机验收仍待执行。
+> 状态：首期实现于 2026-09-23。构建 Mac 可用 `packaging/release_to_nas.py` 自动递增版本、构建 DMG 并发布到 NAS；已有 DMG 可单独用 `packaging/publish_nas_update.py` 发布。客户端不查询 GitHub 更新。首期的“自动分发”指自动发现、下载和校验，安装仍由用户在 DMG 中拖拽完成。真实 NAS 双机验收仍待执行。
 
 ## 1. 现状与目标
 
