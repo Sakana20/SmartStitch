@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480" viewBox="0 0 640 480" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="640" y2="480" gradientUnits="userSpaceOnUse"><stop stop-color="#E2EEE5"/><stop offset="1" stop-color="#F8F5E8"/></linearGradient>
+    <pattern id="alpha" width="32" height="32" patternUnits="userSpaceOnUse"><rect width="32" height="32" fill="#F8FAF5"/><rect width="16" height="16" fill="#D9EADF"/><rect x="16" y="16" width="16" height="16" fill="#D9EADF"/></pattern>
+  </defs>
+  <rect width="640" height="480" fill="url(#bg)"/>
+  <circle cx="532" cy="75" r="150" fill="#D9F172" fill-opacity=".28"/>
+  <rect x="95" y="94" width="450" height="292" rx="24" fill="#FFF" stroke="#B7CEC0" stroke-width="4"/>
+  <rect x="119" y="119" width="402" height="243" rx="11" fill="url(#alpha)"/>
+  <rect x="119" y="119" width="402" height="29" rx="11" fill="#1D5C43"/>
+  <circle cx="140" cy="134" r="5" fill="#D9F172"/>
+  <circle cx="158" cy="134" r="5" fill="#B4D6C0"/>
+  <rect x="189" y="172" width="262" height="152" rx="16" fill="#FFF" fill-opacity=".9"/>
+  <path d="m291 204 79 44-79 44v-88Z" fill="#1D5C43"/>
+  <rect x="234" y="341" width="172" height="41" rx="13" fill="#1D5C43"/>
+  <path d="M259 355h121m-121 13h91" stroke="#D9EADF" stroke-width="6" stroke-linecap="round"/>
+</svg>

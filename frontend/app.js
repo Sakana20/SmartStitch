@@ -114,6 +114,7 @@ const pathQuotePairs = { "'": "'", '"': '"', "‘": "’", "“": "”" };
 // Add tools here; each tool owns its panel through mount(container) when ready.
 const toolboxTools = [
   { id: "cluster-control", title: "SmartStitch 集群控制", description: "管理多机协作的入口。输入密码后查看功能占位。", cover: "/assets/tools/cluster-control.svg", order: 0, protected: true, mount: mountClusterControlTool },
+  { id: "jianying-prores-4444", title: "剪映 ProRes 4444 处理", description: "处理剪映导出的 ProRes 4444 视频；具体流程待确定。", cover: "/assets/tools/jianying-prores-4444.svg", order: 5, mount: null },
   { id: "folder-concat", title: "文件夹拼接", description: "选择两个文件夹，批量拼接视频。", cover: "/assets/tools/folder-concat.svg", order: 10, mount: null },
   { id: "batch-dedup", title: "批量去重", description: "选择文件夹，逐条应用现有视觉去重效果。", cover: "/assets/tools/batch-dedup.svg", order: 20, mount: mountBatchDedupTool },
 ];

@@ -86,7 +86,7 @@ h1 em { color: var(--green); font-weight: 500; }
 .cluster-placeholder { border-color: rgba(29,92,67,.2); background: linear-gradient(145deg, rgba(217,234,223,.8), rgba(255,255,255,.7)); }
 .cluster-placeholder > p { margin-bottom: 0; }
 .batch-dedup-tool { display: grid; gap: 22px; }
-.batch-dedup-tool > .field { max-width: 760px; }
+.batch-dedup-tool > .field { width: 100%; min-width: 0; }
 .batch-dedup-tool > .toolbox-intro { margin: 0; }
 .batch-dedup-tool > .actions { justify-content: flex-end; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 28px; }
