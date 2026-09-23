@@ -15,7 +15,15 @@ from .naming import (
     derive_plan_naming,
     render_plan_filename,
 )
-from .models import AppConfig, Asset, BatchPlan, PlanItem, ScanResult, SourceMode
+from .models import (
+    AppConfig,
+    Asset,
+    BatchPlan,
+    PlannedVisualEffect,
+    PlanItem,
+    ScanResult,
+    SourceMode,
+)
 
 
 class PlanError(ValueError):
@@ -320,27 +328,33 @@ def build_plan(
     elif overlay_required:
         raise PlanError("风险提示语图片为必需，但没有可用图片")
 
-    border_enabled = (
-        config.visual_dedup.enabled
-        and config.visual_dedup.border_overlay.mode != SourceMode.DISABLED
+    effect_layers = (
+        [layer for layer in config.visual_dedup.resolved_effect_layers() if layer.enabled]
+        if config.visual_dedup.enabled
+        else []
     )
-    border_assets = _selectable(scan, "visual_border") if border_enabled else []
-    visual_borders: list[Asset | None] = [None] * count
-    border_required = (
-        border_enabled
-        and config.visual_dedup.border_overlay.mode == SourceMode.REQUIRED
-    )
-    if border_assets:
-        if config.visual_dedup.border_overlay.selection_mode == "fixed":
-            if len(border_assets) != 1:
-                raise PlanError("固定模式必须且只能选择一个视觉去重边框")
-            visual_borders = [border_assets[0]] * count
+    effect_sequences: dict[str, list[Asset | None]] = {}
+    for layer in effect_layers:
+        if layer.type == "blur_frame":
+            effect_sequences[layer.layer_id] = [None] * count
+            continue
+        category = f"visual_effect:{layer.layer_id}"
+        candidates = _selectable(scan, category)
+        if not candidates and layer.layer_id == "legacy-visual-border":
+            candidates = _selectable(scan, "visual_border")
+        if candidates:
+            if layer.selection_mode == "fixed":
+                if len(candidates) != 1:
+                    raise PlanError(f"{layer.name}: 固定模式必须且只能选择一个素材")
+                effect_sequences[layer.layer_id] = [candidates[0]] * count
+            else:
+                effect_sequences[layer.layer_id] = _sequence(
+                    candidates, count, config.randomization.mode, rng
+                )
+        elif layer.required:
+            raise PlanError(f"{layer.name}: 没有可用特效素材")
         else:
-            visual_borders = _sequence(
-                border_assets, count, config.randomization.mode, rng
-            )
-    elif border_required:
-        raise PlanError("视觉去重边框为必需，但没有可用素材")
+            effect_sequences[layer.layer_id] = [None] * count
 
     warnings = list(scan.warnings)
     signatures: set[tuple[str | None, ...]] = set()
@@ -373,12 +387,31 @@ def build_plan(
                 raise PlanError(f"成片 {index + 1} 命名失败: {exc}") from exc
         else:
             output_name = _format_name(config, actual_seed, index + 1, batch_id)
+        visual_effects = [
+            PlannedVisualEffect(
+                layer=layer,
+                asset=effect_sequences[layer.layer_id][index],
+            )
+            for layer in effect_layers
+            if layer.type == "blur_frame"
+            or effect_sequences[layer.layer_id][index] is not None
+        ]
+        legacy_visual_border = next(
+            (
+                effect.asset
+                for effect in visual_effects
+                if effect.layer.type == "overlay"
+                and effect.layer.library_id in {"effect_1", "visual-border"}
+            ),
+            None,
+        )
         items.append(
             PlanItem(
                 index=index + 1,
                 selections=selections,
                 overlay=overlays[index],
-                visual_border=visual_borders[index],
+                visual_border=legacy_visual_border,
+                visual_effects=visual_effects,
                 output_name=output_name,
                 estimated_duration=round(duration, 3),
                 naming=naming,
@@ -392,10 +425,17 @@ def build_plan(
     for category, sequence in sequences.items():
         distribution[category] = dict(Counter(asset.name for asset in sequence if asset))
     distribution["benefit_overlay"] = dict(Counter(asset.name for asset in overlays if asset))
-    if border_enabled:
-        distribution["visual_border"] = dict(
-            Counter(asset.name for asset in visual_borders if asset)
+    for layer in effect_layers:
+        if layer.type != "overlay":
+            continue
+        sequence = effect_sequences[layer.layer_id]
+        distribution[f"visual_effect:{layer.layer_id}"] = dict(
+            Counter(asset.name for asset in sequence if asset)
         )
+        if layer.library_id in {"effect_1", "visual-border"}:
+            distribution["visual_border"] = dict(
+                Counter(asset.name for asset in sequence if asset)
+            )
     return BatchPlan(
         config_id=config.id,
         config_name=config.name,

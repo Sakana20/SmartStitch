@@ -566,7 +566,9 @@ def test_global_visual_border_api_streams_into_shared_config_root(tmp_path):
     assert payload["revision"] == 1
     assert payload["asset"]["display_name"] == border.name
     assert (tmp_path / "config" / payload["asset"]["storage_path"]).is_file()
-    assert Path(payload["directory"]) == tmp_path / "config" / "全局素材库" / "视觉去重边框"
+    assert Path(payload["directory"]) == (
+        tmp_path / "config" / "全局素材库" / "视觉特效" / "effect_1"
+    )
 
     conflict = client.patch(
         f"/api/v1/global-assets/visual-borders/{payload['asset']['asset_id']}",
@@ -581,6 +583,99 @@ def test_global_visual_border_api_streams_into_shared_config_root(tmp_path):
     assert updated.status_code == 200
     assert updated.json()["asset"]["default_weight"] == 2.5
     assert updated.json()["revision"] == 2
+
+
+def test_global_visual_effect_library_api_manages_groups_and_assets(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "config").mkdir()
+    client = TestClient(create_app(tmp_path))
+    initial = client.get("/api/v1/global-assets/visual-effect-libraries").json()
+
+    created = client.post(
+        "/api/v1/global-assets/visual-effect-libraries",
+        json={"name": "烟花", "library_revision": initial["revision"]},
+    )
+    assert created.status_code == 200
+    created_payload = created.json()
+    library_id = created_payload["library"]["library_id"]
+    assert library_id == "effect_2"
+
+    renamed = client.patch(
+        f"/api/v1/global-assets/visual-effect-libraries/{library_id}",
+        json={
+            "name": "节庆烟花",
+            "library_revision": created_payload["revision"],
+        },
+    )
+    assert renamed.status_code == 200
+    created_payload = renamed.json()
+    assert created_payload["library"]["name"] == "节庆烟花"
+    renamed_library = next(
+        item
+        for item in created_payload["libraries"]
+        if item["library_id"] == library_id
+    )
+    assert Path(renamed_library["directory"]).name == library_id
+
+    monkeypatch.setattr(
+        "smartstitch.api.open_directory_in_file_manager",
+        lambda path: {"ok": True, "path": str(path), "manager": "Finder"},
+    )
+    opened = client.post(
+        f"/api/v1/global-assets/visual-effect-libraries/{library_id}/open-directory"
+    )
+    assert opened.status_code == 200
+    assert opened.json()["folder_name"] == "effect_2"
+
+    effect = tmp_path / "烟花.mov"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i",
+            (
+                "color=c=black@0.0:s=180x320:r=2:d=0.5,format=argb,"
+                "drawbox=x=20:y=20:w=40:h=40:color=yellow@1:t=fill:replace=1"
+            ),
+            "-c:v", "qtrle", "-pix_fmt", "argb", str(effect),
+        ],
+        check=True,
+    )
+    uploaded = client.post(
+        f"/api/v1/global-assets/visual-effect-libraries/{library_id}/assets",
+        content=effect.read_bytes(),
+        headers={
+            "X-SmartStitch-Filename": quote(effect.name),
+            "X-SmartStitch-Library-Revision": str(created_payload["revision"]),
+            "Content-Type": "application/octet-stream",
+        },
+    )
+    assert uploaded.status_code == 200
+    uploaded_payload = uploaded.json()
+    asset = uploaded_payload["asset"]
+    assert asset["display_name"] == effect.name
+    assert (tmp_path / "config" / asset["storage_path"]).is_file()
+
+    deleted_asset = client.delete(
+        f"/api/v1/global-assets/visual-effect-libraries/{library_id}/assets/{asset['asset_id']}",
+        headers={
+            "X-SmartStitch-Library-Revision": str(uploaded_payload["revision"])
+        },
+    )
+    assert deleted_asset.status_code == 200
+    deleted_library = client.delete(
+        f"/api/v1/global-assets/visual-effect-libraries/{library_id}",
+        headers={
+            "X-SmartStitch-Library-Revision": str(
+                deleted_asset.json()["revision"]
+            )
+        },
+    )
+    assert deleted_library.status_code == 200
+    assert all(
+        library["library_id"] != library_id
+        for library in deleted_library.json()["libraries"]
+    )
 
 
 def test_directory_picker_api_returns_selected_path(tmp_path, monkeypatch):

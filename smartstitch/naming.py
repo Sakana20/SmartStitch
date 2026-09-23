@@ -93,13 +93,11 @@ def derive_plan_naming(
             seen_talents.add(metadata.talent)
             talents.append(metadata.talent)
         dates.append(date.fromisoformat(metadata.restriction_date))
-    if not records:
-        raise NamingError("本条成片没有可用于命名的视频素材")
     return PlanNamingMetadata(
         product=config.output.naming.product,
         benefit=config.output.naming.benefit,
         talents=talents,
-        restriction_date=min(dates).isoformat(),
+        restriction_date=min(dates).isoformat() if dates else None,
         sequence=sequence,
         sources=records,
     )
@@ -118,8 +116,11 @@ def _safe_filename(value: str) -> str:
 
 
 def render_plan_filename(config: AppConfig, naming: PlanNamingMetadata) -> str:
-    restriction_date = date.fromisoformat(naming.restriction_date).strftime(
-        config.output.naming.restriction_date.output_format
+    restriction_date = (
+        date.fromisoformat(naming.restriction_date).strftime(
+            config.output.naming.restriction_date.output_format
+        )
+        if naming.restriction_date else ""
     )
     values = {
         "product": naming.product,
@@ -128,8 +129,13 @@ def render_plan_filename(config: AppConfig, naming: PlanNamingMetadata) -> str:
         "restriction_date": restriction_date,
         "sequence": naming.sequence,
     }
+    template = config.output.naming.template
+    for field, present in (("talents", bool(naming.talents)), ("restriction_date", bool(restriction_date))):
+        if not present:
+            template = re.sub(rf"[-_ ]?\{{{field}(?::[^{{}}]*)?\}}", "", template)
+    template = template.lstrip("-_ ")
     try:
-        rendered = config.output.naming.template.format(**values)
+        rendered = template.format(**values)
     except (KeyError, ValueError) as exc:
         raise NamingError(f"成片命名模板无效: {exc}") from exc
     rendered = _safe_filename(rendered)

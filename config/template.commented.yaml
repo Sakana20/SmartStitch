@@ -82,24 +82,50 @@ benefit_overlays:
     start_seconds: 0
     end_seconds: null
 
-# 视觉去重包含两个独立功能：模糊背景/缩小前景与透明边框。
-# 边框统一来自 SmartStitch 配置根下的“全局素材库/视觉去重边框”。
-# 两项可单独或同时开启；旧配置未填写本段时均默认关闭。
+# 视觉去重使用从上到下排列的特效图层；风险提示语始终在它们上方。
+# 素材型图层引用“全局素材库/视觉特效”中的分组，模糊边框是内置图层。
 visual_dedup:
-  # 总开关；关闭时保留下方两项选择，但不执行任何视觉去重效果。
+  # 总开关；关闭时保留图层顺序和参数，但不执行任何视觉去重效果。
   enabled: false
+  effect_layers:
+    # 列表第一项视觉层级最高；每个 layer_id 在本项目内必须唯一。
+    - layer_id: blur-frame-main
+      name: 模糊边框
+      type: blur_frame
+      enabled: true
+      required: true
+      # 所有去重特效独立使用 0～100 的百分比透明度。
+      opacity_percent: 100
+      foreground_scale: 0.90
+      sigma: 20.0
+      steps: 2
+      brightness: 0.0
+    # 素材特效示例；先在全局特效库新增“烟花”分组，再取消注释并填写 library_id。
+    # - layer_id: fireworks-main
+    #   name: 烟花
+    #   type: overlay
+    #   enabled: true
+    #   required: true
+    #   opacity_percent: 80
+    #   library_id: effect_2
+    #   selection_mode: random
+    #   fixed_asset_id: ""
+    #   enabled_asset_ids: []
+    #   weights: {}
+    #   scale_mode: exact
+    #   playback: loop
+    #   alpha_mode: auto
+
+  # 以下是旧版配置兼容字段。新配置以 effect_layers 为准，请勿同时编辑。
   foreground:
-    # 0.70～1.00；简单模式“标准”为 0.90。
     scale: 0.90
   background:
-    # 仅控制模糊背景与缩小主画面，不控制透明边框。
     enabled: true
     mode: gaussian_blur
     sigma: 20.0
     steps: 2
     brightness: 0.0
   border_overlay:
-    # disabled=不叠加；optional=无兼容素材时允许生成；required=缺失时阻止生成。
     mode: disabled
     source: global_library
     # random=按权重为每条成片选择；fixed=固定使用一个素材。

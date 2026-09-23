@@ -288,6 +288,46 @@ def test_generic_scan_parses_naming_metadata_and_reports_bad_filename(tmp_path, 
     assert any(invalid.name in error and "识别达人名和限制日期" in error for error in result.errors)
 
 
+def test_disabled_naming_pool_does_not_block_scan(tmp_path, monkeypatch):
+    ordinary = tmp_path / "pool_2"
+    ordinary.mkdir()
+    (ordinary / "普通素材.mp4").write_bytes(b"video")
+    monkeypatch.setattr(
+        scanner_module,
+        "probe_media",
+        lambda *_args, **_kwargs: MediaProbe(duration=1, width=720, height=1280),
+    )
+    config = AppConfig.model_validate(
+        {
+            "schema_version": 3,
+            "workflow_type": "generic",
+            "id": "scan-disabled-naming",
+            "name": "关闭达人素材库",
+            "source_root": str(tmp_path),
+            "timeline": ["pool_1", "pool_2"],
+            "sources": {
+                "pool_1": {"label": "达人素材", "mode": "disabled", "directory": "pool_1"},
+                "pool_2": {"label": "普通素材", "directory": "pool_2"},
+            },
+            "benefit_overlays": {"mode": "disabled", "file": ""},
+            "output": {
+                "directory": str(tmp_path / "out"),
+                "naming": {
+                    "enabled": True,
+                    "product": "燕麦奶",
+                    "benefit": "第二件半价",
+                    "source_metadata": {"categories": ["pool_1"]},
+                },
+            },
+        }
+    )
+
+    result = scan_config(config)
+
+    assert result.ok
+    assert result.assets["pool_1"] == []
+
+
 def _probe_test_config(tmp_path, *, concurrency=8, cache_enabled=True):
     source = tmp_path / "source"
     source.mkdir(exist_ok=True)

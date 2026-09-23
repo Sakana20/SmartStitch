@@ -81,6 +81,81 @@ def test_visual_border_can_be_enabled_without_blurred_background(tmp_path):
     assert config.visual_dedup.border_overlay.mode == "required"
 
 
+def test_visual_effect_layers_accept_order_and_percentage_opacity(tmp_path):
+    data = config_data(tmp_path)
+    data["visual_dedup"] = {
+        "enabled": True,
+        "effect_layers": [
+            {
+                "layer_id": "fireworks",
+                "name": "烟花",
+                "type": "overlay",
+                "library_id": "fireworks",
+                "opacity_percent": 65,
+            },
+            {
+                "layer_id": "blur-frame",
+                "name": "模糊边框",
+                "type": "blur_frame",
+                "opacity_percent": 40,
+            },
+        ],
+    }
+
+    config = AppConfig.model_validate(data)
+
+    assert [layer.layer_id for layer in config.visual_dedup.effect_layers] == [
+        "fireworks",
+        "blur-frame",
+    ]
+    assert [layer.opacity_percent for layer in config.visual_dedup.effect_layers] == [
+        65,
+        40,
+    ]
+    assert config.visual_dedup.effect_layers_explicit is True
+
+
+def test_visual_effect_layers_migrate_legacy_border_library_id(tmp_path):
+    data = config_data(tmp_path)
+    data["visual_dedup"] = {
+        "enabled": True,
+        "effect_layers": [
+            {
+                "layer_id": "legacy-visual-border",
+                "name": "透明边框",
+                "type": "overlay",
+                "library_id": "visual-border",
+            }
+        ],
+    }
+
+    config = AppConfig.model_validate(data)
+
+    assert config.visual_dedup.effect_layers[0].library_id == "effect_1"
+
+
+def test_visual_effect_layers_reject_duplicate_blur_and_bad_percentage(tmp_path):
+    data = config_data(tmp_path)
+    data["visual_dedup"] = {
+        "effect_layers": [
+            {
+                "layer_id": "blur-a",
+                "name": "模糊 A",
+                "type": "blur_frame",
+                "opacity_percent": 101,
+            },
+            {
+                "layer_id": "blur-b",
+                "name": "模糊 B",
+                "type": "blur_frame",
+            },
+        ]
+    }
+
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(data)
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [

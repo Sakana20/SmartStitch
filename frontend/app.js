@@ -8,6 +8,7 @@ const state = {
   scan: null,
   sourceInventory: null,
   visualBorderLibrary: null,
+  visualEffectLibraries: null,
   assetCategory: "pre_roll",
   assetSort: { key: "name", direction: "asc" },
   assetSelections: {},
@@ -92,6 +93,12 @@ const benefitCategoryPattern = /^benefit_([1-9][0-9]*)$/;
 function isBenefitCategory(category) { return benefitCategoryPattern.test(category); }
 function categoryLabel(category) {
   const match = category.match(benefitCategoryPattern);
+  if (category.startsWith("visual_effect:")) {
+    const layerId = category.slice("visual_effect:".length);
+    const layer = state.configDraft?.visual_dedup?.effect_layers?.find(item => item.layer_id === layerId)
+      || state.config?.visual_dedup?.effect_layers?.find(item => item.layer_id === layerId);
+    return layer?.name || "视觉特效";
+  }
   const draftGroup = state.configDraft?.id === state.configId
     ? state.configDraft.sources?.[category]
     : null;
@@ -2622,6 +2629,11 @@ async function loadVisualBorderLibrary() {
   } catch (_) {
     state.visualBorderLibrary = null;
   }
+  try {
+    state.visualEffectLibraries = await api("/global-assets/visual-effect-libraries");
+  } catch (_) {
+    state.visualEffectLibraries = null;
+  }
 }
 
 async function loadSourceInventory(showToast = false) {
@@ -3581,6 +3593,57 @@ function ensureVisualDedup(config) {
   if (visual.border_overlay.alpha_mode === "straight" && !visual.border_overlay.file) {
     visual.border_overlay.alpha_mode = "auto";
   }
+  if (!Array.isArray(visual.effect_layers)) {
+    visual.effect_layers = [];
+    if (visual.border_overlay.mode !== "disabled") {
+      visual.effect_layers.push({
+        layer_id: "legacy-visual-border",
+        name: "透明边框",
+        type: "overlay",
+        enabled: true,
+        required: visual.border_overlay.mode === "required",
+        library_id: "effect_1",
+        selection_mode: visual.border_overlay.selection_mode,
+        fixed_asset_id: visual.border_overlay.fixed_asset_id,
+        enabled_asset_ids: visual.border_overlay.enabled_asset_ids,
+        weights: visual.border_overlay.weights,
+        legacy_file: visual.border_overlay.file || "",
+        scale_mode: visual.border_overlay.scale_mode,
+        playback: visual.border_overlay.playback,
+        alpha_mode: visual.border_overlay.alpha_mode,
+        opacity_percent: Math.round(Number(visual.border_overlay.opacity ?? 1) * 100),
+      });
+    }
+    if (visual.background.enabled) {
+      visual.effect_layers.push({
+        layer_id: "blur-frame-main",
+        name: "模糊边框",
+        type: "blur_frame",
+        enabled: true,
+        required: true,
+        opacity_percent: 100,
+        foreground_scale: visual.foreground.scale,
+        sigma: visual.background.sigma,
+        steps: visual.background.steps,
+        brightness: visual.background.brightness,
+      });
+    }
+  }
+  visual.effect_layers.forEach(layer => {
+    if (typeof layer.enabled !== "boolean") layer.enabled = true;
+    if (typeof layer.required !== "boolean") layer.required = true;
+    if (!Number.isFinite(Number(layer.opacity_percent))) layer.opacity_percent = 100;
+    layer.opacity_percent = Math.max(0, Math.min(100, Math.round(Number(layer.opacity_percent))));
+    if (layer.type === "overlay") {
+      layer.selection_mode ||= "random";
+      layer.fixed_asset_id ||= "";
+      layer.enabled_asset_ids ||= [];
+      layer.weights ||= {};
+      layer.scale_mode ||= "exact";
+      layer.playback ||= "loop";
+      layer.alpha_mode ||= "auto";
+    }
+  });
   return visual;
 }
 
@@ -3805,8 +3868,10 @@ function namingExample(config) {
   const naming = ensureOutputNaming(config);
   const talents = [];
   const dates = [];
-  for (const category of config.timeline) {
-    if (!namingCategoryMatches(naming, category)) continue;
+  const namingCategories = config.timeline.filter(category =>
+    config.sources[category]?.mode !== "disabled" && namingCategoryMatches(naming, category)
+  );
+  for (const category of namingCategories) {
     const asset = (state.scan?.assets?.[category] || []).find(item => item.enabled && item.valid && Number(item.weight) > 0);
     if (!asset) continue;
     try {
@@ -3818,11 +3883,16 @@ function namingExample(config) {
   const values = {
     product: naming.product || "产品",
     benefit: naming.benefit || "利益点",
-    talents: talents.join(naming.talent.separator) || "达人名",
-    restriction_date: dates.length ? dates.sort()[0] : "限制日期",
+    talents: talents.join(naming.talent.separator) || (namingCategories.length ? "达人名" : ""),
+    restriction_date: dates.length ? dates.sort()[0] : (namingCategories.length ? "限制日期" : ""),
     sequence: String(naming.sequence_start || 1),
   };
-  return naming.template.replace(/\{(product|benefit|talents|restriction_date|sequence)(?::[^}]*)?\}/g, (_, key) => values[key]);
+  let template = naming.template;
+  for (const field of ["talents", "restriction_date"]) {
+    if (!values[field]) template = template.replace(new RegExp(`[-_ ]?\\{${field}(?::[^{}]*)?\\}`, "g"), "");
+  }
+  return template.replace(/^[-_ ]+/, "")
+    .replace(/\{(product|benefit|talents|restriction_date|sequence)(?::[^}]*)?\}/g, (_, key) => values[key]);
 }
 
 function globalVisualBordersForDraft(config) {
@@ -3851,6 +3921,78 @@ function globalVisualBordersForDraft(config) {
         error,
       };
     });
+}
+
+function visualEffectLibrary(libraryId) {
+  return (state.visualEffectLibraries?.libraries || [])
+    .find(library => library.library_id === libraryId) || null;
+}
+
+function ensureVisualEffectLibraryLayers(config) {
+  const visual = ensureVisualDedup(config);
+  const referenced = new Set(
+    visual.effect_layers
+      .filter(layer => layer.type === "overlay")
+      .map(layer => layer.library_id),
+  );
+  for (const library of state.visualEffectLibraries?.libraries || []) {
+    if (!library.enabled || referenced.has(library.library_id) || visual.effect_layers.length >= 10) continue;
+    visual.effect_layers.push({
+      layer_id: `effect-${library.library_id}`,
+      name: library.name,
+      type: "overlay",
+      enabled: false,
+      required: true,
+      opacity_percent: 100,
+      library_id: library.library_id,
+      selection_mode: "random",
+      fixed_asset_id: "",
+      enabled_asset_ids: [],
+      weights: {},
+      legacy_file: "",
+      scale_mode: "exact",
+      playback: "loop",
+      alpha_mode: "auto",
+    });
+    referenced.add(library.library_id);
+  }
+  return visual.effect_layers;
+}
+
+function visualEffectLayerCards(config) {
+  const layers = ensureVisualEffectLibraryLayers(config);
+  const cards = layers.map((layer, index) => {
+    const library = layer.type === "overlay" ? visualEffectLibrary(layer.library_id) : null;
+    const assets = (library?.assets || []).filter(asset => asset.enabled);
+    const libraryName = library?.name || layer.name;
+    const status = layer.type === "blur_frame"
+      ? `内置效果 · 前景 ${Math.round(Number(layer.foreground_scale || 0.9) * 100)}%`
+      : library ? `${assets.length} 个素材${layer.enabled ? "可参与去重" : " · 未参与去重"}` : "素材库不可用";
+    const libraryControl = layer.type === "overlay"
+      ? library
+        ? `<button type="button" class="text-btn simple-source-directory" data-open-effect-library="${escapeHtml(layer.library_id)}" title="打开文件夹：${escapeHtml(library.directory)}">${escapeHtml(layer.library_id)} ↗</button>`
+        : '<span class="text-btn simple-source-directory">库不可用</span>'
+      : '<span class="text-btn simple-source-directory">内置效果</span>';
+    return `
+      <article class="simple-source-card visual-effect-layer-card ${layer.enabled ? "" : "is-disabled"}" data-effect-layer-card="${escapeHtml(layer.layer_id)}" draggable="true">
+        <div class="simple-source-step"><span>${String(index + 1).padStart(2, "0")}</span><i aria-label="拖动调整顺序" title="拖动改变图层顺序">⠿</i></div>
+        <div class="simple-source-main">
+          ${layer.type === "overlay"
+            ? `<input class="simple-source-name" data-effect-library-name="${escapeHtml(layer.library_id)}" data-effect-layer-name="${escapeHtml(layer.layer_id)}" value="${escapeHtml(libraryName)}" aria-label="特效库名称">`
+            : `<strong>${escapeHtml(layer.name)}</strong>`}
+          <div class="simple-source-meta"><span class="${library || layer.type === "blur_frame" ? "has-assets" : ""}">${status}</span></div>
+        </div>
+        ${libraryControl}
+        <label class="simple-source-switch"><span>参与去重</span><input class="switch-input" type="checkbox" data-effect-enabled="${escapeHtml(layer.layer_id)}" ${layer.enabled ? "checked" : ""}></label>
+        <div class="simple-source-actions">
+          <button type="button" class="text-btn" data-effect-action="up" data-effect-id="${escapeHtml(layer.layer_id)}" ${index === 0 ? "disabled" : ""}>上移</button>
+          <button type="button" class="text-btn" data-effect-action="down" data-effect-id="${escapeHtml(layer.layer_id)}" ${index === layers.length - 1 ? "disabled" : ""}>下移</button>
+          <button type="button" class="text-btn danger-text" data-effect-action="delete" data-effect-id="${escapeHtml(layer.layer_id)}">删除</button>
+        </div>
+        <label class="effect-opacity-control"><span>透明度</span><input type="range" min="0" max="100" step="1" value="${Number(layer.opacity_percent)}" data-effect-opacity-slider="${escapeHtml(layer.layer_id)}"><input type="number" min="0" max="100" step="1" value="${Number(layer.opacity_percent)}" data-effect-opacity="${escapeHtml(layer.layer_id)}"><b>%</b></label>
+      </article>`;
+  }).join("");
+  return cards || '<div class="simple-empty-state">尚未添加特效库。</div>';
 }
 
 function renderSimpleConfig() {
@@ -3922,28 +4064,6 @@ function renderSimpleConfig() {
   const outputPreset = simpleOutputPreset(config.output);
   const qualityPreset = simpleQualityPreset(config.output);
   const visual = ensureVisualDedup(config);
-  const visualPreset = simpleVisualDedupPreset(visual);
-  const visualBorderEnabled = visual.border_overlay.mode !== "disabled";
-  const draftVisualBorders = globalVisualBordersForDraft(config);
-  const compatibleVisualBorders = draftVisualBorders.filter(asset => asset.valid);
-  const visualBorderAsset = compatibleVisualBorders.find(asset =>
-    visual.border_overlay.selection_mode !== "fixed"
-      || asset.id === visual.border_overlay.fixed_asset_id
-  );
-  const visualBorderInvalid = draftVisualBorders.find(asset => !asset.valid);
-  const globalBorderCount = (state.visualBorderLibrary?.assets || []).filter(asset => asset.enabled).length;
-  const visualBorderName = visual.border_overlay.selection_mode === "fixed"
-    ? (visualBorderAsset?.name || visualBorderInvalid?.name || "尚未选择固定边框")
-    : `全局边框库 · ${compatibleVisualBorders.length} 个兼容素材`;
-  const visualBorderStatus = compatibleVisualBorders.length
-      ? (visual.border_overlay.selection_mode === "fixed" ? "固定边框可用" : "每条成片将从兼容素材中选择")
-      : visualBorderInvalid
-        ? visualBorderInvalid.error
-        : visualBorderEnabled ? "全局库没有兼容的透明边框" : `全局库共 ${globalBorderCount} 个素材`;
-  const visualBorderOptions = (state.visualBorderLibrary?.assets || [])
-    .filter(asset => asset.enabled)
-    .map(asset => `<option value="${escapeHtml(asset.asset_id)}" ${asset.asset_id === visual.border_overlay.fixed_asset_id ? "selected" : ""}>${escapeHtml(asset.display_name)}</option>`)
-    .join("");
   const naming = generic ? ensureOutputNaming(config) : null;
   const feishu = ensureFeishuBaseSync(config);
   const namingErrors = generic
@@ -4034,22 +4154,10 @@ function renderSimpleConfig() {
     </section>
 
     <section class="simple-config-card simple-wide-card ${visual.enabled ? "is-accent" : ""}">
-      <header><span class="simple-card-number">04</span><div><h3>视觉去重</h3><p>总开关控制整体生效；模糊背景与透明边框可分别选择或同时使用。</p></div><label class="simple-header-switch"><span>${visual.enabled ? "已启用" : "未启用"}</span><input id="simpleVisualDedupEnabled" class="switch-input" type="checkbox" ${visual.enabled ? "checked" : ""}></label></header>
+      <header><span class="simple-card-number">04</span><div><h3>视觉去重</h3><p>每张卡片就是一个特效库；像视频库一样参与、排序和增删，风险提示语始终在最上层。</p></div><label class="simple-header-switch"><span>${visual.enabled ? "已启用" : "未启用"}</span><input id="simpleVisualDedupEnabled" class="switch-input" type="checkbox" ${visual.enabled ? "checked" : ""}></label></header>
       <div class="simple-card-body simple-visual-dedup-body ${visual.enabled ? "" : "is-disabled"}">
-        <label class="simple-toggle-row compact"><span><b>模糊背景与缩小主画面</b><small>缩小清晰画面，以同一画面的模糊版本补满四周</small></span><input id="simpleVisualBackgroundEnabled" class="switch-input" type="checkbox" ${visual.background.enabled ? "checked" : ""}></label>
-        <div class="simple-setting-group ${visual.background.enabled ? "" : "hidden"}"><div class="simple-setting-label">效果强度</div>${simpleChoiceButtons("visualDedup", [
-          ["light", "轻度", "保留更多主画面"],
-          ["standard", "标准", "推荐"],
-          ["strong", "强化", "边框区域更明显"],
-          ...(visualPreset === "custom" ? [["custom", "自定义", "由高级模式设置", true]] : []),
-        ], visualPreset)}</div>
-        <label class="simple-toggle-row compact"><span><b>使用透明边框</b><small>边框位于主画面之上，风险提示语之下</small></span><input id="simpleVisualBorderEnabled" class="switch-input" type="checkbox" ${visualBorderEnabled ? "checked" : ""}></label>
-        <div class="simple-overlay-row ${visualBorderEnabled ? "" : "hidden"}">
-          <div class="simple-overlay-status ${compatibleVisualBorders.length ? "has-file" : ""}"><i></i><div><strong>${escapeHtml(visualBorderName)}</strong><span>${escapeHtml(visualBorderStatus)}</span></div></div>
-          <div class="simple-overlay-actions simple-visual-border-actions"><label class="button secondary">添加到全局库<input id="simpleVisualBorderFile" type="file" accept=".mov,.png,.webp"></label></div>
-        </div>
-        <div class="simple-setting-group ${visualBorderEnabled ? "" : "hidden"}"><div class="simple-setting-label">边框选择方式</div>${simpleChoiceButtons("visualBorderSelection", [["random", "随机使用", "无需每个项目配置"], ["fixed", "固定使用", "始终使用同一边框"]], visual.border_overlay.selection_mode)}</div>
-        <label class="simple-large-field ${visualBorderEnabled && visual.border_overlay.selection_mode === "fixed" ? "" : "hidden"}"><span>固定边框</span><select id="simpleVisualBorderFixed"><option value="">请选择全局边框</option>${visualBorderOptions}</select></label>
+        <div class="simple-source-list visual-effect-layer-list">${visualEffectLayerCards(config)}</div>
+        <div class="simple-card-footer"><button id="simpleAddEffectLibraryBtn" class="button secondary" type="button">＋ 添加特效库</button><small>拖动卡片或点击上下移动，编号会自动更新</small></div>
       </div>
     </section>
 
@@ -4074,6 +4182,120 @@ function mutateSimpleConfig(mutator) {
   renderSimpleConfig();
 }
 
+function visualEffectLayer(layerId) {
+  return ensureVisualDedup(state.configDraft).effect_layers
+    .find(layer => layer.layer_id === layerId);
+}
+
+function moveVisualEffectLayer(layerId, targetIndex) {
+  mutateSimpleConfig(config => {
+    const layers = ensureVisualDedup(config).effect_layers;
+    const sourceIndex = layers.findIndex(layer => layer.layer_id === layerId);
+    if (sourceIndex < 0) return;
+    const bounded = Math.max(0, Math.min(layers.length - 1, targetIndex));
+    if (bounded === sourceIndex) return;
+    const [layer] = layers.splice(sourceIndex, 1);
+    layers.splice(bounded, 0, layer);
+  });
+}
+
+function syncVisualEffectOpacitySlider(input) {
+  const layerId = input.dataset.effectOpacitySlider;
+  const layer = visualEffectLayer(layerId);
+  const number = $$('[data-effect-opacity]')
+    .find(item => item.dataset.effectOpacity === layerId);
+  if (layer) layer.opacity_percent = Number(input.value);
+  if (number) number.value = input.value;
+}
+
+function bindVisualEffectLayerControls() {
+  $$('[data-effect-enabled]').forEach(input => input.addEventListener("change", () => {
+    const layer = visualEffectLayer(input.dataset.effectEnabled);
+    if (layer) layer.enabled = input.checked;
+    renderSimpleConfig();
+  }));
+  $$('[data-effect-opacity]').forEach(input => input.addEventListener("change", () => {
+    const layer = visualEffectLayer(input.dataset.effectOpacity);
+    if (!layer) return;
+    layer.opacity_percent = Math.max(0, Math.min(100, Math.round(Number(input.value || 0))));
+    renderSimpleConfig();
+  }));
+  $$('[data-effect-opacity-slider]').forEach(input => {
+    input.addEventListener("input", () => syncVisualEffectOpacitySlider(input));
+    input.addEventListener("change", () => syncVisualEffectOpacitySlider(input));
+  });
+  $$('[data-effect-action]').forEach(button => button.addEventListener("click", async () => {
+    const layers = ensureVisualDedup(state.configDraft).effect_layers;
+    const index = layers.findIndex(layer => layer.layer_id === button.dataset.effectId);
+    if (index < 0) return;
+    if (button.dataset.effectAction === "delete") {
+      await deleteVisualEffectLibraryCard(button.dataset.effectId, button);
+      return;
+    }
+    moveVisualEffectLayer(
+      button.dataset.effectId,
+      button.dataset.effectAction === "up" ? index - 1 : index + 1,
+    );
+  }));
+  let draggedLayerId = null;
+  $$('[data-effect-layer-card]').forEach(card => {
+    card.addEventListener("pointerdown", event => {
+      if (!event.target.closest("input, button, label")) return;
+      const opacitySlider = event.target.closest("[data-effect-opacity-slider]");
+      card.draggable = false;
+      const restoreCardDrag = () => {
+        if (opacitySlider) syncVisualEffectOpacitySlider(opacitySlider);
+        card.draggable = true;
+        window.removeEventListener("pointerup", restoreCardDrag);
+        window.removeEventListener("pointercancel", restoreCardDrag);
+      };
+      window.addEventListener("pointerup", restoreCardDrag);
+      window.addEventListener("pointercancel", restoreCardDrag);
+    });
+    card.addEventListener("dragstart", event => {
+      draggedLayerId = card.dataset.effectLayerCard;
+      card.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", draggedLayerId);
+    });
+    card.addEventListener("dragover", event => {
+      event.preventDefault();
+      if (draggedLayerId && draggedLayerId !== card.dataset.effectLayerCard) card.classList.add("drag-over");
+    });
+    card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
+    card.addEventListener("drop", event => {
+      event.preventDefault();
+      if (!draggedLayerId || draggedLayerId === card.dataset.effectLayerCard) return;
+      const layers = ensureVisualDedup(state.configDraft).effect_layers;
+      moveVisualEffectLayer(draggedLayerId, layers.findIndex(layer => layer.layer_id === card.dataset.effectLayerCard));
+    });
+    card.addEventListener("dragend", () => {
+      draggedLayerId = null;
+      $$('[data-effect-layer-card]').forEach(item => item.classList.remove("dragging", "drag-over"));
+    });
+  });
+  $("#simpleAddEffectLibraryBtn")?.addEventListener("click", createVisualEffectLibrary);
+  $$('[data-open-effect-library]').forEach(button => button.addEventListener("click", async event => {
+    event.stopPropagation();
+    button.disabled = true;
+    try {
+      const libraryId = encodeURIComponent(button.dataset.openEffectLibrary);
+      const result = await api(`/global-assets/visual-effect-libraries/${libraryId}/open-directory`, { method: "POST" });
+      toast(`已在${result.manager}中打开 ${result.folder_name}`);
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  }));
+  $$('[data-effect-library-name]').forEach(input => input.addEventListener("change", () => renameVisualEffectLibrary(
+    input.dataset.effectLibraryName,
+    input.dataset.effectLayerName,
+    input.value,
+    input,
+  )));
+}
+
 function moveSimpleSource(category, action) {
   mutateSimpleConfig(config => {
     const movable = config.workflow_type === "generic"
@@ -4089,6 +4311,7 @@ function moveSimpleSource(category, action) {
 }
 
 function bindSimpleConfigControls() {
+  bindVisualEffectLayerControls();
   bindFeishuControls("simple");
   $("#refreshSimpleAssetsBtn")?.addEventListener("click", async event => {
     const button = event.currentTarget;
@@ -4396,6 +4619,117 @@ async function uploadVisualBorder(file, input) {
   }
 }
 
+async function createVisualEffectLibrary() {
+  const visual = ensureVisualDedup(state.configDraft);
+  if (visual.effect_layers.length >= 10) {
+    toast("一个项目最多可添加 10 个特效库", true);
+    return;
+  }
+  const name = window.prompt("新特效库名称，例如“烟花”")?.trim();
+  if (!name || !state.visualEffectLibraries) return;
+  try {
+    const result = await api("/global-assets/visual-effect-libraries", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        library_revision: state.visualEffectLibraries.revision,
+      }),
+    });
+    state.visualEffectLibraries = result;
+    const library = result.library;
+    visual.effect_layers.push({
+      layer_id: `effect-${library.library_id}`,
+      name: library.name,
+      type: "overlay",
+      enabled: true,
+      required: true,
+      opacity_percent: 100,
+      library_id: library.library_id,
+      selection_mode: "random",
+      fixed_asset_id: "",
+      enabled_asset_ids: [],
+      weights: {},
+      legacy_file: "",
+      scale_mode: "exact",
+      playback: "loop",
+      alpha_mode: "auto",
+    });
+    renderSimpleConfig();
+    toast(`特效库“${name}”已创建，可打开 ${library.library_id} 文件夹添加素材`);
+  } catch (error) {
+    await loadVisualBorderLibrary();
+    renderSimpleConfig();
+    toast(error.message, true);
+  }
+}
+
+async function deleteVisualEffectLibraryCard(layerId, button) {
+  const visual = ensureVisualDedup(state.configDraft);
+  const layerIndex = visual.effect_layers.findIndex(item => item.layer_id === layerId);
+  if (layerIndex < 0) return;
+  const layer = visual.effect_layers[layerIndex];
+  if (layer.type === "blur_frame") {
+    if (!window.confirm("删除内置特效库“模糊边框”？")) return;
+    visual.effect_layers.splice(layerIndex, 1);
+    renderSimpleConfig();
+    return;
+  }
+  const libraryId = layer.library_id;
+  const library = visualEffectLibrary(libraryId);
+  if (!library || !state.visualEffectLibraries) {
+    if (!window.confirm(`素材库“${layer.name}”已不可用，是否从当前项目移除这张卡片？`)) return;
+    visual.effect_layers.splice(layerIndex, 1);
+    renderSimpleConfig();
+    return;
+  }
+  const count = (library.assets || []).filter(asset => asset.enabled).length;
+  if (!window.confirm(`删除特效库“${library.name}”？\n库内有 ${count} 个素材；其他引用该全局库的项目将在预检时报错。`)) return;
+  button.disabled = true;
+  try {
+    state.visualEffectLibraries = await api(`/global-assets/visual-effect-libraries/${encodeURIComponent(libraryId)}`, {
+      method: "DELETE",
+      headers: { "X-SmartStitch-Library-Revision": String(state.visualEffectLibraries.revision) },
+    });
+    visual.effect_layers.splice(layerIndex, 1);
+    renderSimpleConfig();
+    toast(`特效库“${library.name}”已删除`);
+  } catch (error) {
+    await loadVisualBorderLibrary();
+    renderSimpleConfig();
+    toast(error.message, true);
+  }
+}
+
+async function renameVisualEffectLibrary(libraryId, layerId, value, input) {
+  const name = value.trim();
+  const library = visualEffectLibrary(libraryId);
+  const layer = visualEffectLayer(layerId);
+  if (!library || !layer || !state.visualEffectLibraries) return;
+  if (!name) {
+    input.value = library.name;
+    toast("特效库名称不能为空", true);
+    return;
+  }
+  if (name === library.name) return;
+  input.disabled = true;
+  try {
+    state.visualEffectLibraries = await api(`/global-assets/visual-effect-libraries/${encodeURIComponent(libraryId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        name,
+        library_revision: state.visualEffectLibraries.revision,
+      }),
+    });
+    layer.name = name;
+    renderSimpleConfig();
+    toast(`特效库已重命名为“${name}”`);
+  } catch (error) {
+    await loadVisualBorderLibrary();
+    renderSimpleConfig();
+    toast(error.message, true);
+  }
+}
+
 function configInput(label, path, value, options = {}) {
   const { type = "text", hint = "", wide = false, placeholder = "", className = "", pathInput = false } = options;
   const dataType = type === "number" ? "number" : type === "nullable-number" ? "nullable-number" : type === "list" ? "list" : "string";
@@ -4481,17 +4815,29 @@ function renderVisualConfig() {
 
   const overlay = config.benefit_overlays;
   const visual = ensureVisualDedup(config);
-  const visualBorderAsset = (state.scan?.assets?.visual_border || [])[0];
-  const visualBorderProbe = visualBorderAsset?.probe;
-  const globalVisualBorderChoices = [
-    ["", "请选择全局边框"],
-    ...(state.visualBorderLibrary?.assets || [])
-      .filter(asset => asset.enabled)
-      .map(asset => [asset.asset_id, asset.display_name]),
-  ];
-  const globalVisualBorderRows = (state.visualBorderLibrary?.assets || []).map(asset => {
-    const probe = asset.probe || {};
-    return `<div class="simple-info-strip"><span class="${asset.enabled ? "ok" : "warning"}">${asset.enabled ? "启用" : "停用"}</span><strong>${escapeHtml(asset.display_name)}</strong><small>${escapeHtml(`${probe.width || "?"}×${probe.height || "?"} · ${probe.video_codec || "图片"} · ${probe.pixel_format || "未知格式"}`)}</small><label>默认权重 <input class="weight-input" type="number" min="0" step="0.1" value="${asset.default_weight}" data-global-border-weight="${escapeHtml(asset.asset_id)}"></label><button class="text-btn" type="button" data-global-border-toggle="${escapeHtml(asset.asset_id)}" data-global-border-enabled="${asset.enabled ? "true" : "false"}">${asset.enabled ? "停用" : "启用"}</button></div>`;
+  const advancedEffectLayers = visual.effect_layers.map((layer, index) => {
+    const prefix = `visual_dedup.effect_layers.${index}`;
+    const library = layer.type === "overlay" ? visualEffectLibrary(layer.library_id) : null;
+    const typeFields = layer.type === "blur_frame"
+      ? `
+        ${configInput("前景缩放比例", `${prefix}.foreground_scale`, layer.foreground_scale, { type: "number", hint: "0.70～1.00" })}
+        ${configInput("模糊 Sigma", `${prefix}.sigma`, layer.sigma, { type: "number", hint: "0～100" })}
+        ${configInput("模糊步数", `${prefix}.steps`, layer.steps, { type: "number", hint: "1～6" })}
+        ${configInput("背景亮度", `${prefix}.brightness`, layer.brightness, { type: "number", hint: "-1～1" })}`
+      : `
+        <div class="config-field"><label>全局素材库</label><code class="managed-pool-path">${escapeHtml(library?.name || layer.library_id || "未选择")}</code></div>
+        ${configSelect("素材尺寸", `${prefix}.scale_mode`, layer.scale_mode, [["exact", "必须与画布一致"], ["stretch", "拉伸铺满画布"]])}
+        ${configSelect("Alpha 模式", `${prefix}.alpha_mode`, layer.alpha_mode, [["auto", "使用素材设置"], ["straight", "直通 Alpha"], ["premultiplied", "预乘 Alpha"]])}`;
+    return `
+      <div class="source-config-card visual-effect-advanced-card">
+        <div class="source-config-heading"><div class="source-config-title"><b>${String(index + 1).padStart(2, "0")}</b>${escapeHtml(layer.name)} <small>${layer.type === "blur_frame" ? "模糊边框" : "素材特效"}</small></div></div>
+        <div class="config-form-grid three">
+          ${configSwitch("启用此图层", `${prefix}.enabled`, layer.enabled, "图层状态")}
+          ${configInput("图层名称", `${prefix}.name`, layer.name)}
+          ${configInput("透明度", `${prefix}.opacity_percent`, layer.opacity_percent, { type: "number", hint: "0～100%" })}
+          ${typeFields}
+        </div>
+      </div>`;
   }).join("");
   const output = config.output;
   const loudness = output.loudness || {
@@ -4570,31 +4916,11 @@ function renderVisualConfig() {
     </details>`;
   const visualDedupSection = `
     <details class="config-section" data-config-section="visual-dedup" open>
-      <summary>视觉去重 <small>模糊背景、缩小前景与透明边框</small></summary>
-      <div class="config-section-body config-form-grid three">
-        ${configSwitch("启用视觉去重", "visual_dedup.enabled", visual.enabled, "总开关")}
-        ${configSwitch("启用模糊背景与缩小主画面", "visual_dedup.background.enabled", visual.background.enabled, "功能 1 · 独立开关")}
-        ${configInput("前景缩放比例", "visual_dedup.foreground.scale", visual.foreground.scale, { type: "number", hint: "0.70～1.00" })}
-        ${configSelect("背景处理", "visual_dedup.background.mode", visual.background.mode, [["gaussian_blur", "高斯模糊"]])}
-        ${configInput("模糊 Sigma", "visual_dedup.background.sigma", visual.background.sigma, { type: "number", hint: "0～100" })}
-        ${configInput("模糊步数", "visual_dedup.background.steps", visual.background.steps, { type: "number", hint: "1～6" })}
-        ${configInput("背景亮度", "visual_dedup.background.brightness", visual.background.brightness, { type: "number", hint: "-1～1" })}
-        ${configSelect("边框使用方式", "visual_dedup.border_overlay.mode", visual.border_overlay.mode, modeChoices)}
-        ${configSelect("边框来源", "visual_dedup.border_overlay.source", visual.border_overlay.source, [["global_library", "全局边框库"], ["legacy_file", "旧版项目文件（兼容）"]])}
-        ${configSelect("选择方式", "visual_dedup.border_overlay.selection_mode", visual.border_overlay.selection_mode, [["random", "按权重随机"], ["fixed", "固定素材"]])}
-        ${configSelect("固定边框", "visual_dedup.border_overlay.fixed_asset_id", visual.border_overlay.fixed_asset_id, globalVisualBorderChoices)}
-        ${visual.border_overlay.file ? configInput("旧版边框文件", "visual_dedup.border_overlay.file", visual.border_overlay.file, { wide: true, pathInput: true, hint: "仅用于迁移兼容", placeholder: "/路径/透明边框.mov" }) : ""}
-        ${configSelect("边框素材类型", "visual_dedup.border_overlay.media_kind", visual.border_overlay.media_kind, [["auto", "自动识别"]])}
-        ${configSelect("边框尺寸", "visual_dedup.border_overlay.scale_mode", visual.border_overlay.scale_mode, [["exact", "必须与画布一致"], ["stretch", "拉伸铺满画布"]])}
-        ${configSelect("播放方式", "visual_dedup.border_overlay.playback", visual.border_overlay.playback, [["loop", "循环到成片结束"]])}
-        ${configInput("边框透明度", "visual_dedup.border_overlay.opacity", visual.border_overlay.opacity, { type: "number", hint: "0～1" })}
-        ${configSelect("Alpha 模式", "visual_dedup.border_overlay.alpha_mode", visual.border_overlay.alpha_mode, [["auto", "使用素材设置"], ["straight", "直通 Alpha"], ["premultiplied", "预乘 Alpha（黑边时尝试）"]])}
-        <div class="config-field wide"><label>全局边框库 <small>${escapeHtml(state.visualBorderLibrary?.directory || "共享目录不可用")}</small></label><div class="simple-source-list">${globalVisualBorderRows || '<div class="simple-empty-state">全局边框库为空，请在简单模式添加透明边框。</div>'}</div></div>
-        <div class="config-field wide"><label>边框预检 <small>由后端 FFmpeg 统一检查</small></label><code class="managed-pool-path">${escapeHtml(visualBorderAsset
-          ? (visualBorderAsset.valid
-            ? `${visualBorderAsset.name} · ${visualBorderProbe?.video_codec || "未知编码"} · ${visualBorderProbe?.pixel_format || "未知像素格式"} · ${visualBorderProbe?.width || "?"}×${visualBorderProbe?.height || "?"} · ${visualBorderProbe?.fps || "静态"} fps · ${visualBorderProbe?.duration || "?"} s${visualBorderProbe?.has_audio ? " · 含音轨（将忽略）" : ""}`
-            : `${visualBorderAsset.name} · ${visualBorderAsset.error || "不可用"}`)
-          : "尚未识别到边框素材")}</code></div>
+      <summary>视觉去重 <small>有序特效图层与独立透明度</small></summary>
+      <div class="config-section-body">
+        <div class="config-form-grid three">${configSwitch("启用视觉去重", "visual_dedup.enabled", visual.enabled, "总开关")}</div>
+        <div class="simple-source-list">${advancedEffectLayers || '<div class="simple-empty-state">尚未添加特效图层，请在简单模式添加。</div>'}</div>
+        <div class="simple-card-footer"><small>图层按上高下低排列；添加、删除或拖动排序请使用简单模式。</small></div>
       </div>
     </details>`;
   const previewAssets = Object.entries(state.scan?.assets || {}).flatMap(([category, assets]) =>

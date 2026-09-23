@@ -39,6 +39,7 @@ from .library import (
     LibraryConflictError,
     LibraryError,
     LibraryService,
+    open_directory_in_file_manager,
     pick_directory,
 )
 from .media import DisconnectSafeFileResponse
@@ -54,6 +55,8 @@ from .models import (
     DeletePoolRequest,
     FeishuConnectionTestRequest,
     FeishuSettingsUpdateRequest,
+    GlobalVisualEffectLibraryCreateRequest,
+    GlobalVisualEffectLibraryUpdateRequest,
     GlobalVisualBorderUpdateRequest,
     JobCreateRequest,
     LibraryPreflightRequest,
@@ -677,6 +680,177 @@ def create_app(
         except VisualBorderLibraryError as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.get("/api/v1/global-assets/visual-effect-libraries")
+    def list_global_visual_effect_libraries() -> dict[str, object]:
+        try:
+            return visual_border_library.list_effect_libraries()
+        except VisualBorderLibraryError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/global-assets/visual-effect-libraries")
+    def create_global_visual_effect_library(
+        request: GlobalVisualEffectLibraryCreateRequest,
+    ) -> dict[str, object]:
+        try:
+            return visual_border_library.create_effect_library(
+                request.name,
+                expected_revision=request.library_revision,
+            )
+        except VisualBorderLibraryConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except VisualBorderLibraryError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.patch("/api/v1/global-assets/visual-effect-libraries/{library_id}")
+    def update_global_visual_effect_library(
+        library_id: str,
+        request: GlobalVisualEffectLibraryUpdateRequest,
+    ) -> dict[str, object]:
+        try:
+            return visual_border_library.update_effect_library(
+                library_id,
+                expected_revision=request.library_revision,
+                updates=request.model_dump(exclude={"library_revision"}),
+            )
+        except VisualBorderLibraryConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except VisualBorderLibraryError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.delete("/api/v1/global-assets/visual-effect-libraries/{library_id}")
+    def delete_global_visual_effect_library(
+        library_id: str,
+        http_request: Request,
+    ) -> dict[str, object]:
+        revision_header = http_request.headers.get(
+            "X-SmartStitch-Library-Revision", ""
+        ).strip()
+        try:
+            expected_revision = int(revision_header)
+        except ValueError as exc:
+            raise HTTPException(422, "缺少或无效的全局特效库版本") from exc
+        try:
+            return visual_border_library.delete_effect_library(
+                library_id,
+                expected_revision=expected_revision,
+            )
+        except VisualBorderLibraryConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except VisualBorderLibraryError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post(
+        "/api/v1/global-assets/visual-effect-libraries/{library_id}/open-directory"
+    )
+    def open_global_visual_effect_library_directory(
+        library_id: str,
+    ) -> dict[str, object]:
+        try:
+            directory = visual_border_library.effect_library_directory(library_id)
+            result = open_directory_in_file_manager(directory)
+            return {**result, "folder_name": directory.name}
+        except (
+            VisualBorderLibraryError,
+            LibraryError,
+            OSError,
+            subprocess.SubprocessError,
+        ) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post(
+        "/api/v1/global-assets/visual-effect-libraries/{library_id}/assets"
+    )
+    async def upload_global_visual_effect_asset(
+        library_id: str,
+        http_request: Request,
+    ) -> dict[str, object]:
+        filename = urllib.parse.unquote(
+            http_request.headers.get("X-SmartStitch-Filename", "").strip()
+        )
+        revision_header = http_request.headers.get(
+            "X-SmartStitch-Library-Revision", ""
+        ).strip()
+        if not filename:
+            raise HTTPException(422, "缺少特效文件名")
+        try:
+            expected_revision = int(revision_header)
+        except ValueError as exc:
+            raise HTTPException(422, "缺少或无效的全局特效库版本") from exc
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="smartstitch-global-visual-effect-",
+            suffix=Path(filename).suffix.lower(),
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary_name)
+        total = 0
+        try:
+            with temporary_path.open("wb") as handle:
+                async for chunk in http_request.stream():
+                    total += len(chunk)
+                    if total > MAX_VISUAL_BORDER_BYTES:
+                        raise HTTPException(413, "视觉特效不能超过 500 MB")
+                    handle.write(chunk)
+            if total == 0:
+                raise HTTPException(422, "视觉特效不能为空")
+            return visual_border_library.upload_effect_asset(
+                library_id,
+                filename,
+                temporary_path,
+                expected_revision=expected_revision,
+            )
+        except VisualBorderLibraryConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (VisualBorderLibraryError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    @app.patch(
+        "/api/v1/global-assets/visual-effect-libraries/{library_id}/assets/{asset_id}"
+    )
+    def update_global_visual_effect_asset(
+        library_id: str,
+        asset_id: str,
+        request: GlobalVisualBorderUpdateRequest,
+    ) -> dict[str, object]:
+        try:
+            return visual_border_library.update_effect_asset(
+                library_id,
+                asset_id,
+                expected_revision=request.library_revision,
+                updates=request.model_dump(exclude={"library_revision"}),
+            )
+        except VisualBorderLibraryConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except VisualBorderLibraryError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.delete(
+        "/api/v1/global-assets/visual-effect-libraries/{library_id}/assets/{asset_id}"
+    )
+    def delete_global_visual_effect_asset(
+        library_id: str,
+        asset_id: str,
+        http_request: Request,
+    ) -> dict[str, object]:
+        revision_header = http_request.headers.get(
+            "X-SmartStitch-Library-Revision", ""
+        ).strip()
+        try:
+            expected_revision = int(revision_header)
+        except ValueError as exc:
+            raise HTTPException(422, "缺少或无效的全局特效库版本") from exc
+        try:
+            return visual_border_library.delete_effect_asset(
+                library_id,
+                asset_id,
+                expected_revision=expected_revision,
+            )
+        except VisualBorderLibraryConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except VisualBorderLibraryError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/v1/configs")
     def list_configs() -> list[dict[str, object]]:
         return config_store.list()
@@ -877,7 +1051,7 @@ def create_app(
             config = config_store.load(config_id)
             result = scan_config(
                 config,
-                visual_border_library.assets_for_config(config),
+                visual_border_library.assets_for_effect_layers(config),
                 media_probe_cache,
             )
             return {**result.model_dump(mode="json"), "ok": result.ok}
@@ -902,7 +1076,7 @@ def create_app(
                 config,
                 scan_config(
                     config,
-                    visual_border_library.assets_for_config(config),
+                    visual_border_library.assets_for_effect_layers(config),
                     media_probe_cache,
                 ),
                 request.count,

@@ -4,7 +4,13 @@ import subprocess
 import threading
 from pathlib import Path
 
-from smartstitch.models import AppConfig, Asset, MediaProbe, PlanItem
+from smartstitch.models import (
+    AppConfig,
+    Asset,
+    MediaProbe,
+    PlannedVisualEffect,
+    PlanItem,
+)
 from smartstitch.renderer import build_ffmpeg_command, render_item
 from smartstitch.scanner import probe_media
 
@@ -443,3 +449,113 @@ def test_visual_border_renders_without_blurred_background(tmp_path):
     assert output.exists()
     assert probe_media(output).width == 180
     assert probe_media(output).height == 320
+
+
+def test_ordered_effect_stack_runs_bottom_to_top_and_risk_last(tmp_path):
+    source_path = tmp_path / "source.mp4"
+    generate_clip(source_path, "blue", duration=0.5)
+    source = Asset(
+        id="source",
+        category="pool_1",
+        path=str(source_path),
+        name=source_path.name,
+        media_type="video",
+        probe=probe_media(source_path),
+    )
+    fireworks_path = tmp_path / "fireworks.mov"
+    generate_qtrle_border(fireworks_path)
+    fireworks = Asset(
+        id="fireworks",
+        category="visual_effect:fireworks",
+        path=str(fireworks_path),
+        name=fireworks_path.name,
+        media_type="video",
+        probe=probe_media(fireworks_path),
+    )
+    risk_path = tmp_path / "risk.png"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=green:s=40x40",
+            "-frames:v", "1", str(risk_path),
+        ],
+        check=True,
+    )
+    risk = Asset(
+        id="risk",
+        category="benefit_overlay",
+        path=str(risk_path),
+        name=risk_path.name,
+        media_type="image",
+        probe=probe_media(risk_path),
+    )
+    config = AppConfig.model_validate(
+        {
+            "schema_version": 3,
+            "workflow_type": "generic",
+            "id": "effect-stack-render",
+            "name": "特效图层",
+            "source_root": str(tmp_path),
+            "timeline": ["pool_1"],
+            "sources": {"pool_1": {"label": "主素材", "directory": "."}},
+            "benefit_overlays": {
+                "mode": "required",
+                "file": str(risk_path),
+                "timing": {"scope": "full"},
+            },
+            "visual_dedup": {
+                "enabled": True,
+                "effect_layers": [
+                    {
+                        "layer_id": "fireworks",
+                        "name": "烟花",
+                        "type": "overlay",
+                        "library_id": "fireworks",
+                        "opacity_percent": 60,
+                    },
+                    {
+                        "layer_id": "blur-frame",
+                        "name": "模糊边框",
+                        "type": "blur_frame",
+                        "opacity_percent": 50,
+                    },
+                ],
+            },
+            "output": {
+                "directory": str(tmp_path / "out"),
+                "width": 180,
+                "height": 320,
+                "fps": 24,
+                "video_codec": "libx264",
+                "video_preset": "ultrafast",
+            },
+        }
+    )
+    layers = config.visual_dedup.effect_layers
+    item = PlanItem(
+        index=1,
+        selections={"pool_1": source},
+        overlay=risk,
+        visual_effects=[
+            PlannedVisualEffect(layer=layers[0], asset=fireworks),
+            PlannedVisualEffect(layer=layers[1], asset=None),
+        ],
+        output_name="effects.mp4",
+        estimated_duration=source.probe.duration,
+    )
+
+    command, _ = build_ffmpeg_command(config, item, tmp_path / "effects.mp4")
+    filters = command[command.index("-filter_complex") + 1]
+
+    assert filters.index("effect_bg_src_0") < filters.index("effect_input_1")
+    assert filters.index("effect_input_1") < filters.index("[overlay]overlay")
+    assert "colorchannelmixer=aa=0.600000" in filters
+    assert "blend=all_expr='A*(1-0.500000)+B*0.500000'" in filters
+
+    output = tmp_path / "effects.mp4"
+    result = render_item(config, item, output, threading.Event())
+    assert output.is_file()
+    assert result["actual_duration"] > 0.4
+    rendered_probe = probe_media(output)
+    assert rendered_probe.width == 180
+    assert rendered_probe.height == 320

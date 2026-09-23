@@ -171,6 +171,66 @@ class VisualBorderOverlayConfig(BaseModel):
         return normalized
 
 
+class VisualEffectLayerConfig(BaseModel):
+    layer_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
+    name: str = Field(min_length=1, max_length=100)
+    type: Literal["overlay", "blur_frame"]
+    enabled: bool = True
+    required: bool = True
+    opacity_percent: int = Field(default=100, ge=0, le=100)
+    library_id: str = ""
+    selection_mode: Literal["random", "fixed"] = "random"
+    fixed_asset_id: str = ""
+    enabled_asset_ids: list[str] = Field(default_factory=list)
+    weights: dict[str, float] = Field(default_factory=dict)
+    legacy_file: str = ""
+    scale_mode: Literal["exact", "stretch"] = "exact"
+    playback: Literal["loop"] = "loop"
+    alpha_mode: Literal["auto", "straight", "premultiplied"] = "auto"
+    foreground_scale: float = Field(default=0.9, ge=0.7, le=1.0)
+    sigma: float = Field(default=20.0, ge=0, le=100)
+    steps: int = Field(default=2, ge=1, le=6)
+    brightness: float = Field(default=0.0, ge=-1, le=1)
+
+    _normalize_legacy_file = field_validator("legacy_file", mode="before")(
+        normalize_path_input
+    )
+
+    @field_validator("library_id", "fixed_asset_id")
+    @classmethod
+    def strip_identifiers(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("enabled_asset_ids")
+    @classmethod
+    def normalize_enabled_assets(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+    @field_validator("weights")
+    @classmethod
+    def validate_weights(cls, values: dict[str, float]) -> dict[str, float]:
+        normalized = {key.strip(): value for key, value in values.items() if key.strip()}
+        if any(value < 0 for value in normalized.values()):
+            raise ValueError("特效素材权重不能为负数")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_layer_kind(self) -> VisualEffectLayerConfig:
+        if self.type == "overlay" and not self.library_id and not self.legacy_file:
+            raise ValueError("素材特效层必须选择全局素材库")
+        return self
+
+
+def _default_visual_effect_layers() -> list[VisualEffectLayerConfig]:
+    return [
+        VisualEffectLayerConfig(
+            layer_id="blur-frame-main",
+            name="模糊边框",
+            type="blur_frame",
+        )
+    ]
+
+
 class VisualDedupConfig(BaseModel):
     enabled: bool = False
     foreground: VisualDedupForegroundConfig = Field(
@@ -182,6 +242,10 @@ class VisualDedupConfig(BaseModel):
     border_overlay: VisualBorderOverlayConfig = Field(
         default_factory=VisualBorderOverlayConfig
     )
+    effect_layers: list[VisualEffectLayerConfig] = Field(
+        default_factory=_default_visual_effect_layers, max_length=10
+    )
+    effect_layers_explicit: bool = Field(default=False, exclude=True)
 
     @model_validator(mode="before")
     @classmethod
@@ -189,13 +253,117 @@ class VisualDedupConfig(BaseModel):
         if not isinstance(value, dict):
             return value
         data = copy.deepcopy(value)
+        data["effect_layers_explicit"] = "effect_layers" in data
         legacy_enabled = data.get("enabled")
         background = data.setdefault("background", {})
         if not isinstance(background, dict):
             return data
         if "enabled" not in background and isinstance(legacy_enabled, bool):
             background["enabled"] = True
+        if "effect_layers" not in data:
+            foreground = data.get("foreground")
+            if not isinstance(foreground, dict):
+                foreground = {}
+            border = data.get("border_overlay")
+            if not isinstance(border, dict):
+                border = {}
+            layers: list[dict[str, Any]] = []
+            border_mode = str(border.get("mode", SourceMode.DISABLED))
+            if border_mode != SourceMode.DISABLED:
+                layers.append(
+                    {
+                        "layer_id": "legacy-visual-border",
+                        "name": "透明边框",
+                        "type": "overlay",
+                        "enabled": True,
+                        "required": border_mode == SourceMode.REQUIRED,
+                        "library_id": "effect_1",
+                        "selection_mode": border.get("selection_mode", "random"),
+                        "fixed_asset_id": border.get("fixed_asset_id", ""),
+                        "enabled_asset_ids": border.get("enabled_asset_ids", []),
+                        "weights": border.get("weights", {}),
+                        "legacy_file": border.get("file", ""),
+                        "scale_mode": border.get("scale_mode", "exact"),
+                        "playback": border.get("playback", "loop"),
+                        "alpha_mode": border.get("alpha_mode", "auto"),
+                        "opacity_percent": round(float(border.get("opacity", 1)) * 100),
+                    }
+                )
+            if background.get("enabled", True):
+                layers.append(
+                    {
+                        "layer_id": "blur-frame-main",
+                        "name": "模糊边框",
+                        "type": "blur_frame",
+                        "enabled": True,
+                        "opacity_percent": 100,
+                        "foreground_scale": foreground.get("scale", 0.9),
+                        "sigma": background.get("sigma", 20),
+                        "steps": background.get("steps", 2),
+                        "brightness": background.get("brightness", 0),
+                    }
+                )
+            data["effect_layers"] = layers
+        effect_layers = data.get("effect_layers")
+        if isinstance(effect_layers, list):
+            for layer in effect_layers:
+                if (
+                    isinstance(layer, dict)
+                    and layer.get("type") == "overlay"
+                    and layer.get("library_id") == "visual-border"
+                ):
+                    layer["library_id"] = "effect_1"
         return data
+
+    @model_validator(mode="after")
+    def validate_effect_layers(self) -> VisualDedupConfig:
+        identifiers = [layer.layer_id for layer in self.effect_layers]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("effect_layers 中存在重复 layer_id")
+        if sum(layer.type == "blur_frame" for layer in self.effect_layers) > 1:
+            raise ValueError("一个配置最多只能有一个模糊边框层")
+        return self
+
+    def resolved_effect_layers(self) -> list[VisualEffectLayerConfig]:
+        if self.effect_layers_explicit:
+            return list(self.effect_layers)
+        layers: list[VisualEffectLayerConfig] = []
+        border = self.border_overlay
+        if border.mode != SourceMode.DISABLED:
+            layers.append(
+                VisualEffectLayerConfig(
+                    layer_id="legacy-visual-border",
+                    name="透明边框",
+                    type="overlay",
+                    enabled=True,
+                    required=border.mode == SourceMode.REQUIRED,
+                    library_id="effect_1",
+                    selection_mode=border.selection_mode,
+                    fixed_asset_id=border.fixed_asset_id,
+                    enabled_asset_ids=border.enabled_asset_ids,
+                    weights=border.weights,
+                    legacy_file=border.file,
+                    scale_mode=border.scale_mode,
+                    playback=border.playback,
+                    alpha_mode=border.alpha_mode,
+                    opacity_percent=round(border.opacity * 100),
+                )
+            )
+        if self.background.enabled:
+            layers.append(
+                VisualEffectLayerConfig(
+                    layer_id="blur-frame-main",
+                    name="模糊边框",
+                    type="blur_frame",
+                    enabled=True,
+                    opacity_percent=100,
+                    foreground_scale=self.foreground.scale,
+                    sigma=self.background.sigma,
+                    steps=self.background.steps,
+                    brightness=self.background.brightness,
+                )
+            )
+        return layers
 
 
 class MatchingConfig(BaseModel):
@@ -661,7 +829,7 @@ class PlanNamingMetadata(BaseModel):
     product: str
     benefit: str
     talents: list[str]
-    restriction_date: str
+    restriction_date: str | None = None
     sequence: int = Field(ge=1)
     sources: list[NamingSourceRecord]
 
@@ -715,11 +883,17 @@ class SourceInventoryResult(BaseModel):
     sources: dict[str, SourceInventoryItem]
 
 
+class PlannedVisualEffect(BaseModel):
+    layer: VisualEffectLayerConfig
+    asset: Asset | None = None
+
+
 class PlanItem(BaseModel):
     index: int
     selections: dict[str, Asset | None]
     overlay: Asset | None = None
     visual_border: Asset | None = None
+    visual_effects: list[PlannedVisualEffect] = Field(default_factory=list)
     output_name: str
     estimated_duration: float
     naming: PlanNamingMetadata | None = None
@@ -863,6 +1037,25 @@ class GlobalVisualBorderUpdateRequest(BaseModel):
     enabled: bool | None = None
     default_weight: float | None = Field(default=None, ge=0)
     alpha_mode: Literal["straight", "premultiplied"] | None = None
+
+
+class GlobalVisualEffectLibraryCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    library_revision: int = Field(ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("特效库名称不能为空")
+        return value
+
+
+class GlobalVisualEffectLibraryUpdateRequest(BaseModel):
+    library_revision: int = Field(ge=0)
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    enabled: bool | None = None
 
 
 class SliceAssignment(BaseModel):

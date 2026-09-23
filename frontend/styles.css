@@ -460,6 +460,13 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .simple-source-card.dragging { opacity: .45; }
 .simple-source-card.drag-over { border-color: var(--green); transform: translateY(2px); }
 .simple-source-card.is-disabled { opacity: .62; background: #f1f2ef; }
+.visual-effect-layer-card .effect-opacity-control { grid-column: 2 / -1; }
+.effect-opacity-control { display: grid; grid-template-columns: auto minmax(0, 1fr) 58px auto; gap: 7px; align-items: center; min-width: 0; max-width: 100%; font-size: 11px; color: var(--muted); }
+.effect-opacity-control input[type="number"] { min-width: 0; padding: 7px 8px; }
+.effect-opacity-control input[type="range"] { min-width: 0; width: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; accent-color: #5d9ff3; }
+@media (max-width: 760px) {
+  .visual-effect-layer-card .effect-opacity-control { grid-column: 1 / -1; }
+}
 .simple-source-step { display: flex; align-items: center; gap: 8px; color: var(--green); }
 .simple-source-step span { font: 750 18px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .simple-source-step i { font-style: normal; font-size: 20px; }

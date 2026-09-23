@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from smartstitch.models import AppConfig, Asset, MediaProbe, ScanResult
+from smartstitch.models import AppConfig, Asset, MediaProbe, ScanResult, SourceMode
 from smartstitch.naming import NamingError, parse_asset_naming
 from smartstitch.planner import build_plan
 
@@ -102,6 +102,26 @@ def test_explicit_naming_pools_exclude_other_stitched_pools(tmp_path):
     assert item.output_name == "燕麦奶-第二件半价-张三-20261031-1.mp4"
     assert item.naming is not None
     assert [source.category for source in item.naming.sources] == ["pool_1"]
+
+
+def test_disabled_naming_pool_omits_talent_and_date(tmp_path):
+    config = naming_config(tmp_path, categories=["pool_1"])
+    config.sources["pool_1"].mode = SourceMode.DISABLED
+    scan = ScanResult(
+        config_id=config.id,
+        assets={
+            "pool_1": [],
+            "pool_2": [naming_asset("pool_2", "普通素材.mp4")],
+            "benefit_overlay": [],
+        },
+    )
+
+    item = build_plan(config, scan, 1, seed=3).items[0]
+
+    assert item.output_name == "燕麦奶-第二件半价-1.mp4"
+    assert item.naming.talents == []
+    assert item.naming.restriction_date is None
+    assert item.naming.sources == []
 
 
 def test_sequence_can_start_from_configured_number(tmp_path):

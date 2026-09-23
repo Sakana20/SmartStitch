@@ -170,6 +170,68 @@ def test_visual_border_random_mode_uses_weighted_reproducible_sequence(tmp_path)
     assert first.distribution["visual_border"] == {"red.mp4": 3, "blue.mp4": 1}
 
 
+def test_visual_effect_plan_freezes_each_ordered_layer(tmp_path):
+    config = make_config(tmp_path)
+    config.visual_dedup = config.visual_dedup.model_validate(
+        {
+            "enabled": True,
+            "effect_layers": [
+                {
+                    "layer_id": "fireworks",
+                    "name": "烟花",
+                    "type": "overlay",
+                    "library_id": "fireworks",
+                    "selection_mode": "fixed",
+                    "fixed_asset_id": "fireworks-a",
+                    "opacity_percent": 60,
+                },
+                {
+                    "layer_id": "blur-frame",
+                    "name": "模糊边框",
+                    "type": "blur_frame",
+                    "opacity_percent": 50,
+                },
+            ],
+        }
+    )
+    fireworks = Asset(
+        id="fireworks-a",
+        category="visual_effect:fireworks",
+        path="/effects/fireworks.mov",
+        name="fireworks.mov",
+        media_type="video",
+        probe=MediaProbe(
+            duration=1,
+            width=720,
+            height=1280,
+            fps=30,
+            video_codec="qtrle",
+            pixel_format="argb",
+            has_alpha=True,
+        ),
+    )
+    scan = ScanResult(
+        config_id=config.id,
+        assets={
+            category: [asset(category, category)] for category in config.timeline
+        }
+        | {
+            "benefit_overlay": [],
+            "visual_effect:fireworks": [fireworks],
+        },
+    )
+
+    plan = build_plan(config, scan, 2, seed=7)
+
+    assert [effect.layer.layer_id for effect in plan.items[0].visual_effects] == [
+        "fireworks",
+        "blur-frame",
+    ]
+    assert plan.items[0].visual_effects[0].asset == fireworks
+    assert plan.items[0].visual_effects[1].asset is None
+    assert plan.distribution["visual_effect:fireworks"] == {"fireworks.mov": 2}
+
+
 def test_generic_plan_uses_dynamic_timeline_order(tmp_path):
     config = make_generic_config(tmp_path)
     scan = ScanResult(

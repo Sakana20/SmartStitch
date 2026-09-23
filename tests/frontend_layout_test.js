@@ -15,8 +15,8 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260922-87"/,
-  "ffprobe 扫描配置更新后必须刷新静态资源缓存版本",
+  /href="\/styles\.css\?v=20260923-91"/,
+  "前端交互或样式更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
@@ -290,53 +290,123 @@ assert.match(
 );
 assert.match(
   app,
-  /function renderSimpleConfig\(\)[\s\S]*视觉去重[\s\S]*simpleChoiceButtons\("visualDedup"[\s\S]*simpleVisualBorderFile/,
-  "视觉去重必须沿用简单模式卡片、大选项和文件选择结构",
+  /function renderSimpleConfig\(\)[\s\S]*每张卡片就是一个特效库[\s\S]*visualEffectLayerCards\(config\)[\s\S]*simpleAddEffectLibraryBtn/,
+  "视觉去重必须沿用视频库卡片列表并直接支持新增特效库",
 );
 assert.match(
   app,
-  /simpleVisualDedupEnabled[\s\S]*visual\.enabled[\s\S]*simpleVisualBackgroundEnabled[\s\S]*visual\.background\.enabled[\s\S]*simpleVisualBorderEnabled[\s\S]*visualBorderEnabled/,
-  "视觉去重必须包含总开关以及两个独立的子功能开关",
+  /视觉去重[\s\S]*风险提示语始终在最上层[\s\S]*simpleVisualDedupEnabled[\s\S]*visual\.enabled/,
+  "视觉去重必须包含统一总开关并说明风险提示语的最高层约束",
+);
+assert.doesNotMatch(
+  app,
+  /effect-stack-cap/,
+  "风险提示语已有独立设置，不应在视觉去重卡片中重复出现",
 );
 assert.match(
   app,
-  /configSwitch\("启用视觉去重", "visual_dedup\.enabled"[\s\S]*configSwitch\("启用模糊背景与缩小主画面", "visual_dedup\.background\.enabled"[\s\S]*configSelect\("边框使用方式", "visual_dedup\.border_overlay\.mode"/,
-  "高级模式必须分别保留总开关、模糊背景开关和透明边框模式",
+  /function visualEffectLayerCards\(config\)[\s\S]*data-effect-action="up"[\s\S]*data-effect-action="down"[\s\S]*data-effect-action="delete"/,
+  "特效图层必须支持上移、下移和删除",
 );
 assert.match(
   app + css,
-  /simple-visual-dedup-body[\s\S]*\.simple-visual-dedup-body\s*\{[^}]*display:\s*grid[^}]*gap:\s*16px/,
-  "视觉去重卡片各设置组之间必须保留与其他卡片一致的纵向留白",
+  /data-effect-opacity-slider[\s\S]*data-effect-opacity[\s\S]*\.effect-opacity-control\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\)[^}]*min-width:\s*0[^}]*max-width:\s*100%/,
+  "每个视觉去重图层必须提供不会横向溢出的百分比透明度控件",
 );
 assert.match(
+  css,
+  /\.effect-opacity-control input\[type="range"\]\s*\{[^}]*width:\s*100%[^}]*padding:\s*0[^}]*border:\s*0/,
+  "透明度滑块不得继承通用输入框内边距，100% 时滑块必须到达末端",
+);
+assert.match(
+  app,
+  /simple-source-main[\s\S]*\$\{libraryControl\}[\s\S]*simple-source-switch[\s\S]*data-effect-action="up"[\s\S]*effect-opacity-control/,
+  "特效库卡片必须像视频库一样依次显示素材入口、参与开关和排序操作",
+);
+assert.match(
+  app,
+  /const libraryControl[\s\S]*class="text-btn simple-source-directory"[\s\S]*data-open-effect-library[\s\S]*library\.library_id/,
+  "可用的素材型特效库卡片必须像视频库一样显示稳定编号和文件夹入口",
+);
+assert.match(
+  app,
+  /simple-source-main[\s\S]*simple-source-name[\s\S]*simple-source-meta/,
+  "特效库名称和素材数量必须复用视频库的主信息结构",
+);
+assert.match(
+  app,
+  /simple-source-step[\s\S]*String\(index \+ 1\)\.padStart\(2, "0"\)[\s\S]*拖动调整顺序[\s\S]*simple-source-main/,
+  "特效图层必须复用视频库的绿色编号和拖拽手柄结构",
+);
+assert.match(
+  css,
+  /\.simple-source-card\s*\{[^}]*grid-template-columns:\s*56px[\s\S]*\.simple-source-card\[draggable="true"\]\s*\{[^}]*cursor:\s*grab/,
+  "特效库卡片必须直接复用视频库的五列布局和编号列宽",
+);
+assert.doesNotMatch(
+  app,
+  /class="[^"]*(?:effect-library-upload|effect-library-built-in|effect-layer-title|effect-layer-step|simple-source-drag)/,
+  "特效库信息和拖拽手柄必须直接复用视频库现有样式，不得另建专用样式",
+);
+assert.doesNotMatch(
+  css,
+  /\.(?:effect-library-upload|effect-library-built-in|effect-layer-title|effect-layer-step|simple-source-drag)/,
+  "特效库信息和拖拽手柄不得新增专用 CSS 选择器",
+);
+assert.doesNotMatch(
+  app,
+  /data-effect-selection|data-effect-fixed|选择方式.*effect_layers|固定素材.*effect_layers/,
+  "特效图层应与视频库一致自动抽取素材，不提供随机或固定选项",
+);
+assert.match(
+  app,
+  /data-effect-layer-card[\s\S]*draggable="true"[\s\S]*function bindVisualEffectLayerControls\(\)[\s\S]*dragstart[\s\S]*draggedLayerId = card\.dataset\.effectLayerCard[\s\S]*moveVisualEffectLayer/,
+  "特效图层必须像视频库一样支持整张卡片拖拽排序",
+);
+assert.doesNotMatch(
+  app,
+  /dragstart[\s\S]{0,220}closest\("\.simple-source-drag"\)/,
+  "特效库拖拽不得被限制为只能从手柄元素触发",
+);
+assert.match(
+  app,
+  /function syncVisualEffectOpacitySlider[\s\S]*data-effect-opacity[\s\S]*input\.addEventListener\("input"[\s\S]*input\.addEventListener\("change"[\s\S]*pointerdown[\s\S]*card\.draggable = false[\s\S]*syncVisualEffectOpacitySlider\(opacitySlider\)[\s\S]*card\.draggable = true/,
+  "操作透明度滑条等交互控件时必须暂时停用外层卡片拖拽，避免手势被抢占",
+);
+assert.match(
+  app,
+  /loadVisualBorderLibrary[\s\S]*\/global-assets\/visual-effect-libraries[\s\S]*simpleAddEffectLibraryBtn[\s\S]*function deleteVisualEffectLibraryCard/,
+  "前端必须读取全局特效库，并由同一张编排卡片新增和删除库",
+);
+assert.match(
+  app,
+  /function visualEffectLayerCards\(config\)[\s\S]*data-open-effect-library[\s\S]*\/global-assets\/visual-effect-libraries\/\$\{libraryId\}\/open-directory/,
+  "每张特效库卡片必须直接提供与视频库一致的文件夹入口",
+);
+assert.doesNotMatch(
+  app,
+  /data-effect-library-upload|function uploadVisualEffectAsset/,
+  "特效库不应另设一套上传控件，应通过稳定编号目录管理素材",
+);
+assert.match(
+  app,
+  /function ensureVisualEffectLibraryLayers\(config\)[\s\S]*type: "overlay"[\s\S]*function visualEffectLayerCards/,
+  "每个全局特效库必须直接对应一个可排序的视觉去重卡片",
+);
+assert.doesNotMatch(
   app + css,
-  /simple-visual-border-actions[\s\S]*\.simple-visual-border-actions\s*\{[^}]*align-self:\s*stretch[^}]*align-items:\s*stretch[^}]*\}[\s\S]*\.simple-visual-border-actions label\.button\s*\{[^}]*min-height:\s*100%/,
-  "添加全局边框按钮必须与左侧状态框上下对齐",
+  /管理全局特效库|visual-effect-library-manager|visualEffectLibraryRows/,
+  "视觉去重卡片下方不得再出现第二套全局特效库管理区",
 );
 assert.match(
   app,
-  /loadVisualBorderLibrary[\s\S]*\/global-assets\/visual-borders[\s\S]*添加到全局库[\s\S]*visualBorderSelection/,
-  "视觉边框必须从全局库读取，并在简单模式支持随机或固定选择",
+  /function renderVisualConfig\(\)[\s\S]*advancedEffectLayers[\s\S]*visual_dedup\.effect_layers\.\$\{index\}[\s\S]*opacity_percent/,
+  "高级模式必须编辑与简单模式相同的有序图层和百分比透明度字段",
 );
 assert.match(
   app,
-  /function globalVisualBordersForDraft\(config\)[\s\S]*state\.visualBorderLibrary[\s\S]*config\.output\.width[\s\S]*const draftVisualBorders = globalVisualBordersForDraft\(config\)/,
-  "简单模式必须按当前草稿计算全局边框兼容数，不能依赖保存前的扫描结果",
-);
-assert.match(
-  app,
-  /data-global-border-weight[\s\S]*data-global-border-toggle[\s\S]*function bindGlobalVisualBorderControls/,
-  "高级模式必须复用现有配置界面管理全局边框状态和默认权重",
-);
-assert.match(
-  app,
-  /function renderVisualConfig\(\)[\s\S]*data-config-section="visual-dedup"[\s\S]*visual_dedup\.background\.enabled[\s\S]*visual_dedup\.foreground\.scale[\s\S]*visual_dedup\.border_overlay\.alpha_mode/,
-  "视觉去重复杂参数必须进入现有高级配置与 data-config-path 架构",
-);
-assert.match(
-  app,
-  /\["benefit_overlay", "visual_border"\]\.includes\(state\.assetCategory\)[\s\S]*!\["benefit_overlay", "visual_border"\]\.includes\(category\)/,
-  "视觉边框必须沿用固定素材规则，不得进入权重与标签编辑",
+  /function categoryLabel\(category\)[\s\S]*category\.startsWith\("visual_effect:"\)[\s\S]*layer\?\.name/,
+  "动态特效扫描分类必须显示项目图层名称",
 );
 assert.match(
   app,

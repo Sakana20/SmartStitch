@@ -94,7 +94,7 @@ class JobManager:
         if request.output_directory:
             config.output.directory = request.output_directory
         global_borders = (
-            self.visual_border_library.assets_for_config(config)
+            self.visual_border_library.assets_for_effect_layers(config)
             if self.visual_border_library is not None
             else None
         )
@@ -143,6 +143,10 @@ class JobManager:
                         if planned.visual_border
                         else None
                     ),
+                    "visual_effects": [
+                        effect.model_dump(mode="json")
+                        for effect in planned.visual_effects
+                    ],
                     "naming": planned.naming.model_dump(mode="json") if planned.naming else None,
                 }
             )
@@ -329,7 +333,7 @@ class JobManager:
         self._mutate_item(job_id, item_index, status="running")
         job = self.get_job(job_id)
         item_data = next(item for item in job["items"] if item["index"] == item_index)
-        from .models import Asset, PlanItem
+        from .models import Asset, PlannedVisualEffect, PlanItem
 
         planned = PlanItem(
             index=item_data["index"],
@@ -343,6 +347,10 @@ class JobManager:
                 if item_data.get("visual_border")
                 else None
             ),
+            visual_effects=[
+                PlannedVisualEffect.model_validate(effect)
+                for effect in item_data.get("visual_effects", [])
+            ],
             output_name=item_data["output_name"],
             estimated_duration=item_data["estimated_duration"],
         )
@@ -448,6 +456,7 @@ class JobManager:
                     *category_columns.values(),
                     "benefit_overlay",
                     "visual_border",
+                    "visual_effects",
                     "output_path",
                     "error",
                 ],
@@ -462,6 +471,10 @@ class JobManager:
                         item["visual_border"]["path"]
                         if item.get("visual_border")
                         else ""
+                    ),
+                    "visual_effects": json.dumps(
+                        item.get("visual_effects", []),
+                        ensure_ascii=False,
                     ),
                     "output_path": item["output_path"],
                     "error": item["error"] or "",

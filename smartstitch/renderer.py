@@ -7,7 +7,14 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-from .models import AppConfig, Asset, PlanItem, SourceMode, is_benefit_category
+from .models import (
+    AppConfig,
+    Asset,
+    PlannedVisualEffect,
+    PlanItem,
+    SourceMode,
+    is_benefit_category,
+)
 
 
 class RenderError(RuntimeError):
@@ -169,9 +176,25 @@ def build_ffmpeg_command(
                 command.extend(["-hwaccel", "videotoolbox"])
             command.extend(["-i", asset.path])
 
+    use_effect_stack = config.visual_dedup.enabled and (
+        bool(item.visual_effects) or config.visual_dedup.effect_layers_explicit
+    )
+    effect_inputs: list[tuple[PlannedVisualEffect, int]] = []
+    if use_effect_stack:
+        for effect in item.visual_effects:
+            if effect.layer.type != "overlay" or effect.asset is None:
+                continue
+            input_index = len(timeline) + len(effect_inputs)
+            if effect.asset.media_type == "image":
+                command.extend(["-loop", "1", "-i", effect.asset.path])
+            else:
+                command.extend(["-stream_loop", "-1", "-i", effect.asset.path])
+            effect_inputs.append((effect, input_index))
+
     visual_border_index: int | None = None
     if (
-        config.visual_dedup.enabled
+        not use_effect_stack
+        and config.visual_dedup.enabled
         and config.visual_dedup.border_overlay.mode != SourceMode.DISABLED
         and item.visual_border is not None
     ):
@@ -183,7 +206,11 @@ def build_ffmpeg_command(
 
     overlay_index: int | None = None
     if item.overlay is not None:
-        overlay_index = len(timeline) + (1 if visual_border_index is not None else 0)
+        overlay_index = (
+            len(timeline)
+            + len(effect_inputs)
+            + (1 if visual_border_index is not None else 0)
+        )
         command.extend(["-loop", "1", "-i", item.overlay.path])
 
     filters: list[str] = []
@@ -194,7 +221,98 @@ def build_ffmpeg_command(
     filters.append(f"{concat_inputs}concat=n={len(timeline)}:v=1:a=1[basev][outa]")
 
     video_map = "[basev]"
-    if config.visual_dedup.enabled and config.visual_dedup.background.enabled:
+    if use_effect_stack:
+        effect_input_by_layer = {
+            effect.layer.layer_id: (effect, input_index)
+            for effect, input_index in effect_inputs
+        }
+        for stack_index, planned in enumerate(reversed(item.visual_effects)):
+            layer = planned.layer
+            if not layer.enabled or layer.opacity_percent == 0:
+                continue
+            output_label = f"effect_layer_{stack_index}"
+            opacity = layer.opacity_percent / 100
+            if layer.type == "blur_frame":
+                foreground_width = max(
+                    2,
+                    int(config.output.width * layer.foreground_scale / 2) * 2,
+                )
+                foreground_height = max(
+                    2,
+                    int(config.output.height * layer.foreground_scale / 2) * 2,
+                )
+                split_count = 3 if layer.opacity_percent < 100 else 2
+                original_label = f"effect_original_{stack_index}"
+                split_outputs = (
+                    f"[{original_label}]" if split_count == 3 else ""
+                )
+                filters.append(
+                    f"{video_map}split={split_count}{split_outputs}"
+                    f"[effect_bg_src_{stack_index}][effect_fg_src_{stack_index}]"
+                )
+                background_filters = [
+                    f"gblur=sigma={layer.sigma:.6f}:steps={layer.steps}"
+                ]
+                if layer.brightness != 0:
+                    background_filters.append(
+                        f"eq=brightness={layer.brightness:.6f}"
+                    )
+                filters.append(
+                    f"[effect_bg_src_{stack_index}]"
+                    f"{','.join(background_filters)}[effect_bg_{stack_index}]"
+                )
+                filters.append(
+                    f"[effect_fg_src_{stack_index}]scale="
+                    f"{foreground_width}:{foreground_height}[effect_fg_{stack_index}]"
+                )
+                transformed_label = (
+                    f"effect_transformed_{stack_index}"
+                    if split_count == 3
+                    else output_label
+                )
+                filters.append(
+                    f"[effect_bg_{stack_index}][effect_fg_{stack_index}]"
+                    "overlay=x=(W-w)/2:y=(H-h)/2:format=auto"
+                    f"[{transformed_label}]"
+                )
+                if split_count == 3:
+                    filters.append(
+                        f"[{original_label}][{transformed_label}]"
+                        f"blend=all_expr='A*(1-{opacity:.6f})+B*{opacity:.6f}'"
+                        f"[{output_label}]"
+                    )
+            else:
+                entry = effect_input_by_layer.get(layer.layer_id)
+                if entry is None or planned.asset is None:
+                    continue
+                _effect, input_index = entry
+                alpha_mode = (
+                    planned.asset.alpha_mode
+                    if layer.alpha_mode == "auto" and planned.asset.alpha_mode
+                    else "straight" if layer.alpha_mode == "auto" else layer.alpha_mode
+                )
+                effect_scale = (
+                    f"scale={config.output.width}:{config.output.height}"
+                    if layer.scale_mode == "stretch"
+                    else "null"
+                )
+                prepared_label = f"effect_input_{stack_index}"
+                filters.append(
+                    f"[{input_index}:v]{effect_scale},fps={config.output.fps},"
+                    "setpts=PTS-STARTPTS,format=rgba,"
+                    f"colorchannelmixer=aa={opacity:.6f}[{prepared_label}]"
+                )
+                filters.append(
+                    f"{video_map}[{prepared_label}]overlay=x=0:y=0:shortest=1:"
+                    f"eof_action=pass:format=auto:alpha={alpha_mode}[{output_label}]"
+                )
+            video_map = f"[{output_label}]"
+
+    if (
+        not use_effect_stack
+        and config.visual_dedup.enabled
+        and config.visual_dedup.background.enabled
+    ):
         visual = config.visual_dedup
         foreground_width = max(
             2, int(config.output.width * visual.foreground.scale / 2) * 2

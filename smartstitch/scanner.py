@@ -820,7 +820,7 @@ def scan_visual_border(
 
 def scan_config(
     config: AppConfig,
-    global_visual_borders: list[Asset] | None = None,
+    global_visual_borders: list[Asset] | dict[str, list[Asset]] | None = None,
     probe_cache: MediaProbeCache | None = None,
 ) -> ScanResult:
     scan_started = time.perf_counter()
@@ -863,16 +863,12 @@ def scan_config(
             if config.sources[category].mode != SourceMode.DISABLED
             and category_is_naming_source(config, category)
         ]
-        if not naming_categories:
-            errors.append("成片命名规则没有匹配任何已启用的视频库")
-        selectable_count = 0
         for category in naming_categories:
             group = config.sources[category]
             label = group.label.strip() or category
             for asset in assets.get(category, []):
                 if not asset.selectable:
                     continue
-                selectable_count += 1
                 try:
                     asset.naming_metadata = parse_asset_naming(config, asset)
                 except NamingError as exc:
@@ -880,22 +876,79 @@ def scan_config(
                         f"{label}（{category}）: 无法从“{asset.name}”"
                         f"识别达人名和限制日期: {exc}"
                     )
-        if naming_categories and selectable_count == 0:
-            errors.append("参与成片命名的视频库中没有可用素材")
 
     overlays, overlay_errors = scan_fixed_overlay(config, probe_session)
     assets["benefit_overlay"] = overlays
     errors.extend(overlay_errors)
     if any(not asset.valid for asset in overlays):
         warnings.append("benefit_overlay: 存在不可用图片")
+    effect_asset_map = (
+        global_visual_borders if isinstance(global_visual_borders, dict) else {}
+    )
+    legacy_global_borders = (
+        global_visual_borders if isinstance(global_visual_borders, list) else None
+    )
+    if effect_asset_map:
+        legacy_layer = next(
+            (
+                layer for layer in config.visual_dedup.resolved_effect_layers()
+                if layer.type == "overlay"
+                and layer.library_id in {"effect_1", "visual-border"}
+            ),
+            None,
+        )
+        if legacy_layer is not None:
+            legacy_global_borders = effect_asset_map.get(
+                f"visual_effect:{legacy_layer.layer_id}", []
+            )
     borders, border_errors, border_warnings = scan_visual_border(
-        config, global_visual_borders, probe_session
+        config, legacy_global_borders, probe_session
     )
     assets["visual_border"] = borders
     errors.extend(border_errors)
     warnings.extend(border_warnings)
     if any(not asset.valid for asset in borders):
         warnings.append("visual_border: 存在不可用边框")
+
+    if config.visual_dedup.enabled:
+        for layer in config.visual_dedup.resolved_effect_layers():
+            if layer.type != "overlay" or not layer.enabled:
+                continue
+            category = f"visual_effect:{layer.layer_id}"
+            layer_assets = list(effect_asset_map.get(category, []))
+            if layer.layer_id == "legacy-visual-border":
+                layer_assets = list(borders)
+            if layer.selection_mode == "fixed":
+                if not layer.fixed_asset_id:
+                    errors.append(f"{layer.name}: 固定模式必须选择一个特效素材")
+                else:
+                    matched = [
+                        asset for asset in layer_assets
+                        if asset.id == layer.fixed_asset_id
+                    ]
+                    if not matched:
+                        errors.append(f"{layer.name}: 固定素材不存在或已停用")
+                    layer_assets = matched
+            selectable = [asset for asset in layer_assets if asset.selectable]
+            if layer.required and not selectable:
+                detail = next(
+                    (asset.error for asset in layer_assets if asset.error), None
+                )
+                errors.append(
+                    f"{layer.name}: "
+                    + (detail or "全局特效库没有与当前输出兼容的可用素材")
+                )
+            warnings.extend(
+                f"{layer.name}: {asset.name}: {asset.error}"
+                for asset in layer_assets
+                if not asset.valid and asset.error
+            )
+            warnings.extend(
+                f"{layer.name}: {asset.name} 包含音轨，生成时将忽略该音轨"
+                for asset in selectable
+                if asset.probe and asset.probe.has_audio
+            )
+            assets[category] = layer_assets
     result = ScanResult(
         config_id=config.id,
         assets=assets,
