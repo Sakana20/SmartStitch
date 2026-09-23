@@ -95,5 +95,7 @@ app = BUNDLE(
         "CFBundleVersion": version,
         "LSMinimumSystemVersion": "13.0",
         "NSHighResolutionCapable": True,
+        "NSLocalNetworkUsageDescription": "发现并连接局域网中的 SmartStitch 渲染工作机。",
+        "NSBonjourServices": ["_smartstitch._tcp"],
     },
 )

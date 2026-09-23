@@ -467,6 +467,15 @@ def test_managed_library_can_replace_overlay_image(tmp_path):
         check=True,
     )
 
+    overlay_directory = storage / "风险图项目库" / "风险提示语图片"
+    assert client.get("/api/v1/configs/overlay-library/overlay-image/status").json()["assets"] == []
+    (overlay_directory / image.name).write_bytes(image.read_bytes())
+    discovered = client.get("/api/v1/configs/overlay-library/overlay-image/status")
+    assert discovered.status_code == 200
+    assert [asset["name"] for asset in discovered.json()["assets"]] == [image.name]
+    assert discovered.json()["assets"][0]["valid"]
+    (overlay_directory / image.name).unlink()
+
     _lease, headers = acquire_edit_lease(client, "overlay-library")
     response = client.post(
         "/api/v1/configs/overlay-library/overlay-image",

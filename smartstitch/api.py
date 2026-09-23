@@ -28,6 +28,7 @@ from .collaboration import (
     UserProfileStore,
 )
 from .cluster_auth import ClusterAccess, ClusterUnlockRequest, SESSION_SECONDS
+from .cluster import ClusterMaster, ClusterWorker, NodeRegistration
 from .config import ConfigError, ConfigStore
 from .database import SQLiteStore
 from .feishu import (
@@ -70,6 +71,7 @@ from .models import (
     PreviewRequest,
     ReplaceOverlayImageRequest,
     ReorderTimelineRequest,
+    SourceMode,
     StructuredConfigUpdateRequest,
     TimelineAnalyzeRequest,
     TimelineDecisionRequest,
@@ -92,7 +94,7 @@ from .runtime import (
     writable_config_directory,
     writable_data_directory,
 )
-from .scanner import probe_config_audio, scan_config, scan_source_inventory
+from .scanner import probe_config_audio, scan_config, scan_fixed_overlay, scan_source_inventory
 from .slice_jobs import SliceJobManager
 from .slicer import SliceConflictError, SliceError, TimelineSlicer
 from .timeline import TimelineAnalyzer, TimelineError, list_source_videos
@@ -230,6 +232,8 @@ def create_app(
         slice_job_manager = SliceJobManager(timeline_slicer, database_store)
         prores_alpha_manager = ProResAlphaManager(visual_border_library)
         cluster_access = ClusterAccess()
+        cluster_worker = ClusterWorker(resolved_data_directory, config_store, database_store)
+        cluster_master = ClusterMaster(cluster_worker, job_manager, config_store, resolved_data_directory)
         release_checker = NASUpdateChecker(
             None if resolved_config_directory == local_config_directory
             else resolved_config_directory,
@@ -240,8 +244,15 @@ def create_app(
         @asynccontextmanager
         async def lifespan(_app: FastAPI):
             try:
+                if cluster_worker.settings.get("enabled"):
+                    try:
+                        cluster_worker.start()
+                    except (OSError, RuntimeError) as exc:
+                        cluster_worker.startup_error = str(exc)
+                cluster_master.resume_interrupted()
                 yield
             finally:
+                cluster_master.shutdown()
                 prores_alpha_manager.shutdown()
                 instance_lock.release()
 
@@ -270,6 +281,8 @@ def create_app(
     app.state.timeline_slicer = timeline_slicer
     app.state.slice_job_manager = slice_job_manager
     app.state.cluster_access = cluster_access
+    app.state.cluster_worker = cluster_worker
+    app.state.cluster_master = cluster_master
     app.state.release_checker = release_checker
 
     def collaboration_http_error(exc: CollaborationError) -> HTTPException:
@@ -315,6 +328,10 @@ def create_app(
         scheme, _, token = request.headers.get("Authorization", "").partition(" ")
         return token.strip() if scheme.lower() == "bearer" else ""
 
+    def require_cluster(request: Request) -> None:
+        if not cluster_access.authorized(cluster_token(request)):
+            raise HTTPException(401, "集群控制未解锁或登录已过期")
+
     @app.post("/api/v1/tools/cluster-control/unlock")
     def unlock_cluster(request: ClusterUnlockRequest) -> dict[str, object]:
         token = cluster_access.unlock(request.password.get_secret_value())
@@ -324,9 +341,76 @@ def create_app(
 
     @app.get("/api/v1/tools/cluster-control/status")
     def cluster_status(http_request: Request) -> dict[str, object]:
-        if not cluster_access.authorized(cluster_token(http_request)):
-            raise HTTPException(401, "集群控制未解锁或登录已过期")
-        return {"available": False, "message": "集群控制功能即将加入"}
+        require_cluster(http_request)
+        return {
+            "available": True,
+            "worker": cluster_worker.connection_info(),
+            "nodes": cluster_master.node_statuses(),
+            "jobs": [job for job in job_manager.list_jobs() if job.get("job_type") == "cluster"],
+            "config_root": str(config_store.directory),
+        }
+
+    @app.post("/api/v1/tools/cluster-control/worker/start")
+    def start_cluster_worker(http_request: Request) -> dict[str, object]:
+        require_cluster(http_request)
+        try:
+            return cluster_worker.start()
+        except (OSError, RuntimeError) as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+    @app.post("/api/v1/tools/cluster-control/worker/stop")
+    def stop_cluster_worker(http_request: Request) -> dict[str, bool]:
+        require_cluster(http_request)
+        cluster_worker.stop(disable=True)
+        return {"enabled": False}
+
+    @app.get("/api/v1/tools/cluster-control/discover")
+    def discover_cluster_workers(http_request: Request) -> list[dict[str, object]]:
+        require_cluster(http_request)
+        return cluster_master.discover()
+
+    @app.post("/api/v1/tools/cluster-control/nodes")
+    def add_cluster_node(registration: NodeRegistration, http_request: Request) -> dict[str, object]:
+        require_cluster(http_request)
+        try:
+            return cluster_master.add_node(registration.url, registration.token)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.delete("/api/v1/tools/cluster-control/nodes/{node_id}")
+    def remove_cluster_node(node_id: str, http_request: Request) -> dict[str, bool]:
+        require_cluster(http_request)
+        cluster_master.remove_node(node_id)
+        return {"removed": True}
+
+    @app.post("/api/v1/tools/cluster-control/jobs")
+    def create_cluster_job(payload: JobCreateRequest, http_request: Request) -> dict[str, object]:
+        require_cluster(http_request)
+        try:
+            return cluster_master.create(payload)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/cluster-control/jobs/{job_id}/cancel")
+    def cancel_cluster_job(job_id: str, http_request: Request) -> dict[str, object]:
+        require_cluster(http_request)
+        try:
+            return cluster_master.cancel(job_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.delete("/api/v1/tools/cluster-control/jobs/{job_id}")
+    def delete_cluster_job(job_id: str, http_request: Request) -> dict[str, bool]:
+        require_cluster(http_request)
+        try:
+            if job_manager.get_job(job_id).get("job_type") != "cluster":
+                raise HTTPException(409, "此任务不是集群任务")
+            job_manager.delete(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "集群任务不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"deleted": True}
 
     @app.post("/api/v1/tools/cluster-control/lock")
     def lock_cluster(http_request: Request) -> dict[str, bool]:
@@ -1104,6 +1188,17 @@ def create_app(
         except (ConfigError, FileNotFoundError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.get("/api/v1/configs/{config_id}/overlay-image/status")
+    def overlay_image_status(config_id: str) -> dict[str, object]:
+        try:
+            config = config_store.load(config_id).model_copy(deep=True)
+            # Report folder contents even when the editor's display switch is off.
+            config.benefit_overlays.mode = SourceMode.OPTIONAL
+            assets, errors = scan_fixed_overlay(config)
+            return {"assets": [asset.model_dump(mode="json") for asset in assets], "errors": errors}
+        except (ConfigError, FileNotFoundError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/v1/configs/{config_id}/source-inventory")
     def source_inventory(config_id: str) -> dict[str, object]:
         try:
@@ -1404,8 +1499,10 @@ def create_app(
         return job_manager.list_jobs()
 
     @app.delete("/api/v1/jobs")
-    def delete_all_jobs() -> dict[str, object]:
+    def delete_all_jobs(http_request: Request) -> dict[str, object]:
         try:
+            if any(job.get("job_type") == "cluster" for job in job_manager.list_jobs()):
+                require_cluster(http_request)
             return {"ok": True, "deleted_count": job_manager.delete_all()}
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -1427,15 +1524,22 @@ def create_app(
             raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/v1/jobs/{job_id}/cancel")
-    def cancel_job(job_id: str) -> dict[str, object]:
+    def cancel_job(job_id: str, http_request: Request) -> dict[str, object]:
         try:
+            if job_manager.get_job(job_id).get("job_type") == "cluster":
+                require_cluster(http_request)
+                return cluster_master.cancel(job_id)
             return job_manager.cancel(job_id)
         except KeyError as exc:
             raise HTTPException(404, "任务不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.delete("/api/v1/jobs/{job_id}")
-    def delete_job(job_id: str) -> dict[str, object]:
+    def delete_job(job_id: str, http_request: Request) -> dict[str, object]:
         try:
+            if job_manager.get_job(job_id).get("job_type") == "cluster":
+                require_cluster(http_request)
             job_manager.delete(job_id)
             return {"ok": True, "job_id": job_id}
         except KeyError as exc:

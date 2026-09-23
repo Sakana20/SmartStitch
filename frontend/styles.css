@@ -85,6 +85,26 @@ h1 em { color: var(--green); font-weight: 500; }
 .cluster-gate-error { display: block; margin-top: 12px; color: #9c3d2a; font-size: 11px; }
 .cluster-placeholder { border-color: rgba(29,92,67,.2); background: linear-gradient(145deg, rgba(217,234,223,.8), rgba(255,255,255,.7)); }
 .cluster-placeholder > p { margin-bottom: 0; }
+.cluster-control-tool { display: grid; gap: 18px; }
+.cluster-control-tool > .toolbox-intro { margin: 0; }
+.cluster-control-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.cluster-control-card { min-width: 0; padding: 22px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.7); }
+.cluster-control-card h3 { margin: 0 0 16px; font-size: 17px; }
+.cluster-control-card p, .cluster-control-hint { color: var(--muted); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.cluster-control-form { display: grid; gap: 12px; }
+.cluster-control-form .field { margin: 0; }
+.cluster-control-form .actions { justify-content: flex-end; }
+.cluster-job-form { grid-template-columns: minmax(180px, 2fr) minmax(100px, 1fr) minmax(150px, 1fr) auto; align-items: end; }
+.cluster-token { display: inline-block; max-width: 100%; padding: 3px 6px; border-radius: 5px; background: var(--mint); user-select: all; overflow-wrap: anywhere; }
+.cluster-live { color: var(--green); font-weight: 700; }
+.cluster-node-row, .cluster-job-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line); }
+.cluster-node-row:first-child, .cluster-job-row:first-child { margin-top: 12px; }
+.cluster-node-row strong, .cluster-job-row strong { display: block; font-size: 13px; }
+.cluster-node-row small, .cluster-job-row small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.cluster-node-row .text-btn, .cluster-job-row .text-btn { flex: none; }
+.cluster-found { display: block; margin: 8px 0; text-align: left; }
+.cluster-control-error { padding: 12px 15px; border-radius: 9px; color: #9c3d2a; background: #fff0e8; font-size: 12px; }
+@media (max-width: 900px) { .cluster-control-grid, .cluster-job-form { grid-template-columns: 1fr; } }
 .batch-dedup-tool { display: grid; gap: 22px; }
 .batch-dedup-tool > .field { width: 100%; min-width: 0; }
 .batch-dedup-tool > .toolbox-intro { margin: 0; }

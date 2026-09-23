@@ -14,6 +14,9 @@ def test_cluster_control_requires_password_and_revokes_session(tmp_path):
     lock_url = "/api/v1/tools/cluster-control/lock"
 
     assert client.get(status_url).status_code == 401
+    assert client.get("/api/v1/tools/cluster-control/discover").status_code == 401
+    assert client.post("/api/v1/tools/cluster-control/worker/start").status_code == 401
+    assert client.post("/api/v1/tools/cluster-control/jobs", json={"config_id": "x", "count": 1}).status_code == 401
     assert client.post(unlock_url, json={"password": "wrong"}).status_code == 401
 
     unlocked = client.post(unlock_url, json={"password": "SmartStitch123@"})
@@ -21,7 +24,10 @@ def test_cluster_control_requires_password_and_revokes_session(tmp_path):
     token = unlocked.json()["access_token"]
     assert unlocked.json()["expires_in"] == SESSION_SECONDS
     headers = {"Authorization": f"Bearer {token}"}
-    assert client.get(status_url, headers=headers).json()["available"] is False
+    status = client.get(status_url, headers=headers).json()
+    assert status["available"] is True
+    assert status["worker"]["enabled"] is False
+    assert status["nodes"] == []
     assert client.post(lock_url, headers=headers).json() == {"locked": True}
     assert client.get(status_url, headers=headers).status_code == 401
 

@@ -107,6 +107,7 @@ def _application_managers(app: Any) -> list[Any]:
             getattr(state, "slice_job_manager", None),
             getattr(state, "prores_alpha_manager", None),
             getattr(state, "feishu_sync_manager", None),
+            getattr(state, "cluster_master", None),
         )
         if manager is not None
     ]

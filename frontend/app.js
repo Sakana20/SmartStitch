@@ -6,6 +6,9 @@ const state = {
   library: null,
   yaml: "",
   scan: null,
+  overlayStatus: null,
+  overlayStatusTimer: null,
+  overlayStatusLoading: false,
   sourceInventory: null,
   visualBorderLibrary: null,
   visualEffectLibraries: null,
@@ -113,7 +116,7 @@ const configLeaseMaxDurationMs = 5 * 60 * 1000;
 const pathQuotePairs = { "'": "'", '"': '"', "‘": "’", "“": "”" };
 // Add tools here; each tool owns its panel through mount(container) when ready.
 const toolboxTools = [
-  { id: "cluster-control", title: "SmartStitch 集群控制", description: "管理多机协作的入口。输入密码后查看功能占位。", cover: "/assets/tools/cluster-control.svg", order: 0, protected: true, mount: mountClusterControlTool },
+  { id: "cluster-control", title: "SmartStitch 集群控制", description: "连接在线工作机，统一派发和查看批量渲染。", cover: "/assets/tools/cluster-control.svg", order: 0, protected: true, mount: mountClusterControlTool },
   { id: "jianying-prores-4444", title: "ProRes 4444 处理", description: "将黑底视频批量转换为带透明通道的 ProRes 4444 MOV。", cover: "/assets/tools/jianying-prores-4444.svg", order: 5, mount: mountProResAlphaTool },
   { id: "folder-concat", title: "文件夹拼接", description: "选择两个文件夹，批量拼接视频。", cover: "/assets/tools/folder-concat.svg", order: 10, mount: mountFolderConcatTool },
   { id: "batch-dedup", title: "批量去重", description: "选择文件夹，逐条应用现有视觉去重效果。", cover: "/assets/tools/batch-dedup.svg", order: 20, mount: mountBatchDedupTool },
@@ -590,6 +593,7 @@ function bindEvents() {
   $("#checkUpdateBtn").addEventListener("click", () => checkForUpdates(true));
   window.addEventListener("focus", () => {
     if (Date.now() - (checkForUpdates.lastRun || 0) > 60000) checkForUpdates();
+    if ($("#configModal").classList.contains("open")) refreshOverlayStatus();
   });
   document.addEventListener("paste", event => {
     const input = event.target.closest?.("[data-path-input]");
@@ -712,11 +716,13 @@ function renderToolbox() {
 function mountClusterControlTool(container) {
   let token = "";
   let disposed = false;
+  let timer = null;
+  let updating = false;
   const form = document.createElement("form");
   form.className = "cluster-gate";
   form.innerHTML = `
     <strong>输入集群控制密码</strong>
-    <p>此入口受密码保护。验证通过后可查看当前功能状态。</p>
+    <p>解锁后可启用本机工作节点、连接其他电脑并创建集群渲染任务。</p>
     <label class="field"><span>密码</span><input type="password" required autocomplete="off" aria-label="集群控制密码" autofocus /></label>
     <button class="button primary" type="submit">解锁</button>
     <small class="cluster-gate-error hidden" role="alert"></small>
@@ -746,14 +752,117 @@ function mountClusterControlTool(container) {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (disposed) return;
-      const placeholder = document.createElement("div");
-      placeholder.className = "cluster-placeholder";
-      const heading = document.createElement("strong");
-      heading.textContent = "已解锁 · 功能即将加入";
-      const message = document.createElement("p");
-      message.textContent = status.message;
-      placeholder.append(heading, message);
-      form.replaceWith(placeholder);
+      const panel = document.createElement("div");
+      panel.className = "cluster-control-tool";
+      panel.innerHTML = `
+        <p class="toolbox-intro">本机 App 作为固定主控，统一规划与派发。每台工作机仍使用自己的本机数据库；NAS 只需挂载同一份 SmartStitch 共享目录。</p>
+        <div class="cluster-control-grid">
+          <section class="cluster-control-card"><h3>本机作为工作机</h3><div data-cluster-worker></div></section>
+          <section class="cluster-control-card"><h3>连接工作机</h3>
+            <form data-cluster-node-form class="cluster-control-form">
+              <label class="field"><span>工作机地址</span><input name="url" required placeholder="http://剪辑室-Mac.local:端口"></label>
+              <label class="field"><span>工作机令牌</span><input name="token" required type="password" autocomplete="off" placeholder="在工作机的集群控制中查看"></label>
+              <div class="actions"><button class="button secondary small" type="button" data-cluster-discover>搜索局域网</button><button class="button primary small" type="submit">连接工作机</button></div>
+            </form><div data-cluster-discovered></div><div data-cluster-nodes></div>
+          </section>
+        </div>
+        <section class="cluster-control-card"><h3>新建集群渲染</h3>
+          <form data-cluster-job-form class="cluster-control-form cluster-job-form">
+            <label class="field"><span>使用配置</span><select name="config_id" required></select></label>
+            <label class="field"><span>成片数量</span><input name="count" type="number" min="1" max="1000" value="10" required></label>
+            <label class="field"><span>随机种子（可选）</span><input name="seed" type="number" placeholder="自动生成"></label>
+            <button class="button primary" type="submit">开始集群渲染</button>
+          </form><p class="cluster-control-hint">成片输出需设在 NAS 共享的 SmartStitch 目录内。至少连接一台在线工作机。</p>
+        </section>
+        <section class="cluster-control-card"><h3>集群任务</h3><div data-cluster-jobs></div></section>
+        <p class="cluster-control-error hidden" data-cluster-error role="alert"></p>
+      `;
+      form.replaceWith(panel);
+      const configSelect = panel.querySelector('[name="config_id"]');
+      const configs = await api("/configs");
+      configSelect.innerHTML = configs.filter(config => config.valid).map(config => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name)}</option>`).join("");
+      if (state.configId && configs.some(config => config.id === state.configId && config.valid)) configSelect.value = state.configId;
+      const auth = () => ({ Authorization: `Bearer ${token}` });
+      const clusterApi = (path, options = {}) => api(`/tools/cluster-control${path}`, { ...options, headers: { ...auth(), ...(options.headers || {}) } });
+      const showError = cause => {
+        const box = panel.querySelector("[data-cluster-error]");
+        box.textContent = cause.message || String(cause);
+        box.classList.remove("hidden");
+      };
+      const refresh = async () => {
+        if (disposed || updating) return;
+        updating = true;
+        try {
+          const data = await clusterApi("/status");
+          if (disposed) return;
+          const worker = data.worker;
+          const workerHost = worker.name.endsWith(".local") ? worker.name : `${worker.name}.local`;
+          panel.querySelector("[data-cluster-worker]").innerHTML = `
+            <p>${worker.enabled ? `<span class="cluster-live">已上线</span> · 端口 ${worker.port} · 正在渲染 ${worker.active}/${worker.capacity}` : "当前未作为工作机上线"}</p>
+            ${worker.startup_error ? `<p class="cluster-control-error">自动上线失败：${escapeHtml(worker.startup_error)}</p>` : ""}
+            ${worker.enabled ? `<p>节点：${escapeHtml(worker.name)} · 令牌：<code class="cluster-token">${escapeHtml(worker.token)}</code></p><p>供主控连接的地址：<code>http://${escapeHtml(workerHost)}:${worker.port}</code></p>` : ""}
+            <button class="button secondary small" type="button" data-cluster-worker-toggle="${worker.enabled ? "stop" : "start"}">${worker.enabled ? "下线本机工作机" : "启用本机工作机"}</button>`;
+          panel.querySelector("[data-cluster-nodes]").innerHTML = data.nodes.length ? data.nodes.map(node => `
+            <div class="cluster-node-row"><div><strong>${escapeHtml(node.name)}</strong><small>${escapeHtml(node.url)} · ${node.online ? `在线 · ${node.active}/${node.capacity} 正在渲染` : "离线"}</small></div><button class="text-btn" type="button" data-cluster-remove="${escapeHtml(node.node_id)}">移除</button></div>`).join("") : "<p>尚未连接工作机。</p>";
+          panel.querySelector("[data-cluster-jobs]").innerHTML = data.jobs.length ? data.jobs.map(job => `
+            <div class="cluster-job-row"><div><strong>${escapeHtml(job.config_name)}</strong><small>${escapeHtml(job.status)} · 成功 ${job.success_count}/${job.count} · 失败 ${job.failure_count} · ${escapeHtml(job.created_at)}</small></div><div class="actions"><button class="text-btn" type="button" data-cluster-detail="${escapeHtml(job.id)}">查看任务</button>${["queued", "running"].includes(job.status) ? `<button class="text-btn" type="button" data-cluster-cancel="${escapeHtml(job.id)}">取消</button>` : `<button class="text-btn" type="button" data-cluster-delete="${escapeHtml(job.id)}">删除记录</button>`}</div></div>`).join("") : "<p>暂无集群任务。</p>";
+        } catch (cause) { if (!disposed) showError(cause); }
+        finally { updating = false; }
+      };
+      panel.addEventListener("click", async event => {
+        const action = event.target.closest("[data-cluster-worker-toggle], [data-cluster-discover], [data-cluster-remove], [data-cluster-cancel], [data-cluster-delete], [data-cluster-detail], [data-cluster-found]");
+        if (!action) return;
+        try {
+          if (action.dataset.clusterWorkerToggle) {
+            await clusterApi(`/worker/${action.dataset.clusterWorkerToggle}`, { method: "POST" });
+          } else if (action.hasAttribute("data-cluster-discover")) {
+            action.disabled = true;
+            const found = await clusterApi("/discover");
+            panel.querySelector("[data-cluster-discovered]").innerHTML = found.length ? found.map(node => `<button class="text-btn cluster-found" type="button" data-cluster-found="${escapeHtml(node.url)}">${escapeHtml(node.name)} · ${escapeHtml(node.url)}</button>`).join("") : "<p>没有发现工作机，可手动填写地址。</p>";
+            action.disabled = false;
+          } else if (action.dataset.clusterFound) {
+            panel.querySelector('[name="url"]').value = action.dataset.clusterFound;
+            panel.querySelector('[name="token"]').focus();
+          } else if (action.dataset.clusterRemove) {
+            await clusterApi(`/nodes/${encodeURIComponent(action.dataset.clusterRemove)}`, { method: "DELETE" });
+          } else if (action.dataset.clusterCancel) {
+            await clusterApi(`/jobs/${encodeURIComponent(action.dataset.clusterCancel)}/cancel`, { method: "POST" });
+          } else if (action.dataset.clusterDelete) {
+            if (!window.confirm("删除这条集群任务记录？已生成的视频会保留。")) return;
+            await clusterApi(`/jobs/${encodeURIComponent(action.dataset.clusterDelete)}`, { method: "DELETE" });
+          } else if (action.dataset.clusterDetail) {
+            await switchView("jobs");
+            openJob(action.dataset.clusterDetail);
+          }
+          await refresh();
+        } catch (cause) { showError(cause); action.disabled = false; }
+      });
+      panel.querySelector("[data-cluster-node-form]").addEventListener("submit", async event => {
+        event.preventDefault();
+        const fields = new FormData(event.currentTarget);
+        try {
+          await clusterApi("/nodes", { method: "POST", body: JSON.stringify({ url: fields.get("url"), token: fields.get("token") }) });
+          event.currentTarget.reset();
+          await refresh();
+        } catch (cause) { showError(cause); }
+      });
+      panel.querySelector("[data-cluster-job-form]").addEventListener("submit", async event => {
+        event.preventDefault();
+        const fields = new FormData(event.currentTarget);
+        const submit = event.currentTarget.querySelector('button[type="submit"]');
+        submit.disabled = true;
+        try {
+          const job = await clusterApi("/jobs", { method: "POST", body: JSON.stringify({
+            config_id: fields.get("config_id"), count: Number(fields.get("count")),
+            seed: fields.get("seed") ? Number(fields.get("seed")) : null, auto_start: true,
+          }) });
+          toast(`已创建 ${job.count} 条集群渲染任务`);
+          await refresh();
+        } catch (cause) { showError(cause); }
+        finally { submit.disabled = false; }
+      });
+      await refresh();
+      timer = setInterval(refresh, 3000);
     } catch (cause) {
       if (disposed) return;
       error.textContent = cause.message;
@@ -765,6 +874,7 @@ function mountClusterControlTool(container) {
   });
   return () => {
     disposed = true;
+    if (timer) clearInterval(timer);
     if (token) api("/tools/cluster-control/lock", {
       method: "POST", headers: { Authorization: `Bearer ${token}` },
     }).catch(() => {});
@@ -3584,7 +3694,7 @@ function renderJobs() {
     const pct = isSlice ? Number(job.progress || 0) * 100 : (total ? done / total * 100 : 0);
     const sourceName = job.source?.name || job.source?.path?.split(/[\\/]/).pop();
     const title = isSlice ? sourceName : job.config_name;
-    const typeLabel = isSlice ? "切片入库" : (job.job_type === "batch_dedup" ? "批量去重" : job.job_type === "folder_concat" ? "文件夹拼接" : "成片渲染");
+    const typeLabel = isSlice ? "切片入库" : (job.job_type === "batch_dedup" ? "批量去重" : job.job_type === "folder_concat" ? "文件夹拼接" : job.job_type === "cluster" ? "集群渲染" : "成片渲染");
     return `<div class="job-row" data-job-id="${job.id}" data-job-type="${isSlice ? "slice" : "render"}"><div><strong>${escapeHtml(title || "未命名任务")}</strong><small>${typeLabel} · ${formatDate(job.created_at)} · #${job.short_id}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${done}/${total} 已处理</small></div><span class="status ${cls}">${label}</span><span class="job-count">成功 ${job.success_count || 0} · 失败 ${job.failure_count || 0}</span><b>›</b></div>`;
   }).join("");
   $$(".job-row").forEach(row => row.addEventListener("click", () => {
@@ -3681,8 +3791,8 @@ function renderJobDetail(job) {
     <div class="big-progress"><div><span>总体进度</span><b>${totalProgress.toFixed(1)}%</b></div><div class="bar"><i style="width:${totalProgress}%"></i></div></div>
     ${job.job_type === "folder_concat" ? "" : `<div class="seed-card"><span>随机种子</span><strong>${job.seed}</strong></div>`}
     ${renderFeishuSyncPanel(job)}
-    ${!terminalStates.has(job.status) ? `<button id="cancelJobBtn" class="button secondary" style="width:100%">取消剩余任务</button>` : ""}
-    ${terminalStates.has(job.status) ? `<div class="record-delete-zone">
+    ${job.job_type === "cluster" ? `<p class="cluster-control-hint">请在工具台的“SmartStitch 集群控制”中取消或删除集群任务。</p>` : !terminalStates.has(job.status) ? `<button id="cancelJobBtn" class="button secondary" style="width:100%">取消剩余任务</button>` : ""}
+    ${terminalStates.has(job.status) && job.job_type !== "cluster" ? `<div class="record-delete-zone">
       <button id="showDeleteJobBtn" class="text-btn danger-text" type="button">删除任务记录</button>
       <div id="deleteJobConfirm" class="record-delete-confirm hidden">
         <div><strong>删除这条任务记录？</strong><p>只会从任务记录中移除，已经生成的视频不会删除。</p></div>
@@ -3698,7 +3808,8 @@ function renderJobDetail(job) {
         .filter(([, asset]) => asset)
         .map(([category, asset]) => `${job.job_type === "batch_dedup" ? "源视频" : job.job_type === "folder_concat" ? (category === "pool_1" ? "A" : "B") : categoryLabel(category)}：${asset.name}`)
         .join("　·　");
-      return `<div class="item-row"><b>${String(item.index).padStart(2,"0")}</b><div><strong>${escapeHtml(item.output_name)}</strong><small class="item-selections">${escapeHtml(selections)}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${item.progress*100}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
+      const worker = item.worker_name ? ` · 工作机：${item.worker_name}` : "";
+      return `<div class="item-row"><b>${String(item.index).padStart(2,"0")}</b><div><strong>${escapeHtml(item.output_name)}</strong><small class="item-selections">${escapeHtml(selections + worker)}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${item.progress*100}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
     }).join("")}</div>`;
   $("#cancelJobBtn")?.addEventListener("click", () => cancelJob(job.id));
   $("#retryFeishuSyncBtn")?.addEventListener("click", () => retryJobFeishuSync(job));
@@ -4000,6 +4111,7 @@ async function openConfig() {
     state.configHash = acquired.content_hash;
     state.yaml = acquired.yaml_text;
     await loadSourceInventory();
+    await refreshOverlayStatus();
     state.feishuSettings = await api("/integrations/feishu/settings");
     state.feishuSettingsDraft = structuredClone(state.feishuSettings);
     state.feishuSecretDraft = "";
@@ -4010,6 +4122,7 @@ async function openConfig() {
     document.body.classList.add("config-modal-open");
     $("#configModal").classList.add("open");
     $("#configModal").setAttribute("aria-hidden","false");
+    state.overlayStatusTimer = setInterval(refreshOverlayStatus, 8000);
     requestAnimationFrame(restoreConfigEditorScroll);
   } catch (error) {
     toast(error.message, true);
@@ -4027,6 +4140,9 @@ function configEditorIsDirty() {
 async function closeConfig({ skipConfirm = false, releaseLease = true } = {}) {
   if (!skipConfirm && configEditorIsDirty() && !window.confirm("放弃未保存的修改并释放配置吗？")) return false;
   saveConfigUiPreferences();
+  clearInterval(state.overlayStatusTimer);
+  state.overlayStatusTimer = null;
+  state.overlayStatus = null;
   const audio = $("#loudnessPreviewAudio");
   if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
   state.previewAudioCleanup?.();
@@ -4039,6 +4155,25 @@ async function closeConfig({ skipConfirm = false, releaseLease = true } = {}) {
   document.body.classList.remove("config-modal-open");
   if (releaseLease) await releaseConfigLease();
   return true;
+}
+
+async function refreshOverlayStatus() {
+  if (!state.configId || !state.library?.managed || state.overlayStatusLoading) return;
+  const configId = state.configId;
+  state.overlayStatusLoading = true;
+  try {
+    const status = await api(`/configs/${configId}/overlay-image/status`);
+    if (state.configId !== configId) return;
+    const changed = JSON.stringify(status) !== JSON.stringify(state.overlayStatus);
+    state.overlayStatus = status;
+    if (changed && $("#configModal").classList.contains("open") && state.configMode === "simple") {
+      renderSimpleConfig();
+    }
+  } catch (_) {
+    // Keep the last known status; the next refresh will retry.
+  } finally {
+    state.overlayStatusLoading = false;
+  }
 }
 
 function setConfigMode(mode) {
@@ -4601,10 +4736,12 @@ function renderSimpleConfig() {
   }).join("");
   const overlay = config.benefit_overlays;
   const overlayEnabled = overlay.mode !== "disabled";
-  const overlayAsset = (state.scan?.assets?.benefit_overlay || []).find(asset => asset.valid);
+  const overlayAssets = state.overlayStatus?.assets || state.scan?.assets?.benefit_overlay || [];
+  const overlayAsset = overlayAssets.find(asset => asset.valid);
+  const overlayError = state.overlayStatus?.errors?.[0] || overlayAssets.find(asset => !asset.valid)?.error;
   const overlayName = overlayAsset?.name || (overlay.file ? overlay.file.split("/").pop() : "尚未识别到图片");
   const overlayStatus = overlayEnabled
-    ? (overlayAsset ? "已识别并将在生成时叠加" : "已开启，请添加一张图片")
+    ? (overlayError ? overlayError.replace(/^benefit_overlay:\s*/, "") : overlayAsset ? "已识别并将在生成时叠加" : "已开启，请添加一张图片")
     : "当前关闭，不会叠加到成片";
   const timingChoices = generic
     ? [["full", "整条视频"], ["custom", "指定时间"]]
@@ -5759,6 +5896,7 @@ async function refreshConfigEditor(scrollTop = 0) {
   state.timeline.sliceTargets = (await api(`/libraries/by-config/${state.configId}/slice-targets`)).targets;
   await loadVisualBorderLibrary();
   await loadSourceInventory();
+  await refreshOverlayStatus();
   $("#yamlEditor").value = state.yaml;
   renderSimpleConfig();
   renderVisualConfig();

@@ -16,7 +16,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260923-102"/,
+  /href="\/styles\.css\?v=20260923-103"/,
   "前端交互或样式更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -269,6 +269,16 @@ assert.match(
   app,
   /simpleOverlayFile[\s\S]*uploadOverlayImage[\s\S]*\/overlay-image/,
   "简单模式必须支持直接更换风险提示语图片",
+);
+assert.match(
+  app,
+  /async function openConfig\(\)[\s\S]*await refreshOverlayStatus\(\)[\s\S]*setInterval\(refreshOverlayStatus, 8000\)/,
+  "打开配置后应持续识别风险提示语文件夹中的新图片",
+);
+assert.match(
+  app,
+  /window\.addEventListener\("focus", \(\) => \{[\s\S]*refreshOverlayStatus\(\)/,
+  "切回应用时应立即更新风险提示语图片状态",
 );
 assert.doesNotMatch(
   app,
