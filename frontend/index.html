@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260923-91" />
+    <link rel="stylesheet" href="/styles.css?v=20260923-92" />
   </head>
   <body>
     <div class="noise"></div>
@@ -342,7 +342,8 @@
         </label>
         <label class="field">
           <span>配置 ID <small>小写英文、数字和短横线</small></span>
-          <input id="newConfigIdInput" type="text" placeholder="例如 product-video" autocomplete="off" />
+          <input id="newConfigIdInput" type="text" placeholder="例如 product-video" autocomplete="off" aria-describedby="newConfigIdError" />
+          <small id="newConfigIdError" class="field-validation hidden" role="alert"></small>
         </label>
         <label class="field">
           <span>配置名称</span>
@@ -398,7 +399,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260923-91" defer></script>
-    <script src="/app.js?v=20260923-91" defer></script>
+    <script src="/timeline-math.js?v=20260923-92" defer></script>
+    <script src="/app.js?v=20260923-92" defer></script>
   </body>
 </html>

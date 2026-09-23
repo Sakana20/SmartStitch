@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "frontend/index.html"), "utf8");
@@ -15,13 +16,20 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260923-91"/,
+  /href="\/styles\.css\?v=20260923-92"/,
   "前端交互或样式更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
 assert.equal(staticVersions.length, 3, "三个前端静态资源都必须声明缓存版本");
 assert.equal(new Set(staticVersions).size, 1, "CSS 与 JS 必须使用同一个发布版本，避免新旧资源混用");
+const configIdValidator = app.match(/function libraryConfigIdError\(value\) \{[\s\S]*?\n\}/)?.[0];
+assert.ok(configIdValidator, "新建视频库需要配置 ID 校验提示");
+const libraryConfigIdError = vm.runInNewContext(`${configIdValidator}; libraryConfigIdError`);
+assert.match(libraryConfigIdError("Hongguoaiqiantiepingjie"), /大写字母.*小写/);
+assert.equal(libraryConfigIdError("hongguoaiqiantiepingjie"), "");
+assert.match(html, /id="newConfigIdError" class="field-validation hidden" role="alert"/);
+assert.match(app, /idErrorElement\.textContent = idError;[\s\S]*idErrorElement\.classList\.toggle\("hidden", !idError\)/);
 assert.match(
   html,
   /class="asset-scope-notice"[\s\S]*随机候选池[\s\S]*仅列出已开启视频库的素材[\s\S]*配置管理 → 拼接顺序/,

@@ -69,6 +69,8 @@ h1 em { color: var(--green); font-weight: 500; }
 .field { display: block; margin: 0 0 20px; }
 .field > span { display: flex; justify-content: space-between; color: var(--ink); font-size: 12px; font-weight: 650; margin-bottom: 9px; }
 .field small { color: #939b96; font-weight: 400; }
+.field .field-validation { display: block; margin-top: 8px; color: #9c3d2a; font-size: 11px; line-height: 1.5; }
+.field input[aria-invalid="true"] { border-color: #b65b49; box-shadow: 0 0 0 3px rgba(182,91,73,.08); }
 input, select, textarea { width: 100%; border: 1px solid var(--line); color: var(--ink); outline: none; background: rgba(248,248,244,.85); border-radius: 12px; padding: 13px 14px; transition: .2s; }
 input:focus, select:focus, textarea:focus { border-color: rgba(29,92,67,.55); box-shadow: 0 0 0 3px rgba(29,92,67,.08); background-color: white; }
 select { -webkit-appearance: none; appearance: none; padding-right: 40px; background-image: url("data:image/svg+xml,%3Csvg width='12' height='8' viewBox='0 0 12 8' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1.5 1.5 6 6l4.5-4.5' fill='none' stroke='%2368736c' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 14px center; background-size: 12px 8px; }

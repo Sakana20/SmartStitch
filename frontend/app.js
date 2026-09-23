@@ -3311,13 +3311,25 @@ function openNewConfig() {
   requestAnimationFrame(() => $("#newConfigIdInput").focus());
 }
 
+function libraryConfigIdError(value) {
+  if (!value || /^[a-z0-9][a-z0-9-]*$/.test(value)) return "";
+  if (/[A-Z]/.test(value)) return "配置 ID 含大写字母，请改为小写英文";
+  return "配置 ID 只能使用小写英文、数字和短横线，且须以字母或数字开头";
+}
+
 function updateLibraryCreatePreview() {
   const newId = $("#newConfigIdInput").value.trim();
   const newName = $("#newConfigNameInput").value.trim();
   const folder = $("#newLibraryFolderInput").value.trim();
   const parent = normalizePathInput($("#newLibraryParentInput").value);
   const workflowType = $("#newWorkflowType").value;
-  const complete = /^[a-z0-9][a-z0-9-]*$/.test(newId) && newName && folder && parent;
+  const idError = libraryConfigIdError(newId);
+  const idInput = $("#newConfigIdInput");
+  const idErrorElement = $("#newConfigIdError");
+  idInput.setAttribute("aria-invalid", idError ? "true" : "false");
+  idErrorElement.textContent = idError;
+  idErrorElement.classList.toggle("hidden", !idError);
+  const complete = newId && !idError && newName && folder && parent;
   const finalPath = libraryTargetPath(parent, folder);
   const usesSelectedDirectory = Boolean(finalPath) && finalPath === parent.replace(/[\\/]+$/, "");
   $("#createConfigBtn").disabled = !complete;
@@ -3359,8 +3371,8 @@ async function createConfig() {
   const folderName = $("#newLibraryFolderInput").value.trim();
   const parentDirectory = normalizePathField($("#newLibraryParentInput"));
   const workflowType = $("#newWorkflowType").value;
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(newId)) {
-    toast("配置 ID 只能使用小写英文、数字和短横线", true);
+  if (!newId || libraryConfigIdError(newId)) {
+    toast(libraryConfigIdError(newId) || "请填写配置 ID", true);
     $("#newConfigIdInput").focus();
     return;
   }
