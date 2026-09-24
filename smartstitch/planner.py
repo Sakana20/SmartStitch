@@ -5,7 +5,7 @@ import math
 import random
 import secrets
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime
 from itertools import product
 from pathlib import Path
 
@@ -361,6 +361,7 @@ def build_plan(
     duplicate_count = 0
     items: list[PlanItem] = []
     reserved_output_names: set[str] = set()
+    naming_date = date.today()
     for index in range(count):
         selections = {category: sequence[index] for category, sequence in sequences.items()}
         signature = _core_signature(selections, core_categories)
@@ -379,6 +380,7 @@ def build_plan(
                     config,
                     selections,
                     sequence=config.output.naming.sequence_start + index,
+                    naming_date=naming_date,
                 )
                 output_name = _reserve_business_name(
                     config, render_plan_filename(config, naming), reserved_output_names

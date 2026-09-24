@@ -16,7 +16,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260924-123"/,
+  /href="\/styles\.css\?v=20260924-126"/,
   "前端交互或样式更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -455,6 +455,25 @@ assert.match(
   /id="simpleNamingSequenceStart"[^>]*min="1"[^>]*max="999999"[\s\S]*sequence_start = value/,
   "05 命名设置必须允许用户填写成片序号起点",
 );
+assert.ok(["function renderBuilderEditor(config)", 'id="builderPool"', 'id="builderSample"', "data-builder-token", "data-builder-block", 'id="builderNewText"'].every(value => app.includes(value)), "积木编辑器必须提供选库、选片段、排序和可编辑文字块");
+assert.ok(["function bindBuilderControls()", "data-builder-text", "data-builder-role", "dragstart", "naming-builder-preview"].every(value => app.includes(value)), "积木编辑器必须能编辑、拖动并进行实际命名预览");
+const builderTokenHelpers = app.match(/function builderTokens\(filename\) \{[\s\S]*?\n\}\n\nfunction builderPicker/)?.[0].replace(/\n\nfunction builderPicker$/, "");
+assert.ok(builderTokenHelpers);
+const builderHelpers = vm.runInNewContext(`${builderTokenHelpers}; ({ builderTokens, builderSignature })`);
+assert.equal(builderHelpers.builderSignature(builderHelpers.builderTokens("瑞幸-咖啡-ai1.mp4")), "T-T-T");
+assert.equal(builderHelpers.builderSignature(builderHelpers.builderTokens("通用-热菜-烤鸭.mp4")), "T-T-T");
+const builderEditorSource = app.match(/function builderTokens\(filename\) \{[\s\S]*?\n\}\n\nfunction globalVisualBordersForDraft/)?.[0].replace(/\n\nfunction globalVisualBordersForDraft$/, "");
+assert.ok(builderEditorSource);
+const builderEditor = vm.runInNewContext(`${builderEditorSource}; renderBuilderEditor`, {
+  state: { namingPicker: null, scan: { assets: { pool_1: [{ name: "瑞幸-咖啡-ai1.mp4" }] } } },
+  ensureOutputNaming: config => config.output.naming,
+  escapeHtml: value => String(value),
+});
+const builderMarkup = builderEditor({
+  timeline: ["pool_1"], sources: { pool_1: { label: "前贴", mode: "required" } },
+  output: { naming: { sequence_start: 1, builder: { blocks: [] } } },
+});
+assert.match(builderMarkup, /前贴[\s\S]*瑞幸[\s\S]*咖啡[\s\S]*输入任意文字/);
 assert.match(
   app,
   /simple-card-number">05<\/span><div><h3>命名设置<\/h3>[\s\S]*\$\{namingCard\}[\s\S]*simple-card-number">\$\{generic \? "06" : "05"\}<\/span><div><h3>输出设置<\/h3>/,

@@ -20,6 +20,8 @@ const state = {
   assetEditSnapshot: null,
   preview: null,
   jobs: [],
+  upscaleJobs: [],
+  upscaleJobTimer: null,
   workerAttempts: [],
   workerAttemptTimer: null,
   sliceJobs: [],
@@ -28,6 +30,7 @@ const state = {
   sliceEventSource: null,
   configMode: "simple",
   configDraft: null,
+  namingPicker: null,
   configRefreshPromise: null,
   previewAudioCleanup: null,
   feishuSettings: { app_id: "", app_secret_configured: false },
@@ -700,9 +703,14 @@ async function switchView(view) {
   if (view === "jobs") {
     loadJobs();
     if (!state.workerAttemptTimer) state.workerAttemptTimer = setInterval(loadWorkerAttempts, 3000);
+    if (!state.upscaleJobTimer) state.upscaleJobTimer = setInterval(loadUpscaleJobs, 1000);
   } else if (state.workerAttemptTimer) {
     clearInterval(state.workerAttemptTimer);
     state.workerAttemptTimer = null;
+  }
+  if (view !== "jobs" && state.upscaleJobTimer) {
+    clearInterval(state.upscaleJobTimer);
+    state.upscaleJobTimer = null;
   }
   if (view === "timeline") refreshTimelineConfig();
 }
@@ -1387,7 +1395,7 @@ function mountVideoUpscaleTool(container) {
     <div id="upscaleNodes" class="toolbox-intro" hidden></div>
     <p class="toolbox-intro">x2plus 适合数字人和欧美风格 3D 动画；animevideo 适合线条、平涂为主的 2D 动漫。按所选模型原生倍率推理后缩回源视频宽高，输出帧率跟随源视频，保留音频并生成独立 MP4。</p>
     <div id="upscaleModel" class="toolbox-intro"></div>
-    <div class="actions"><button id="upscalePreview" class="button secondary" type="button">预检视频</button><button id="upscaleStart" class="button primary" type="button" disabled>开始超分</button></div>
+    <div class="actions"><button id="upscalePreview" class="button secondary" type="button">预检视频</button><button id="upscaleStart" class="button primary" type="button" disabled>加入任务队列</button></div>
     <div id="upscalePreviewResult" aria-live="polite"></div>
     <div id="upscaleResult" aria-live="polite"></div>
   </div>`;
@@ -1540,8 +1548,10 @@ function mountVideoUpscaleTool(container) {
     try {
       job = await api("/tools/video-upscale", { method: "POST", body: JSON.stringify({ source: mode.value === "cluster" ? null : sourcePath(), output_directory: mode.value === "cluster" ? null : outputPath(), mode: mode.value, model: selectedModel() }) });
       videoUpscaleJobId = job.id;
-      renderJob();
-      scheduleRefresh();
+      toast("超分任务已加入任务队列");
+      await loadJobs();
+      await switchView("jobs");
+      openUpscaleJob(job.id);
     } catch (error) { toast(error.message, true); startButton.disabled = false; }
   });
   api("/tools/video-upscale/latest").then(latest => {
@@ -4289,12 +4299,30 @@ async function startJob() {
 
 async function loadJobs() {
   try {
-    [state.jobs, state.workerAttempts] = await Promise.all([
-      api("/jobs"), api("/tools/cluster-worker/attempts"),
+    [state.jobs, state.workerAttempts, state.upscaleJobs] = await Promise.all([
+      api("/jobs"), api("/tools/cluster-worker/attempts"), api("/tools/video-upscale/jobs"),
     ]);
     renderJobs();
     renderWorkerAttempts();
   } catch (error) { toast(error.message, true); }
+}
+
+async function loadUpscaleJobs() {
+  if (!$("#jobsView")?.classList.contains("active")) return;
+  try {
+    state.upscaleJobs = await api("/tools/video-upscale/jobs");
+    renderJobs();
+    if (state.activeJob?.job_type === "video_upscale") {
+      const job = await api(`/tools/video-upscale/${encodeURIComponent(state.activeJob.id)}`);
+      state.activeJob = { ...job, job_type: "video_upscale" };
+      renderUpscaleJobDetail(job);
+    }
+  } catch (error) {
+    if (error.status === 401) {
+      clearInterval(state.upscaleJobTimer);
+      state.upscaleJobTimer = null;
+    } else toast(error.message, true);
+  }
 }
 
 async function loadWorkerAttempts() {
@@ -4339,26 +4367,83 @@ function renderJobs() {
   const combinedJobs = [
     ...state.jobs.map(job => ({ ...job, job_type: job.job_type || "render" })),
     ...state.sliceJobs,
-  ].sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)));
+    ...state.upscaleJobs.map(job => ({ ...job, job_type: "video_upscale" })),
+  ].sort((left, right) => new Date(typeof right.created_at === "number" ? right.created_at * 1000 : right.created_at).getTime()
+    - new Date(typeof left.created_at === "number" ? left.created_at * 1000 : left.created_at).getTime());
   $("#deleteAllJobsBtn").disabled = state.jobs.length === 0;
   $("#deleteAllJobsCount").textContent = String(state.jobs.length);
   if (!state.jobs.length) hideDeleteAllJobsConfirm();
   if (!combinedJobs.length) { list.innerHTML = `<div class="empty-state"><h3>本机没有创建批次</h3><p>这台电脑接收的集群工作任务显示在下方。</p></div>`; return; }
   list.innerHTML = combinedJobs.map(job => {
     const isSlice = job.job_type === "timeline_slice";
-    const [label, cls] = isSlice ? sliceJobStatusInfo(job) : statusInfo(job.status);
-    const done = Number(job.success_count || 0) + Number(job.failure_count || 0) + Number(job.cancelled_count || 0);
-    const total = isSlice ? job.output_unit_count : job.count;
-    const pct = isSlice ? Number(job.progress || 0) * 100 : (total ? done / total * 100 : 0);
+    const isUpscale = job.job_type === "video_upscale";
+    const [label, cls] = isSlice ? sliceJobStatusInfo(job) : isUpscale && job.status === "running" ? ["超分中", "running"] : statusInfo(job.status);
+    const done = isUpscale ? Number(job.processed_frames || 0) : Number(job.success_count || 0) + Number(job.failure_count || 0) + Number(job.cancelled_count || 0);
+    const total = isUpscale ? Number(job.total_frames || 0) : isSlice ? job.output_unit_count : job.count;
+    const pct = isSlice ? Number(job.progress || 0) * 100 : (total ? Math.max(0, Math.min(100, done / total * 100)) : 0);
     const sourceName = job.source?.name || job.source?.path?.split(/[\\/]/).pop();
-    const title = isSlice ? sourceName : job.config_name;
-    const typeLabel = isSlice ? "切片入库" : (job.job_type === "batch_dedup" ? "批量去重" : job.job_type === "folder_concat" ? "文件夹拼接" : job.job_type === "cluster" ? "集群渲染" : "成片渲染");
-    return `<div class="job-row" data-job-id="${job.id}" data-job-type="${isSlice ? "slice" : "render"}"><div><strong>${escapeHtml(title || "未命名任务")}</strong><small>${typeLabel} · ${formatDate(job.created_at)} · #${job.short_id}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${done}/${total} 已处理</small></div><span class="status ${cls}">${label}</span><span class="job-count">成功 ${job.success_count || 0} · 失败 ${job.failure_count || 0}</span><b>›</b></div>`;
+    const title = isUpscale ? job.kind === "batch" ? "NAS 超分批次" : String(job.source || "").split(/[\\/]/).pop() : isSlice ? sourceName : job.config_name;
+    const typeLabel = isUpscale ? `${job.mode === "cluster" ? "集群" : "本机"}超分 · ${job.model}` : isSlice ? "切片入库" : (job.job_type === "batch_dedup" ? "批量去重" : job.job_type === "folder_concat" ? "文件夹拼接" : job.job_type === "cluster" ? "集群渲染" : "成片渲染");
+    const counts = isUpscale ? job.kind === "batch" ? `完成 ${job.completed_files || 0} · 失败 ${job.failed_files || 0}` : `${job.status === "completed" ? "已生成" : "处理中"}` : `成功 ${job.success_count || 0} · 失败 ${job.failure_count || 0}`;
+    const created = typeof job.created_at === "number" ? job.created_at * 1000 : job.created_at;
+    return `<div class="job-row" data-job-id="${escapeHtml(job.id)}" data-job-type="${isUpscale ? "upscale" : isSlice ? "slice" : "render"}"><div><strong>${escapeHtml(title || "未命名任务")}</strong><small>${escapeHtml(typeLabel)} · ${formatDate(created)} · #${escapeHtml(isUpscale ? job.id.slice(0, 8) : job.short_id)}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${done}/${total} ${isUpscale ? "帧" : "已处理"}</small></div><span class="status ${cls}">${label}</span><span class="job-count">${escapeHtml(counts)}</span><b>›</b></div>`;
   }).join("");
   $$(".job-row").forEach(row => row.addEventListener("click", () => {
     if (row.dataset.jobType === "slice") openSliceJob(row.dataset.jobId);
+    else if (row.dataset.jobType === "upscale") openUpscaleJob(row.dataset.jobId);
     else openJob(row.dataset.jobId);
   }));
+}
+
+async function openUpscaleJob(jobId) {
+  $("#jobDrawer").classList.add("open");
+  $("#jobDrawer").setAttribute("aria-hidden", "false");
+  if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+  if (state.feishuSyncTimer) clearTimeout(state.feishuSyncTimer);
+  state.feishuSyncTimer = null;
+  try {
+    const job = await api(`/tools/video-upscale/${encodeURIComponent(jobId)}`);
+    state.activeJob = { ...job, job_type: "video_upscale" };
+    renderUpscaleJobDetail(job);
+  } catch (error) { toast(error.message, true); }
+}
+
+function renderUpscaleJobDetail(job) {
+  const [label, cls] = job.status === "running" ? ["超分中", "running"] : statusInfo(job.status);
+  const processed = Number(job.processed_frames || 0);
+  const total = Number(job.total_frames || 0);
+  const progress = total ? Math.max(0, Math.min(100, processed / total * 100)) : 0;
+  const running = !["completed", "partial_failed", "failed", "cancelled", "interrupted"].includes(job.status);
+  const title = job.kind === "batch" ? "NAS 超分批次" : String(job.source || "").split(/[\\/]/).pop();
+  const items = job.kind === "batch" ? job.items || [] : [];
+  $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">VIDEO UPSCALE #${escapeHtml(job.id.slice(0, 8))}</p><h2>${escapeHtml(title)}</h2><span class="status ${cls}">${escapeHtml(label)}</span><p>${escapeHtml(job.output_directory || job.output_path || "")}</p></div>
+    <div class="big-progress"><div><span>总体进度</span><b>${progress.toFixed(1)}%</b></div><div class="bar"><i style="width:${progress}%"></i></div></div>
+    <p>模型：${escapeHtml(job.model)} · ${job.mode === "cluster" ? "渲染集群" : "本机"} · 阶段：${escapeHtml(job.phase || "等待中")}</p>
+    <p>已处理 ${processed}/${total} 帧${job.kind === "batch" ? ` · 完成 ${job.completed_files}/${job.total_files} 条 · 失败 ${job.failed_files} 条` : ""}</p>
+    ${job.width && job.height && job.fps ? `<p>输出规格：${escapeHtml(job.width)}×${escapeHtml(job.height)} · ${escapeHtml(job.fps)} fps（源视频规格）</p>` : ""}
+    ${job.error ? `<p class="error-text">${escapeHtml(job.error)}</p>` : ""}
+    ${running ? '<button id="cancelUpscaleJobBtn" class="button secondary" style="width:100%">取消超分任务</button>' : ""}
+    ${!running ? '<button id="deleteUpscaleJobBtn" class="text-btn danger-text" type="button">删除超分任务记录</button>' : ""}
+    ${items.length ? `<div class="item-list">${items.map((item, index) => {
+      const [itemLabel, itemClass] = statusInfo(item.status);
+      return `<div class="item-row"><b>${String(index + 1).padStart(2, "0")}</b><div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.output_path || "")}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${item.frames ? Math.min(100, (item.processed_frames || 0) / item.frames * 100) : 0}%"></i></div></div><span class="status ${itemClass}">${escapeHtml(itemLabel)}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
+    }).join("")}</div>` : ""}`;
+  $("#cancelUpscaleJobBtn")?.addEventListener("click", async event => {
+    event.currentTarget.disabled = true;
+    try {
+      await api(`/tools/video-upscale/${encodeURIComponent(job.id)}/cancel`, { method: "POST" });
+      await loadUpscaleJobs();
+    } catch (error) { toast(error.message, true); event.currentTarget.disabled = false; }
+  });
+  $("#deleteUpscaleJobBtn")?.addEventListener("click", async event => {
+    event.currentTarget.disabled = true;
+    try {
+      await api(`/tools/video-upscale/${encodeURIComponent(job.id)}`, { method: "DELETE" });
+      closeDrawer();
+      await loadUpscaleJobs();
+      toast("超分任务记录已删除，生成的视频已保留");
+    } catch (error) { toast(error.message, true); event.currentTarget.disabled = false; }
+  });
 }
 
 async function openJob(jobId) {
@@ -4766,6 +4851,7 @@ async function openConfig() {
     installConfigLease(state.configId, acquired);
     state.config = acquired.config;
     state.configDraft = structuredClone(acquired.config);
+    state.namingPicker = null;
     state.configHash = acquired.content_hash;
     state.yaml = acquired.yaml_text;
     await loadSourceInventory();
@@ -5042,8 +5128,10 @@ function ensureOutputNaming(config) {
       talent: { merge: "ordered_unique", separator: "+" },
       restriction_date: { merge: "earliest", output_format: "%Y%m%d" },
       duplicate_suffix: "-{serial:02d}",
+      builder: { enabled: false, blocks: [] },
     };
   }
+  config.output.naming.builder ||= { enabled: false, blocks: [] };
   return config.output.naming;
 }
 
@@ -5243,6 +5331,246 @@ function namingExample(config) {
     .replace(/\{(product|benefit|talents|restriction_date|sequence)(?::[^}]*)?\}/g, (_, key) => values[key]);
 }
 
+function builderTokens(filename) {
+  const stem = String(filename || "").replace(/\.[^.]+$/, "").split("__", 1)[0];
+  return stem.match(/\d{4}-\d{2}-\d{2}|\d{8}|[^_-]+|[_-]/g) || [];
+}
+
+function builderSignature(tokens) {
+  return tokens.map(token => token === "-" || token === "_" ? token
+    : /^\d{4}-\d{2}-\d{2}$/.test(token) ? "D"
+    : /^\d{8}$/.test(token) ? "E"
+    : /^\d+$/.test(token) ? "N" : "T").join("");
+}
+
+function builderPicker(config) {
+  const pools = config.timeline.filter(category => config.sources[category]?.mode !== "disabled");
+  const picker = state.namingPicker || {};
+  if (!pools.includes(picker.category)) {
+    picker.category = pools[0] || "";
+    picker.sample = "";
+    picker.tokenIndex = -1;
+  }
+  if (!picker.sample) picker.sample = state.scan?.assets?.[picker.category]?.[0]?.name || "";
+  state.namingPicker = picker;
+  return picker;
+}
+
+const BUILDER_ROLE_OPTIONS = [
+  ["", "仅文件名"], ["product", "产品/文本"], ["benefit", "利益点"],
+  ["talent", "达人"], ["restriction_date", "限制日期"],
+];
+
+function renderBuilderEditor(config) {
+  const naming = ensureOutputNaming(config);
+  const blocks = naming.builder.blocks;
+  const picker = builderPicker(config);
+  const sampleNames = (state.scan?.assets?.[picker.category] || []).map(asset => asset.name);
+  const tokens = builderTokens(picker.sample);
+  const sourceTargets = blocks.filter(block => block.type === "source" && block.category === picker.category);
+  const roleOptions = selected => BUILDER_ROLE_OPTIONS.map(([value, label]) =>
+    `<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("");
+  const cards = blocks.map((block, index) => {
+    const title = block.type === "source"
+      ? `${config.sources[block.category]?.label || block.category}：${builderTokens(block.variants[0]?.sample_name || "")[block.variants[0]?.token_index] || "片段"}`
+      : block.type === "sequence" ? "序号" : block.type === "date" ? "当天日期" : "自填文字";
+    const body = block.type === "text"
+      ? `<input data-builder-text="${escapeHtml(block.id)}" value="${escapeHtml(block.text)}" aria-label="自填文字">`
+      : `<strong>${escapeHtml(title)}</strong>`;
+    const options = block.type === "sequence" || block.type === "date" ? "" : `<label>飞书字段<select data-builder-role="${escapeHtml(block.id)}">${roleOptions(block.role)}</select></label>`;
+    const format = block.type === "date" || block.role === "restriction_date" ? `<label>日期显示<select data-builder-date-format="${escapeHtml(block.id)}">${block.type === "date" ? "" : `<option value="raw" ${block.date_format === "raw" ? "selected" : ""}>原样</option>`}<option value="mmdd" ${block.date_format === "mmdd" || block.type === "date" && block.date_format === "raw" ? "selected" : ""}>MMDD</option><option value="compact" ${block.date_format === "compact" ? "selected" : ""}>YYYYMMDD</option></select></label>` : "";
+    const variants = block.type === "source" ? `<small>${block.variants.length} 种文件名格式 · ${escapeHtml(block.category)}</small>` : "";
+    return `<div class="builder-block" draggable="true" data-builder-block="${escapeHtml(block.id)}">
+      <span class="builder-handle" title="拖动调整顺序">⠿</span><div class="builder-block-main">${body}${variants}</div>${options}${format}
+      <div class="builder-block-actions">${block.type === "source" ? `<button type="button" class="text-btn" data-builder-repick="${escapeHtml(block.id)}">重选片段</button>` : ""}${block.type !== "sequence" && block.type !== "date" ? `<button type="button" class="text-btn" data-builder-copy="${escapeHtml(block.id)}">复制</button>` : ""}<button type="button" class="text-btn" data-builder-move="up" data-builder-id="${escapeHtml(block.id)}" ${index === 0 ? "disabled" : ""}>上移</button><button type="button" class="text-btn" data-builder-move="down" data-builder-id="${escapeHtml(block.id)}" ${index === blocks.length - 1 ? "disabled" : ""}>下移</button><button type="button" class="text-btn danger-text" data-builder-remove="${escapeHtml(block.id)}">删除</button></div>
+    </div>`;
+  }).join("");
+  return `<div class="builder-editor">
+    <div class="builder-picker"><strong>1. 从文件名选片段</strong><div class="builder-picker-row"><label>素材库<select id="builderPool">${config.timeline.filter(category => config.sources[category]?.mode !== "disabled").map(category => `<option value="${escapeHtml(category)}" ${category === picker.category ? "selected" : ""}>${escapeHtml(config.sources[category]?.label || category)}</option>`).join("")}</select></label><label>文件名<input id="builderSample" list="builderSampleList" value="${escapeHtml(picker.sample)}" placeholder="选择或输入文件名"><datalist id="builderSampleList">${sampleNames.slice(0, 500).map(name => `<option value="${escapeHtml(name)}">`).join("")}</datalist></label></div>
+      <div class="builder-tokens">${tokens.map((token, index) => token === "-" || token === "_" ? `<span>${escapeHtml(token)}</span>` : `<button type="button" class="builder-token ${picker.tokenIndex === index ? "active" : ""}" data-builder-token="${index}">${escapeHtml(token)}</button>`).join("") || '<small>请选择一个文件名</small>'}</div>
+      <div class="builder-picker-row">${picker.replaceId ? '<small>正在重选已有字段块的来源与片段</small>' : `<label>添加方式<select id="builderTarget"><option value="">新建素材字段块</option>${sourceTargets.map(block => `<option value="${escapeHtml(block.id)}" ${picker.targetId === block.id ? "selected" : ""}>给“${escapeHtml(builderTokens(block.variants[0]?.sample_name || "")[block.variants[0]?.token_index] || "片段")}”增加格式</option>`).join("")}</select></label>`}<button id="builderAddSource" type="button" class="button secondary small">${picker.replaceId ? "保存字段来源" : "添加所选片段"}</button></div>
+    </div>
+    <div class="builder-canvas"><strong>2. 拼接文件名</strong><small>拖动块调整顺序；文字可直接修改。扩展名 .mp4 自动添加。</small><div class="builder-block-list">${cards || '<div class="simple-empty-state">先添加一个素材片段或文字块</div>'}</div>
+      <div class="builder-toolbar"><input id="builderNewText" placeholder="输入任意文字，例如最高25元红包"><button id="builderAddText" type="button" class="button secondary small">＋ 文字块</button><button id="builderAddSeparator" type="button" class="button secondary small">＋ 分隔符 -</button><button id="builderAddDate" type="button" class="button secondary small">＋ 日期 MMDD</button><button id="builderAddSequence" type="button" class="button secondary small" ${blocks.some(block => block.type === "sequence") ? "disabled" : ""}>＋ 序号</button></div>
+      <label class="simple-large-field builder-sequence-start"><span>序号起点</span><input id="builderSequenceStart" type="number" min="1" max="999999" value="${naming.sequence_start}"></label>
+    </div>
+    <button id="builderPreview" type="button" class="button secondary small">用实际素材验证文件名</button><div id="builderPreviewResult" class="builder-preview-result" aria-live="polite"></div>
+  </div>`;
+}
+
+function bindBuilderControls() {
+  const naming = ensureOutputNaming(state.configDraft);
+  const blocks = naming.builder.blocks;
+  const rerender = () => {
+    const scrollTop = configEditorScrollTop();
+    renderSimpleConfig();
+    restoreActiveConfigScroll(scrollTop);
+  };
+  const stale = () => {
+    const result = $("#builderPreviewResult");
+    if (result) result.textContent = "设置已修改，请重新验证文件名";
+  };
+  $("#builderPool")?.addEventListener("change", event => {
+    state.namingPicker = { category: event.target.value, sample: "", tokenIndex: -1,
+      targetId: "", replaceId: state.namingPicker?.replaceId || "" };
+    rerender();
+  });
+  $("#builderSample")?.addEventListener("change", event => {
+    const picker = builderPicker(state.configDraft);
+    picker.sample = event.target.value.trim();
+    picker.tokenIndex = -1;
+    rerender();
+  });
+  $$('[data-builder-token]').forEach(button => button.addEventListener("click", () => {
+    const picker = builderPicker(state.configDraft);
+    picker.sample = $("#builderSample").value.trim();
+    picker.tokenIndex = Number(button.dataset.builderToken);
+    rerender();
+  }));
+  $("#builderTarget")?.addEventListener("change", event => {
+    builderPicker(state.configDraft).targetId = event.target.value;
+  });
+  $("#builderAddSource")?.addEventListener("click", () => {
+    const picker = builderPicker(state.configDraft);
+    const sampleName = $("#builderSample")?.value.trim() || picker.sample;
+    const tokens = builderTokens(sampleName);
+    if (!picker.category || picker.tokenIndex < 0 || !tokens[picker.tokenIndex]) {
+      toast("请先选择素材库、文件名和一个片段", true); return;
+    }
+    const variant = {
+      sample_name: sampleName, signature: builderSignature(tokens), token_index: picker.tokenIndex,
+    };
+    const replacement = blocks.find(block => block.id === picker.replaceId && block.type === "source");
+    if (replacement) {
+      replacement.category = picker.category;
+      replacement.variants = [variant];
+      picker.replaceId = "";
+      picker.tokenIndex = -1;
+      rerender();
+      return;
+    }
+    const targetId = $("#builderTarget")?.value || "";
+    const target = blocks.find(block => block.id === targetId && block.category === picker.category);
+    if (target) {
+      if (target.variants.some(item => item.signature === variant.signature)) {
+        toast("这个文件名格式已有规则，可删除原块后重新选择片段", true); return;
+      }
+      target.variants.push(variant);
+    } else {
+      blocks.push({ id: crypto.randomUUID(), type: "source", category: picker.category,
+        variants: [variant], text: "", role: "", date_format: "raw" });
+    }
+    picker.tokenIndex = -1;
+    rerender();
+  });
+  const addText = value => {
+    if (!value) { toast("请先输入文字", true); return; }
+    blocks.push({ id: crypto.randomUUID(), type: "text", category: "", variants: [],
+      text: value, role: "", date_format: "raw" });
+    rerender();
+  };
+  $("#builderAddText")?.addEventListener("click", () => addText($("#builderNewText")?.value || ""));
+  $("#builderNewText")?.addEventListener("keydown", event => {
+    if (event.key === "Enter") { event.preventDefault(); addText(event.target.value); }
+  });
+  $("#builderAddSeparator")?.addEventListener("click", () => addText("-"));
+  $("#builderAddDate")?.addEventListener("click", () => {
+    blocks.push({ id: crypto.randomUUID(), type: "date", category: "", variants: [],
+      text: "", role: "", date_format: "mmdd" });
+    rerender();
+  });
+  $("#builderAddSequence")?.addEventListener("click", () => {
+    if (blocks.some(block => block.type === "sequence")) return;
+    blocks.push({ id: crypto.randomUUID(), type: "sequence", category: "", variants: [],
+      text: "", role: "", date_format: "raw" });
+    rerender();
+  });
+  $$('[data-builder-text]').forEach(input => input.addEventListener("change", event => {
+    const block = blocks.find(item => item.id === event.target.dataset.builderText);
+    if (!block) return;
+    if (!event.target.value) { event.target.value = block.text; toast("文字块不能为空", true); return; }
+    block.text = event.target.value;
+    stale();
+  }));
+  $$('[data-builder-role]').forEach(select => select.addEventListener("change", event => {
+    const block = blocks.find(item => item.id === event.target.dataset.builderRole);
+    if (block) { block.role = event.target.value; rerender(); }
+  }));
+  $$('[data-builder-date-format]').forEach(select => select.addEventListener("change", event => {
+    const block = blocks.find(item => item.id === event.target.dataset.builderDateFormat);
+    if (block) { block.date_format = event.target.value; stale(); }
+  }));
+  $$('[data-builder-remove]').forEach(button => button.addEventListener("click", () => {
+    const index = blocks.findIndex(item => item.id === button.dataset.builderRemove);
+    if (index >= 0) { blocks.splice(index, 1); rerender(); }
+  }));
+  $$('[data-builder-copy]').forEach(button => button.addEventListener("click", () => {
+    const index = blocks.findIndex(item => item.id === button.dataset.builderCopy);
+    if (index < 0 || blocks[index].type === "sequence" || blocks[index].type === "date") return;
+    blocks.splice(index + 1, 0, { ...structuredClone(blocks[index]), id: crypto.randomUUID() });
+    rerender();
+  }));
+  $$('[data-builder-repick]').forEach(button => button.addEventListener("click", () => {
+    const block = blocks.find(item => item.id === button.dataset.builderRepick);
+    if (!block) return;
+    state.namingPicker = { category: block.category, sample: block.variants[0].sample_name,
+      tokenIndex: block.variants[0].token_index, targetId: "", replaceId: block.id };
+    rerender();
+  }));
+  $$('[data-builder-move]').forEach(button => button.addEventListener("click", () => {
+    const index = blocks.findIndex(item => item.id === button.dataset.builderId);
+    const target = index + (button.dataset.builderMove === "up" ? -1 : 1);
+    if (index >= 0 && target >= 0 && target < blocks.length) {
+      [blocks[index], blocks[target]] = [blocks[target], blocks[index]];
+      rerender();
+    }
+  }));
+  $$('[data-builder-block]').forEach(card => {
+    card.addEventListener("dragstart", event => {
+      event.dataTransfer.setData("text/plain", card.dataset.builderBlock);
+      event.dataTransfer.effectAllowed = "move";
+    });
+    card.addEventListener("dragover", event => { event.preventDefault(); card.classList.add("drag-over"); });
+    card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
+    card.addEventListener("drop", event => {
+      event.preventDefault(); card.classList.remove("drag-over");
+      const sourceId = event.dataTransfer.getData("text/plain");
+      const from = blocks.findIndex(item => item.id === sourceId);
+      const to = blocks.findIndex(item => item.id === card.dataset.builderBlock);
+      if (from < 0 || to < 0 || from === to) return;
+      blocks.splice(to > from ? to - 1 : to, 0, blocks.splice(from, 1)[0]);
+      rerender();
+    });
+  });
+  $("#builderSequenceStart")?.addEventListener("change", event => {
+    const value = Number(event.target.value);
+    if (!Number.isInteger(value) || value < 1 || value > 999999) {
+      event.target.value = String(naming.sequence_start); toast("序号起点需在 1～999999 之间", true); return;
+    }
+    naming.sequence_start = value;
+    stale();
+  });
+  $("#builderPreview")?.addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const result = $("#builderPreviewResult");
+    button.disabled = true;
+    result.textContent = "正在扫描素材并生成实际文件名…";
+    try {
+      const preview = await api(`/configs/${state.configId}/naming-builder-preview`, {
+        method: "POST", body: JSON.stringify({ config: currentStructuredDraft() }),
+      });
+      const coverage = preview.coverage.map(item => `${state.configDraft.sources[item.category]?.label || item.category}：${item.matched}/${item.total} 可用${item.unmatched.length ? `，未匹配如 ${item.unmatched.join("、")}` : ""}`).join("；");
+      if (preview.error) {
+        result.innerHTML = `<strong>无法生成：${escapeHtml(preview.error)}</strong><small>${escapeHtml(coverage)}</small>`;
+        return;
+      }
+      const parts = preview.block_values.map(item => item.value).join(" | ");
+      result.innerHTML = `<strong>${escapeHtml(preview.output_name)}</strong><small>块取值：${escapeHtml(parts)}</small><small>抽中素材：${escapeHtml(preview.sources.map(item => `${item.category}: ${item.name}`).join("；"))}</small><small>${escapeHtml(coverage)}</small>`;
+    } catch (error) { result.textContent = `无法生成：${error.message}`; }
+    finally { button.disabled = false; }
+  });
+}
+
 function globalVisualBordersForDraft(config) {
   const border = ensureVisualDedup(config).border_overlay;
   const allowed = new Set(border.enabled_asset_ids || []);
@@ -5422,10 +5750,12 @@ function renderSimpleConfig() {
     : [];
   const namingCard = generic ? `
     <section class="simple-config-card simple-wide-card simple-naming-card">
-      <header><span class="simple-card-number">05</span><div><h3>命名设置</h3><p>填写产品和利益点，达人与限制日期由系统从剧情素材中提取。</p></div></header>
+      <header><span class="simple-card-number">05</span><div><h3>命名设置</h3><p>从素材文件名选片段，像积木一样组成成片名。</p></div></header>
       <div class="simple-card-body simple-naming-card-body">
-        <label class="simple-toggle-row compact"><span><b>按业务信息命名</b><small>使用产品-利益点-达人-限制日期生成文件名</small></span><input id="simpleNamingEnabled" class="switch-input" type="checkbox" ${naming.enabled ? "checked" : ""}></label>
+        <label class="simple-toggle-row compact"><span><b>按业务信息命名</b><small>${naming.builder.enabled ? "按下方积木块生成文件名" : "使用产品-利益点-达人-限制日期生成文件名"}</small></span><input id="simpleNamingEnabled" class="switch-input" type="checkbox" ${naming.enabled ? "checked" : ""}></label>
         <div id="simpleNamingFields" class="simple-naming-fields ${naming.enabled ? "" : "hidden"}">
+          <label class="simple-toggle-row compact"><span><b>积木式命名</b><small>选择文件名片段，加入可编辑文字和序号，自由排列</small></span><input id="simpleNamingBuilderEnabled" class="switch-input" type="checkbox" ${naming.builder.enabled ? "checked" : ""}></label>
+          ${naming.builder.enabled ? renderBuilderEditor(config) : `
           <div class="simple-naming-inputs">
             <label class="simple-large-field"><span>产品</span><input id="simpleNamingProduct" value="${escapeHtml(naming.product)}" placeholder="例如 红果短剧"></label>
             <label class="simple-large-field"><span>利益点</span><input id="simpleNamingBenefit" value="${escapeHtml(naming.benefit)}" placeholder="例如 功能综述"></label>
@@ -5433,6 +5763,7 @@ function renderSimpleConfig() {
           </div>
           <small class="simple-naming-help">达人和限制日期从抽中的剧情素材自动提取；序号从设定值开始逐条递增。</small>
           <div class="simple-info-strip"><span class="${namingErrors.length ? "warning" : "ok"}">${namingErrors.length ? "命名预检异常" : "文件名预览"}</span><code id="simpleNamingPreview">${escapeHtml(naming.enabled ? namingExample(config) : "将继续使用原文件名模板")}</code>${namingErrors.length ? '<button class="text-btn" type="button" data-open-naming-advanced>查看高级规则 →</button>' : ""}</div>
+          `}
         </div>
       </div>
     </section>` : "";
@@ -5688,6 +6019,11 @@ function bindSimpleConfigControls() {
     ensureOutputNaming(state.configDraft).enabled = event.target.checked;
     renderSimpleConfig();
   });
+  $("#simpleNamingBuilderEnabled")?.addEventListener("change", event => {
+    ensureOutputNaming(state.configDraft).builder.enabled = event.target.checked;
+    renderSimpleConfig();
+  });
+  if (ensureOutputNaming(state.configDraft).builder.enabled) bindBuilderControls();
   $("#simpleNamingProduct")?.addEventListener("input", event => {
     ensureOutputNaming(state.configDraft).product = event.target.value;
     const preview = $("#simpleNamingPreview");
@@ -6214,9 +6550,10 @@ function renderVisualConfig() {
   const feishu = ensureFeishuBaseSync(config);
   const namingSection = generic ? `
     <details class="config-section" data-config-section="output-naming">
-      <summary>成片命名 <small>产品、利益点与素材文件名解析</small></summary>
+      <summary>成片命名 <small>${naming.builder.enabled ? "积木式命名已启用" : "产品、利益点与素材文件名解析"}</small></summary>
       <div class="config-section-body config-form-grid three">
         ${configSwitch("启用业务动态命名", "output.naming.enabled", naming.enabled, "命名方式")}
+        ${naming.builder.enabled ? '<div class="config-field wide"><label>积木式命名</label><p>请在简单模式的“命名设置”中编辑素材字段块、文字块和顺序。</p></div>' : `
         ${configInput("产品", "output.naming.product", naming.product, { className: "naming-option", placeholder: "例如 燕麦奶" })}
         ${configInput("利益点", "output.naming.benefit", naming.benefit, { className: "naming-option", placeholder: "例如 第二件半价" })}
         ${configInput("命名模板", "output.naming.template", naming.template, { wide: true, className: "naming-option", hint: "可用 product、benefit、talents、restriction_date、sequence" })}
@@ -6224,7 +6561,7 @@ function renderVisualConfig() {
         <div class="naming-option">${configSwitch("移除 SmartStitch 切片后缀", "output.naming.source_metadata.strip_smartstitch_suffix", naming.source_metadata.strip_smartstitch_suffix)}</div>
         ${configInput("文件名解析正则", "output.naming.source_metadata.pattern", naming.source_metadata.pattern, { wide: true, className: "naming-option", hint: "必须包含 talent 和 restriction_date 命名分组" })}
         ${configInput("允许的日期格式", "output.naming.source_metadata.restriction_date_formats", naming.source_metadata.restriction_date_formats, { type: "list", className: "naming-option", hint: "默认 %Y-%m-%d，逗号分隔" })}
-        <div class="naming-option">${configSelect("解析失败", "output.naming.source_metadata.on_unmatched", naming.source_metadata.on_unmatched, [["error", "报错并停止"]])}</div>
+        <div class="naming-option">${configSelect("解析失败", "output.naming.source_metadata.on_unmatched", naming.source_metadata.on_unmatched, [["error", "报错并停止"], ["exclude", "排除未识别素材"]])}</div>
         <div class="naming-option">${configSelect("达人合并", "output.naming.talent.merge", naming.talent.merge, [["ordered_unique", "按时间线去重"]])}</div>
         ${configInput("达人连接符", "output.naming.talent.separator", naming.talent.separator, { className: "naming-option" })}
         <div class="naming-option">${configSelect("限制日期合并", "output.naming.restriction_date.merge", naming.restriction_date.merge, [["earliest", "取最早日期"]])}</div>
@@ -6232,6 +6569,8 @@ function renderVisualConfig() {
         ${configInput("重名后缀", "output.naming.duplicate_suffix", naming.duplicate_suffix, { className: "naming-option", hint: "例如 -{serial:02d}" })}
         <div class="config-field wide naming-option"><label>文件名示例 <small>使用当前扫描素材</small></label><code id="advancedNamingPreview" class="managed-pool-path">${escapeHtml(namingExample(config))}</code></div>
         <div class="config-field wide naming-option naming-test-row"><button id="testNamingPatternBtn" class="button secondary small" type="button">用已扫描素材测试解析</button><div id="namingTestResult" class="naming-test-result"></div></div>
+        `}
+        ${naming.builder.enabled ? configInput("重名后缀", "output.naming.duplicate_suffix", naming.duplicate_suffix, { className: "naming-option" }) : ""}
       </div>
     </details>` : "";
   const feishuSecretHint = state.feishuSettings.app_secret_configured

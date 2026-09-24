@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from conftest import authenticated_client
 
 import smartstitch.cluster as cluster
 import smartstitch.cluster_upscale as cluster_upscale
@@ -89,6 +90,13 @@ def test_upscale_cluster_stages_and_publishes_exact_frames(tmp_path, monkeypatch
         assert assignments[0]["model_sha256"] == MODEL_CONFIGS[model_name]["sha256"]
         if use_batch:
             assert manager.preview(model_name)["skipped_count"] == 1
+            while (manager.active_count() or master_app.state.cluster_upscale_manager.active_count()) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            browser = authenticated_client(master_app)
+            queued = browser.get("/api/v1/tools/video-upscale/jobs").json()
+            assert [entry["id"] for entry in queued] == [job["id"]]
+            assert browser.delete(f"/api/v1/tools/video-upscale/{job['id']}").status_code == 200
+            assert browser.get("/api/v1/tools/video-upscale/jobs").json() == []
         changed = {**assignments[0], "start": assignments[0]["start"] + 1}
         response = client.post("/upscale-attempts", json=changed,
                                headers={"Authorization": f"Bearer {worker.settings['token']}"})

@@ -216,6 +216,48 @@ def test_structured_config_update(tmp_path):
     assert list((config_directory / "backups").glob("*.yaml"))
 
 
+def test_builder_preview_uses_unsaved_blocks_and_actual_selected_asset(tmp_path, monkeypatch):
+    from smartstitch.models import Asset, MediaProbe, ScanResult
+
+    config_directory = tmp_path / "config"
+    config_directory.mkdir()
+    saved = {
+        "schema_version": 3, "workflow_type": "generic", "id": "builder-preview",
+        "name": "积木预览", "source_root": str(tmp_path), "timeline": ["pool_1"],
+        "sources": {"pool_1": {"label": "前贴", "directory": "pool_1"}},
+        "benefit_overlays": {"mode": "disabled", "file": ""},
+        "output": {"directory": str(tmp_path / "out")},
+    }
+    path = config_directory / "builder-preview.yaml"
+    path.write_text(yaml.safe_dump(saved, allow_unicode=True), encoding="utf-8")
+    client = authenticated_client(create_app(tmp_path))
+    draft = client.get("/api/v1/configs/builder-preview").json()["config"]
+    draft["output"]["naming"].update({
+        "enabled": True,
+        "builder": {"enabled": True, "blocks": [
+            {"id": "brand", "type": "source", "category": "pool_1", "role": "product",
+             "variants": [{"sample_name": "瑞幸-咖啡-ai1.mp4", "signature": "T-T-T", "token_index": 0}]},
+            {"id": "dash", "type": "text", "text": "-"},
+            {"id": "offer", "type": "text", "text": "最高25元红包", "role": "benefit"},
+        ]},
+    })
+    actual = Asset(
+        id="actual", category="pool_1", path=str(tmp_path / "pool_1" / "通用-热菜-烤鸭.mp4"),
+        name="通用-热菜-烤鸭.mp4", media_type="video",
+        probe=MediaProbe(duration=1, width=720, height=1280),
+    )
+    monkeypatch.setattr(api_module, "scan_config", lambda *_args, **_kwargs: ScanResult(
+        config_id="builder-preview", assets={"pool_1": [actual], "benefit_overlay": []},
+    ))
+    response = client.post(
+        "/api/v1/configs/builder-preview/naming-builder-preview", json={"config": draft},
+    )
+    assert response.status_code == 200
+    assert response.json()["output_name"] == "通用-最高25元红包.mp4"
+    assert response.json()["block_values"][0]["asset"] == actual.name
+    assert path.read_text("utf-8") == yaml.safe_dump(saved, allow_unicode=True)
+
+
 def test_source_inventory_api_includes_disabled_libraries(tmp_path):
     config_directory = tmp_path / "config"
     config_directory.mkdir()

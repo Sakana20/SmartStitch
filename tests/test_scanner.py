@@ -287,6 +287,44 @@ def test_generic_scan_parses_naming_metadata_and_reports_bad_filename(tmp_path, 
     assert parsed.naming_metadata.restriction_date == "2026-10-31"
     assert any(invalid.name in error and "识别达人名和限制日期" in error for error in result.errors)
 
+    config.output.naming.source_metadata.on_unmatched = "exclude"
+    excluded_result = scan_config(config)
+    assert not excluded_result.errors
+    excluded = next(asset for asset in excluded_result.assets["pool_1"] if asset.name == invalid.name)
+    assert not excluded.selectable
+    assert "命名字段未识别" in excluded.error
+
+
+def test_builder_scan_excludes_unmatched_only_in_referenced_pool(tmp_path, monkeypatch):
+    for category in ("pool_1", "pool_2"):
+        (tmp_path / category).mkdir()
+    for name in ("瑞幸-咖啡-ai1.mp4", "1.mp4"):
+        (tmp_path / "pool_1" / name).write_bytes(b"video")
+    (tmp_path / "pool_2" / "2.mp4").write_bytes(b"video")
+    monkeypatch.setattr(
+        scanner_module, "probe_media",
+        lambda *_args, **_kwargs: MediaProbe(duration=1, width=720, height=1280),
+    )
+    config = AppConfig.model_validate({
+        "schema_version": 3, "workflow_type": "generic", "id": "builder-scan",
+        "name": "积木扫描", "source_root": str(tmp_path),
+        "timeline": ["pool_1", "pool_2"],
+        "sources": {category: {"label": category, "directory": category} for category in ("pool_1", "pool_2")},
+        "benefit_overlays": {"mode": "disabled", "file": ""},
+        "output": {"directory": str(tmp_path / "out"), "naming": {
+            "enabled": True, "builder": {"enabled": True, "blocks": [
+                {"id": "brand", "type": "source", "category": "pool_1", "variants": [
+                    {"sample_name": "瑞幸-咖啡-ai1.mp4", "signature": "T-T-T", "token_index": 0}
+                ]},
+            ]},
+        }},
+    })
+    scan = scan_config(config)
+    assert not scan.errors
+    assert next(asset for asset in scan.assets["pool_1"] if asset.name == "1.mp4").error.startswith("命名片段未识别")
+    assert next(asset for asset in scan.assets["pool_1"] if asset.name.startswith("瑞幸")).selectable
+    assert scan.assets["pool_2"][0].selectable
+
 
 def test_disabled_naming_pool_does_not_block_scan(tmp_path, monkeypatch):
     ordinary = tmp_path / "pool_2"

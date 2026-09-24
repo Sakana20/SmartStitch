@@ -88,6 +88,7 @@ from .models import (
     resolve_directory,
 )
 from .planner import PlanError, build_plan
+from .naming import NamingError, builder_source_blocks, source_block_value
 from .probe_cache import MediaProbeCache
 from .prores_alpha import ProResAlphaManager
 from .video_upscale import VideoUpscaleManager
@@ -275,7 +276,7 @@ def create_app(
         timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
         slice_job_manager = SliceJobManager(timeline_slicer, database_store)
         prores_alpha_manager = ProResAlphaManager(visual_border_library)
-        video_upscale_manager = VideoUpscaleManager(resolved_data_directory)
+        video_upscale_manager = VideoUpscaleManager(resolved_data_directory, database_store)
         accounts = AccountStore(config_store.directory)
         cluster_worker = ClusterWorker(resolved_data_directory, config_store, database_store, user_profiles)
         cluster_worker.local_upscale_manager = video_upscale_manager
@@ -1396,6 +1397,64 @@ def create_app(
         except (ConfigError, FileNotFoundError, PlanError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.post("/api/v1/configs/{config_id}/naming-builder-preview")
+    def naming_builder_preview(
+        config_id: str, request: StructuredConfigUpdateRequest
+    ) -> dict[str, object]:
+        try:
+            saved = config_store.load(config_id)
+            config = request.config
+            if config.id != config_id or config.workflow_type != "generic":
+                raise ValueError("命名预览与当前通用项目不一致")
+            if config.source_root != saved.source_root:
+                raise ValueError("请先保存素材根目录变更")
+            if not config.output.naming.enabled or not config.output.naming.builder.enabled:
+                raise ValueError("请先启用积木式命名")
+            scan = scan_config(
+                config,
+                visual_border_library.assets_for_effect_layers(config),
+                media_probe_cache,
+            )
+            categories = {
+                block.category for block in config.output.naming.builder.blocks
+                if block.type == "source"
+            }
+            coverage = []
+            for category in config.timeline:
+                if category not in categories:
+                    continue
+                matched = 0
+                unmatched = []
+                for asset in scan.assets.get(category, []):
+                    try:
+                        for block in builder_source_blocks(config, category):
+                            source_block_value(block, asset)
+                        matched += 1
+                    except NamingError:
+                        unmatched.append(asset.name)
+                coverage.append({
+                    "category": category,
+                    "total": len(scan.assets.get(category, [])),
+                    "matched": matched,
+                    "unmatched": unmatched[:5],
+                })
+            try:
+                plan = build_plan(config, scan, 1, seed=config.randomization.default_seed)
+            except PlanError as exc:
+                return {"error": str(exc), "coverage": coverage, "output_name": "", "block_values": [], "sources": []}
+            item = plan.items[0]
+            return {
+                "output_name": item.output_name,
+                "block_values": item.naming.block_values if item.naming else [],
+                "sources": [
+                    {"category": category, "name": asset.name}
+                    for category, asset in item.selections.items() if asset is not None
+                ],
+                "coverage": coverage,
+            }
+        except (ConfigError, FileNotFoundError, PlanError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     def audio_preview_response(request: LoudnessPreviewRequest) -> FileResponse:
         try:
             config = config_store.load(request.config_id)
@@ -1699,6 +1758,20 @@ def create_app(
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.get("/api/v1/tools/video-upscale/jobs")
+    def list_video_upscale_jobs(limit: int = Query(default=100, ge=1, le=100)) -> list[dict[str, object]]:
+        batches = database_store.list("upscale_batches")
+        child_ids = {item["job_id"] for batch in batches for item in batch.get("items", []) if item.get("job_id")}
+        jobs = ([{**job, "mode": "local"} for job in video_upscale_manager.list()]
+                + batches
+                + [job for job in database_store.list("upscale_jobs") if job["id"] not in child_ids])
+        fields = ("id", "status", "phase", "kind", "mode", "model", "source", "output_path",
+                  "output_directory", "processed_frames", "total_frames", "total_files",
+                  "completed_files", "failed_files", "created_at", "finished_at", "error")
+        jobs.sort(key=lambda job: datetime.fromisoformat(job["created_at"]).timestamp()
+                  if isinstance(job["created_at"], str) else job["created_at"], reverse=True)
+        return [{key: job.get(key) for key in fields} for job in jobs[:limit]]
+
     @app.get("/api/v1/tools/video-upscale/latest")
     def latest_video_upscale() -> dict[str, object] | None:
         local = video_upscale_manager.latest()
@@ -1733,6 +1806,20 @@ def create_app(
                     return cluster_upscale_manager.cancel(job_id)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.delete("/api/v1/tools/video-upscale/{job_id}")
+    def delete_video_upscale(job_id: str) -> dict[str, object]:
+        for manager in (video_upscale_manager, cluster_upscale_batch_manager, cluster_upscale_manager):
+            try:
+                manager.get(job_id)
+            except KeyError:
+                continue
+            try:
+                manager.delete(job_id)
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            return {"ok": True, "job_id": job_id}
+        raise HTTPException(404, "超分任务不存在")
 
     @app.get("/api/v1/tools/batch-dedup/settings")
     def get_batch_dedup_settings() -> dict[str, object]:

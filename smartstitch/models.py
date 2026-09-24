@@ -17,6 +17,24 @@ MAX_BENEFIT_CATEGORIES = 20
 MAX_GENERIC_POOLS = 50
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 PATH_QUOTE_PAIRS = {"'": "'", '"': '"', "‘": "’", "“": "”"}
+NAMING_FILENAME_TOKEN_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}|\d{8}|[^_-]+|[_-]")
+
+
+def naming_filename_tokens(filename: str) -> list[str]:
+    return NAMING_FILENAME_TOKEN_PATTERN.findall(Path(filename).stem.split("__", 1)[0])
+
+
+def naming_filename_signature(tokens: list[str]) -> str:
+    def token_kind(token: str) -> str:
+        if token in {"-", "_"}:
+            return token
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", token):
+            return "D"
+        if re.fullmatch(r"\d{8}", token):
+            return "E"
+        return "N" if re.fullmatch(r"[0-9]+", token) else "T"
+
+    return "".join(token_kind(token) for token in tokens)
 
 
 def is_benefit_category(category: str) -> bool:
@@ -423,7 +441,7 @@ class NamingSourceMetadataConfig(BaseModel):
     restriction_date_formats: list[str] = Field(
         default_factory=lambda: ["%Y-%m-%d"]
     )
-    on_unmatched: Literal["error"] = "error"
+    on_unmatched: Literal["error", "exclude"] = "error"
 
     @field_validator("categories")
     @classmethod
@@ -480,6 +498,63 @@ class NamingRestrictionDateConfig(BaseModel):
     output_format: Literal["%Y%m%d"] = "%Y%m%d"
 
 
+class NamingBlockVariantConfig(BaseModel):
+    sample_name: str = Field(min_length=1)
+    signature: str = Field(min_length=1)
+    token_index: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_sample(self) -> NamingBlockVariantConfig:
+        tokens = naming_filename_tokens(self.sample_name)
+        if self.signature != naming_filename_signature(tokens):
+            raise ValueError("文件名样本与解析格式不一致")
+        if self.token_index >= len(tokens) or tokens[self.token_index] in {"-", "_"}:
+            raise ValueError("文件名样本未包含选定片段")
+        return self
+
+
+class NamingBlockConfig(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    type: Literal["source", "text", "sequence", "date"]
+    category: str = ""
+    variants: list[NamingBlockVariantConfig] = Field(default_factory=list)
+    text: str = ""
+    role: Literal["", "product", "benefit", "talent", "restriction_date"] = ""
+    date_format: Literal["raw", "compact", "mmdd"] = "raw"
+
+    @model_validator(mode="after")
+    def validate_block(self) -> NamingBlockConfig:
+        if self.type == "source" and (not is_pool_category(self.category) or not self.variants):
+            raise ValueError("素材命名块必须指定素材库和文件名片段")
+        if self.type == "text" and not self.text:
+            raise ValueError("文字命名块不能为空")
+        if self.type == "sequence" and self.role:
+            raise ValueError("序号块不能映射飞书业务字段")
+        if self.type == "date" and self.role:
+            raise ValueError("当天日期块不能映射限制日期字段")
+        if self.type != "source" and self.variants:
+            raise ValueError("只有素材命名块能配置文件名样本")
+        if len({item.signature for item in self.variants}) != len(self.variants):
+            raise ValueError("同一素材命名块不能重复配置相同文件名格式")
+        return self
+
+
+class NamingBuilderConfig(BaseModel):
+    enabled: bool = False
+    blocks: list[NamingBlockConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_blocks(self) -> NamingBuilderConfig:
+        if self.enabled and not self.blocks:
+            raise ValueError("积木式命名至少需要一个块")
+        ids = [block.id for block in self.blocks]
+        if len(ids) != len(set(ids)):
+            raise ValueError("命名块 ID 不能重复")
+        if sum(block.type == "sequence" for block in self.blocks) > 1:
+            raise ValueError("序号块只能添加一个")
+        return self
+
+
 class OutputNamingConfig(BaseModel):
     enabled: bool = False
     product: str = Field(default="", max_length=100)
@@ -494,6 +569,7 @@ class OutputNamingConfig(BaseModel):
         default_factory=NamingRestrictionDateConfig
     )
     duplicate_suffix: str = "-{serial:02d}"
+    builder: NamingBuilderConfig = Field(default_factory=NamingBuilderConfig)
 
     @field_validator("product", "benefit")
     @classmethod
@@ -729,6 +805,17 @@ class AppConfig(BaseModel):
                 )
             naming = self.output.naming
             if naming.enabled:
+                if naming.builder.enabled:
+                    invalid_blocks = [
+                        block.id for block in naming.builder.blocks
+                        if block.type == "source" and (
+                            block.category not in self.sources
+                            or self.sources[block.category].mode == SourceMode.DISABLED
+                        )
+                    ]
+                    if invalid_blocks:
+                        raise ValueError("命名块引用了不存在或未启用的素材库: " + ", ".join(invalid_blocks))
+                    return self
                 missing_fields = [
                     label
                     for label, value in (
@@ -759,7 +846,7 @@ class AppConfig(BaseModel):
             for item in group.items
         ):
             raise ValueError("逐张图片时长仅支持通用项目图片库")
-        if self.output.naming.enabled:
+        if self.output.naming.enabled or self.output.naming.builder.enabled:
             raise ValueError("业务动态命名目前仅支持通用视频项目")
         if self.schema_version != 2:
             raise ValueError("淘宝闪购配置必须使用 schema_version 2")
@@ -855,6 +942,8 @@ class PlanNamingMetadata(BaseModel):
     restriction_date: str | None = None
     sequence: int = Field(ge=1)
     sources: list[NamingSourceRecord]
+    parts: list[str] = Field(default_factory=list)
+    block_values: list[dict[str, str]] = Field(default_factory=list)
 
 
 class Asset(BaseModel):

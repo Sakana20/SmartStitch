@@ -16,7 +16,10 @@ from typing import Iterable
 
 from PIL import Image
 
-from .naming import NamingError, category_is_naming_source, parse_asset_naming
+from .naming import (
+    NamingError, builder_source_blocks, category_is_naming_source,
+    parse_asset_naming, source_block_value,
+)
 from .models import (
     AppConfig,
     Asset,
@@ -955,11 +958,12 @@ def scan_config(
                     )
 
     if config.workflow_type == "generic" and config.output.naming.enabled:
+        builder_enabled = config.output.naming.builder.enabled
         naming_categories = [
             category
             for category in config.timeline
             if config.sources[category].mode != SourceMode.DISABLED
-            and category_is_naming_source(config, category)
+            and (bool(builder_source_blocks(config, category)) if builder_enabled else category_is_naming_source(config, category))
         ]
         for category in naming_categories:
             group = config.sources[category]
@@ -968,12 +972,25 @@ def scan_config(
                 if not asset.selectable:
                     continue
                 try:
-                    asset.naming_metadata = parse_asset_naming(config, asset)
+                    if builder_enabled:
+                        for block in builder_source_blocks(config, category):
+                            source_block_value(block, asset)
+                    else:
+                        asset.naming_metadata = parse_asset_naming(config, asset)
                 except NamingError as exc:
-                    errors.append(
-                        f"{label}（{category}）: 无法从“{asset.name}”"
-                        f"识别达人名和限制日期: {exc}"
-                    )
+                    if builder_enabled:
+                        asset.valid = False
+                        asset.error = f"命名片段未识别: {exc}"
+                        warnings.append(f"{label}（{category}）: {asset.error}；已排除")
+                    elif config.output.naming.source_metadata.on_unmatched == "exclude":
+                        asset.valid = False
+                        asset.error = f"命名字段未识别: {exc}"
+                        warnings.append(f"{label}（{category}）: {asset.name}: {asset.error}；已排除")
+                    else:
+                        errors.append(
+                            f"{label}（{category}）: 无法从“{asset.name}”"
+                            f"识别达人名和限制日期: {exc}"
+                        )
 
     overlays, overlay_errors = scan_fixed_overlay(config, probe_session)
     assets["benefit_overlay"] = overlays

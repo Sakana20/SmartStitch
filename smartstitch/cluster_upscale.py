@@ -123,6 +123,13 @@ class ClusterUpscaleManager:
             event.set()
             return self.get(job_id)
 
+    def delete(self, job_id: str) -> None:
+        with self.lock:
+            job = self.get(job_id)
+            if job_id in self.events or job["status"] in {"queued", "running", "cancelling"}:
+                raise ValueError("运行中的集群超分任务不能删除")
+            self.database.delete("upscale_jobs", job_id)
+
     def _stage(self, job: dict[str, Any], cancel: threading.Event) -> Path:
         root = self.cluster.config_store.directory.resolve()
         directory = root / job["stage_relative"]
@@ -439,6 +446,16 @@ class ClusterUpscaleBatchManager:
             raise ValueError("集群超分批次没有运行")
         event.set()
         return self.get(job_id)
+
+    def delete(self, job_id: str) -> None:
+        with self.lock:
+            job = self.get(job_id)
+            if job_id in self.events or job["status"] in {"queued", "running", "cancelling"}:
+                raise ValueError("运行中的集群超分批次不能删除")
+            for item in job["items"]:
+                if item.get("job_id"):
+                    self.single.delete(item["job_id"])
+            self.database.delete("upscale_batches", job_id)
 
     def _run(self, job_id: str, cancel: threading.Event) -> None:
         job = self.database.get("upscale_batches", job_id)

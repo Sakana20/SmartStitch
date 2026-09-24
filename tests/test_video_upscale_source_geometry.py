@@ -10,6 +10,7 @@ import pytest
 
 import smartstitch.video_upscale as upscale
 from smartstitch.api import create_app
+from smartstitch.database import SQLiteStore
 
 
 def test_model_status_api_uses_selected_model(tmp_path):
@@ -70,6 +71,33 @@ def test_cluster_mode_scans_fixed_nas_folders(tmp_path):
         app.state.instance_lock.release()
 
 
+def test_upscale_jobs_join_task_records_without_duplicate_batch_children(tmp_path):
+    (tmp_path / "config").mkdir()
+    app = create_app(tmp_path)
+    try:
+        store = app.state.database_store
+        store.save("upscale_local_jobs", {"id": "local-1", "status": "completed", "source": "/tmp/local.mp4",
+                                         "model": "x2plus", "processed_frames": 10, "total_frames": 10,
+                                         "created_at": "2026-09-24T01:00:00+00:00"})
+        store.save("upscale_batches", {"id": "batch-1", "status": "running", "kind": "batch", "mode": "cluster",
+                                      "model": "animevideo", "items": [{"job_id": "child-1"}],
+                                      "processed_frames": 4, "total_frames": 20,
+                                      "created_at": 1790215200.0})
+        store.save("upscale_jobs", {"id": "child-1", "status": "running", "source": "/tmp/nas.mp4",
+                                   "created_at": 1790215201.0})
+        client = authenticated_client(app)
+        jobs = client.get("/api/v1/tools/video-upscale/jobs")
+        assert jobs.status_code == 200
+        assert {job["id"] for job in jobs.json()} == {"local-1", "batch-1"}
+        assert all("items" not in job and "segments" not in job for job in jobs.json())
+        assert client.get("/api/v1/tools/video-upscale/local-1").json()["status"] == "completed"
+        assert client.delete("/api/v1/tools/video-upscale/batch-1").status_code == 409
+        assert client.delete("/api/v1/tools/video-upscale/local-1").status_code == 200
+        assert {job["id"] for job in client.get("/api/v1/tools/video-upscale/jobs").json()} == {"batch-1"}
+    finally:
+        app.state.instance_lock.release()
+
+
 @pytest.mark.parametrize("width,height,fps", [(160, 90, 10), (120, 200, 12)])
 def test_output_geometry_and_frame_rate_follow_each_source(tmp_path, monkeypatch, width, height, fps):
     source = tmp_path / f"input-{width}x{height}-{fps}.mp4"
@@ -83,7 +111,8 @@ def test_output_geometry_and_frame_rate_follow_each_source(tmp_path, monkeypatch
     monkeypatch.setattr(upscale, "_load_model", lambda _directory, _model="x2plus": (None, "input", "output"))
     monkeypatch.setattr(upscale, "_upscale_frame", lambda frame, *_args: frame.tobytes())
 
-    manager = upscale.VideoUpscaleManager(tmp_path)
+    database = SQLiteStore(tmp_path / "upscale-jobs.db")
+    manager = upscale.VideoUpscaleManager(tmp_path, database)
     job = manager.create(str(source), str(tmp_path))
     assert (job["width"], job["height"], job["fps"]) == (width, height, f"{fps}/1")
     deadline = time.monotonic() + 10
@@ -96,3 +125,6 @@ def test_output_geometry_and_frame_rate_follow_each_source(tmp_path, monkeypatch
     after = upscale.probe_video(Path(job["output_path"]))
     for key in ("width", "height", "fps", "frames", "has_audio"):
         assert after[key] == before[key]
+    reopened = upscale.VideoUpscaleManager(tmp_path, database)
+    assert reopened.get(job["id"])["status"] == "completed"
+    assert reopened.list()[0]["id"] == job["id"]

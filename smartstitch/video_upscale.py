@@ -357,8 +357,12 @@ def mux_audio(silent: Path, source: Path, target: Path, info: dict[str, Any]) ->
 
 
 class VideoUpscaleManager:
-    def __init__(self, data_directory: Path) -> None:
+    def __init__(self, data_directory: Path, database: Any | None = None) -> None:
         self.data_directory = data_directory
+        self.database = database
+        if database is not None:
+            database.ensure_job_table("upscale_local_jobs")
+            database.mark_active_interrupted("upscale_local_jobs")
         self.lock = threading.RLock()
         self.jobs: dict[str, dict[str, Any]] = {}
         self.latest_id: str | None = None
@@ -398,6 +402,8 @@ class VideoUpscaleManager:
                    "output_path": str(target), "processed_frames": 0, "total_frames": info["frames"],
                    "created_at": _now(), "finished_at": None, "error": None}
             self.jobs[job_id] = job
+            if self.database is not None:
+                self.database.save("upscale_local_jobs", job)
             self.latest_id = self.active_id = job_id
             self.cancel_event = threading.Event()
             self.worker = threading.Thread(target=self._run, args=(job_id, info, target, self.cancel_event, model_name), daemon=True)
@@ -447,16 +453,29 @@ class VideoUpscaleManager:
     def _update(self, job_id: str, **updates: Any) -> None:
         with self.lock:
             self.jobs[job_id].update(updates)
+            if self.database is not None:
+                self.database.save("upscale_local_jobs", self.jobs[job_id])
 
     def get(self, job_id: str) -> dict[str, Any]:
         with self.lock:
-            if job_id not in self.jobs:
+            job = self.jobs.get(job_id)
+            if job is None and self.database is not None:
+                job = self.database.get("upscale_local_jobs", job_id)
+            if job is None:
                 raise KeyError(job_id)
-            return copy.deepcopy(self.jobs[job_id])
+            return copy.deepcopy(job)
 
     def latest(self) -> dict[str, Any] | None:
         with self.lock:
-            return copy.deepcopy(self.jobs[self.latest_id]) if self.latest_id else None
+            jobs = self.list()
+            return jobs[0] if jobs else None
+
+    def list(self) -> list[dict[str, Any]]:
+        with self.lock:
+            if self.database is not None:
+                return self.database.list("upscale_local_jobs")
+            return sorted((copy.deepcopy(job) for job in self.jobs.values()),
+                          key=lambda job: job["created_at"], reverse=True)
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         with self.lock:
@@ -465,7 +484,20 @@ class VideoUpscaleManager:
             self.cancel_event.set()
             _terminate(self.process)
             self.jobs[job_id]["phase"] = "cancelling"
+            if self.database is not None:
+                self.database.save("upscale_local_jobs", self.jobs[job_id])
             return copy.deepcopy(self.jobs[job_id])
+
+    def delete(self, job_id: str) -> None:
+        with self.lock:
+            job = self.get(job_id)
+            if job_id == self.active_id or job["status"] in {"queued", "running", "cancelling"}:
+                raise ValueError("运行中的超分任务不能删除")
+            self.jobs.pop(job_id, None)
+            if self.database is not None:
+                self.database.delete("upscale_local_jobs", job_id)
+            if self.latest_id == job_id:
+                self.latest_id = None
 
     def active_count(self) -> int:
         with self.lock:

@@ -10,6 +10,9 @@ from .models import (
     AssetNamingMetadata,
     NamingSourceRecord,
     PlanNamingMetadata,
+    NamingBlockConfig,
+    naming_filename_signature,
+    naming_filename_tokens,
 )
 
 
@@ -19,6 +22,85 @@ INVALID_FILENAME_CHARACTERS = re.compile(r"[<>:\"/\\|?*\x00-\x1f\x7f]")
 
 class NamingError(ValueError):
     pass
+
+
+def filename_tokens(filename: str) -> list[str]:
+    return naming_filename_tokens(filename)
+
+
+def filename_signature(tokens: list[str]) -> str:
+    return naming_filename_signature(tokens)
+
+
+def source_block_value(block: NamingBlockConfig, asset: Asset) -> str:
+    tokens = filename_tokens(asset.name)
+    signature = filename_signature(tokens)
+    variant = next((item for item in block.variants if item.signature == signature), None)
+    if variant is None:
+        raise NamingError(f"{asset.name}: 文件名格式与命名块样本不匹配")
+    if variant.token_index >= len(tokens):
+        raise NamingError(f"{asset.name}: 缺少选定的文件名片段")
+    value = tokens[variant.token_index].strip()
+    if not value or value in {"-", "_"}:
+        raise NamingError(f"{asset.name}: 选定的文件名片段为空")
+    return value
+
+
+def builder_source_blocks(config: AppConfig, category: str) -> list[NamingBlockConfig]:
+    return [
+        block for block in config.output.naming.builder.blocks
+        if block.type == "source" and block.category == category
+    ]
+
+
+def derive_builder_naming(
+    config: AppConfig, selections: dict[str, Asset | None], sequence: int,
+    naming_date: date | None = None,
+) -> PlanNamingMetadata:
+    naming_date = naming_date or date.today()
+    parts: list[str] = []
+    block_values: list[dict[str, str]] = []
+    roles: dict[str, list[str]] = {key: [] for key in ("product", "benefit", "talent", "restriction_date")}
+    for block in config.output.naming.builder.blocks:
+        asset = selections.get(block.category) if block.type == "source" else None
+        if block.type == "source":
+            if asset is None:
+                raise NamingError(f"命名块引用的素材库 {block.category} 本条没有抽中素材")
+            value = source_block_value(block, asset)
+        elif block.type == "text":
+            value = block.text
+        elif block.type == "date":
+            value = naming_date.strftime("%Y%m%d" if block.date_format == "compact" else "%m%d")
+        else:
+            value = str(sequence)
+        if block.role == "restriction_date":
+            parsed = _parse_restriction_date(value, ["%Y-%m-%d", "%Y%m%d", "%y%m%d"])
+            roles[block.role].append(parsed.isoformat())
+            if block.date_format == "compact":
+                value = parsed.strftime("%Y%m%d")
+            elif block.date_format == "mmdd":
+                value = parsed.strftime("%m%d")
+        elif block.role:
+            roles[block.role].append(value)
+        parts.append(value)
+        block_values.append({
+            "id": block.id, "type": block.type, "value": value,
+            "role": block.role, "category": block.category,
+            "asset": asset.name if asset else "",
+        })
+    for role in ("product", "benefit"):
+        if len(set(roles[role])) > 1:
+            raise NamingError(f"多个命名块给出了不同的{role}值")
+    return PlanNamingMetadata(
+        product=roles["product"][0] if roles["product"] else "",
+        benefit=roles["benefit"][0] if roles["benefit"] else "",
+        talents=list(dict.fromkeys(roles["talent"])),
+        restriction_date=min(roles["restriction_date"]) if roles["restriction_date"] else None,
+        sequence=sequence,
+        sources=[],
+        parts=parts,
+        block_values=block_values,
+    )
 
 
 def category_is_naming_source(config: AppConfig, category: str) -> bool:
@@ -65,8 +147,11 @@ def parse_asset_naming(config: AppConfig, asset: Asset) -> AssetNamingMetadata:
 
 
 def derive_plan_naming(
-    config: AppConfig, selections: dict[str, Asset | None], sequence: int
+    config: AppConfig, selections: dict[str, Asset | None], sequence: int,
+    naming_date: date | None = None,
 ) -> PlanNamingMetadata:
+    if config.output.naming.builder.enabled:
+        return derive_builder_naming(config, selections, sequence, naming_date)
     records: list[NamingSourceRecord] = []
     talents: list[str] = []
     seen_talents: set[str] = set()
@@ -118,6 +203,15 @@ def _safe_filename(value: str) -> str:
 
 
 def render_plan_filename(config: AppConfig, naming: PlanNamingMetadata) -> str:
+    if config.output.naming.builder.enabled:
+        rendered = "".join(naming.parts).strip(" .")
+        if not rendered:
+            raise NamingError("积木式成片文件名为空")
+        if INVALID_FILENAME_CHARACTERS.search(rendered):
+            raise NamingError("成片文件名包含路径分隔符或非法字符")
+        if not rendered.lower().endswith(".mp4"):
+            rendered += ".mp4"
+        return _safe_filename(rendered)
     restriction_date = (
         date.fromisoformat(naming.restriction_date).strftime(
             config.output.naming.restriction_date.output_format
