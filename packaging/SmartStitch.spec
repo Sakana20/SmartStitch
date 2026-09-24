@@ -1,10 +1,19 @@
-from pathlib import Path
 import os
+import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 
 project_root = Path(SPECPATH).parent
+sys.path.insert(0, str(project_root))
+from smartstitch.video_upscale import MODEL_CONFIGS, _model_complete, model_asset_name
+
+upscale_model_root = project_root / "build" / "upscale-models" / "models"
+for model_name in MODEL_CONFIGS:
+    package = upscale_model_root / f"{model_asset_name(model_name)}.mlpackage"
+    if not _model_complete(package, model_name):
+        raise SystemExit(f"Missing or invalid bundled {model_name} model; run packaging/prepare_upscale_models.py")
 ffmpeg_prefix = Path(
     os.environ.get(
         "SMARTSTITCH_FFMPEG_PREFIX",
@@ -33,6 +42,9 @@ def data_tree(source, destination):
 datas = [
     *data_tree(project_root / "frontend", "frontend"),
     *data_tree(project_root / "config", "config"),
+    *data_tree(upscale_model_root, "models"),
+    (str(project_root / "THIRD_PARTY_NOTICES.md"), "licenses"),
+    (str(project_root / "packaging" / "licenses" / "Real-ESRGAN-BSD-3-Clause.txt"), "licenses"),
     *copy_metadata("fastapi"),
     *copy_metadata("pydantic"),
     *copy_metadata("truststore"),

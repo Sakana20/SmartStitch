@@ -48,6 +48,7 @@ class AssetItemConfig(BaseModel):
     enabled: bool = True
     weight: float = Field(default=1, ge=0)
     tags: list[str] = Field(default_factory=list)
+    image_duration_seconds: float | None = Field(default=None, ge=0.1, le=60)
 
     _normalize_path = field_validator("path", mode="before")(normalize_path_input)
 
@@ -56,6 +57,7 @@ class SourceGroupConfig(BaseModel):
     label: str = Field(default="", max_length=100)
     description: str = Field(default="", max_length=500)
     mode: SourceMode = SourceMode.REQUIRED
+    media_type: Literal["video", "image"] = "video"
     directory: str
     extensions: list[str] = Field(default_factory=lambda: [".mp4"])
     default_weight: float = Field(default=1, ge=0)
@@ -523,6 +525,7 @@ class FeishuBaseSyncConfig(BaseModel):
     enabled: bool = False
     base_url: str = ""
     table_id: str = Field(default="", max_length=128, pattern=r"^[A-Za-z0-9_-]*$")
+    field_schema: Literal["auto", "generic", "taobao_flash"] = "auto"
     trigger: Literal["job_terminal"] = "job_terminal"
     row_scope: Literal["all_items", "succeeded_only"] = "all_items"
     write_mode: Literal["upsert"] = "upsert"
@@ -690,15 +693,29 @@ class AppConfig(BaseModel):
                 raise ValueError(
                     "通用视频库必须填写显示名称: " + ", ".join(unlabeled)
                 )
-            image_pools = sorted(
-                category
-                for category, group in self.sources.items()
-                if set(group.extensions) & IMAGE_EXTENSIONS
-            )
-            if image_pools:
-                raise ValueError(
-                    "通用视频库首期仅支持视频素材: " + ", ".join(image_pools)
-                )
+            for category, group in self.sources.items():
+                extensions = set(group.extensions)
+                directory = resolve_directory(self, group.directory).resolve()
+                if group.media_type == "image":
+                    if not 0.1 <= group.image_duration_seconds <= 60:
+                        raise ValueError(f"{category}: 图片库默认展示时长需在 0.1～60 秒之间")
+                    if not extensions or extensions - IMAGE_EXTENSIONS:
+                        raise ValueError(f"{category}: 图片库只能使用图片扩展名")
+                elif extensions & IMAGE_EXTENSIONS:
+                    raise ValueError(f"{category}: 视频库不能使用图片扩展名")
+                for item in group.items:
+                    item_path = Path(item.path).expanduser()
+                    if not item_path.is_absolute():
+                        item_path = directory / item_path
+                    if not item_path.resolve().is_relative_to(directory):
+                        raise ValueError(f"{category}: 素材条目越过素材库目录")
+                    if item_path.suffix.lower() not in extensions:
+                        raise ValueError(f"{category}: 素材条目扩展名与库类型不符")
+                    if group.media_type == "image":
+                        if Path(item.path).suffix.lower() not in IMAGE_EXTENSIONS:
+                            raise ValueError(f"{category}: 图片库条目必须是图片")
+                    elif item.image_duration_seconds is not None:
+                        raise ValueError(f"{category}: 视频库条目不能设置图片时长")
             if (
                 self.benefit_overlays.mode != SourceMode.DISABLED
                 and self.benefit_overlays.timing.scope not in {"full", "custom"}
@@ -736,6 +753,12 @@ class AppConfig(BaseModel):
                     )
             return self
 
+        if any(
+            item.image_duration_seconds is not None
+            for group in self.sources.values()
+            for item in group.items
+        ):
+            raise ValueError("逐张图片时长仅支持通用项目图片库")
         if self.output.naming.enabled:
             raise ValueError("业务动态命名目前仅支持通用视频项目")
         if self.schema_version != 2:
@@ -840,6 +863,7 @@ class Asset(BaseModel):
     path: str
     name: str
     media_type: Literal["video", "image"]
+    image_duration_seconds: float | None = None
     enabled: bool = True
     weight: float = Field(default=1, ge=0)
     tags: list[str] = Field(default_factory=list)
@@ -1029,6 +1053,8 @@ class AddPoolRequest(BaseModel):
     description: str = Field(default="", max_length=500)
     mode: SourceMode = SourceMode.REQUIRED
     default_weight: float = Field(default=1, ge=0)
+    media_type: Literal["video", "image"] = "video"
+    image_duration_seconds: float = Field(default=1.5, ge=0.1, le=60)
     client_request_id: str = Field(min_length=8, max_length=128)
     current_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
 
@@ -1038,6 +1064,7 @@ class UpdatePoolRequest(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     mode: SourceMode | None = None
     default_weight: float | None = Field(default=None, ge=0)
+    image_duration_seconds: float | None = Field(default=None, ge=0.1, le=60)
     current_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
@@ -1129,6 +1156,7 @@ class WeightUpdate(BaseModel):
     enabled: bool
     weight: float = Field(ge=0)
     tags: list[str] = Field(default_factory=list)
+    image_duration_seconds: float | None = Field(default=None, ge=0.1, le=60)
 
     _normalize_path = field_validator("path", mode="before")(normalize_path_input)
 

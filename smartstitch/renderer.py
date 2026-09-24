@@ -78,8 +78,30 @@ def _escape_filter_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
 
-def _video_filter(index: int, config: AppConfig) -> str:
+def _video_filter(index: int, config: AppConfig, asset: Asset | None = None) -> str:
     output = config.output
+    if asset is not None and asset.media_type == "image" and asset.probe and asset.probe.has_alpha:
+        if output.resize_mode == "fit_pad":
+            resize = f"scale={output.width}:{output.height}:force_original_aspect_ratio=decrease"
+            position = "x=(W-w)/2:y=(H-h)/2"
+        elif output.resize_mode == "fill_crop":
+            resize = (
+                f"scale={output.width}:{output.height}:force_original_aspect_ratio=increase,"
+                f"crop={output.width}:{output.height}"
+            )
+            position = "x=0:y=0"
+        else:
+            resize = f"scale={output.width}:{output.height}"
+            position = "x=0:y=0"
+        return (
+            f"color=c={output.background_color}:s={output.width}x{output.height}:r={output.fps},"
+            f"format=rgba[image_bg_{index}];"
+            f"[{index}:v]{resize},format=rgba[image_fg_{index}];"
+            f"[image_bg_{index}][image_fg_{index}]"
+            f"overlay={position}:shortest=1:format=auto,"
+            f"fps={output.fps},setsar=1,format={output.pixel_format},"
+            f"setpts=PTS-STARTPTS[v{index}]"
+        )
     if output.resize_mode == "fit_pad":
         resize = (
             f"scale={output.width}:{output.height}:force_original_aspect_ratio=decrease,"
@@ -215,7 +237,7 @@ def build_ffmpeg_command(
 
     filters: list[str] = []
     for index, (_, asset) in enumerate(timeline):
-        filters.append(_video_filter(index, config))
+        filters.append(_video_filter(index, config, asset))
         filters.append(_audio_filter(index, asset, config))
     concat_inputs = "".join(f"[v{index}][a{index}]" for index in range(len(timeline)))
     filters.append(f"{concat_inputs}concat=n={len(timeline)}:v=1:a=1[basev][outa]")

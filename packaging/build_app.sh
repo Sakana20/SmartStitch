@@ -24,6 +24,7 @@ cd "${PROJECT_ROOT}"
 export SMARTSTITCH_BUILD_VERSION="${VERSION}"
 export SMARTSTITCH_FFMPEG_PREFIX="${SMARTSTITCH_FFMPEG_PREFIX:-${PROJECT_ROOT}/build/ffmpeg-arm64}"
 export PYINSTALLER_CONFIG_DIR="${PROJECT_ROOT}/build/pyinstaller-cache"
+python packaging/prepare_upscale_models.py
 python -m PyInstaller --clean --noconfirm packaging/SmartStitch.spec
 
 APP="${PROJECT_ROOT}/dist/SmartStitch.app"
@@ -31,6 +32,15 @@ test -d "${APP}"
 file "${APP}/Contents/MacOS/SmartStitch" | grep -q "arm64"
 test -x "${APP}/Contents/Resources/bin/ffmpeg"
 test -x "${APP}/Contents/Resources/bin/ffprobe"
+test -f "${APP}/Contents/Resources/licenses/THIRD_PARTY_NOTICES.md"
+test -f "${APP}/Contents/Resources/licenses/Real-ESRGAN-BSD-3-Clause.txt"
+for model_name in x2plus animevideo; do
+  model_prefix="${APP}/Contents/Resources/models/RealESRGAN_${model_name}_522_fp16"
+  test -f "${model_prefix}.mlpackage/Manifest.json"
+  test -f "${model_prefix}.mlpackage/Data/com.apple.CoreML/model.mlmodel"
+  test -f "${model_prefix}.mlpackage/Data/com.apple.CoreML/weights/weight.bin"
+  test -f "${model_prefix}.sha256"
+done
 ICON_FILE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "${APP}/Contents/Info.plist")"
 test -n "${ICON_FILE}"
 test -f "${APP}/Contents/Resources/${ICON_FILE}"

@@ -541,9 +541,15 @@ class LibraryService:
                 label=request.label.strip(),
                 description=request.description.strip(),
                 mode=request.mode,
+                media_type=request.media_type,
                 directory=str(relative),
-                extensions=[".mp4", ".mov", ".mkv"],
+                extensions=(
+                    [".png", ".jpg", ".jpeg", ".webp", ".bmp"]
+                    if request.media_type == "image"
+                    else [".mp4", ".mov", ".mkv"]
+                ),
                 default_weight=request.default_weight,
+                image_duration_seconds=request.image_duration_seconds,
                 items=[],
             )
             updated.timeline.append(pool_id)
@@ -593,6 +599,10 @@ class LibraryService:
                 group.mode = request.mode
             if request.default_weight is not None:
                 group.default_weight = request.default_weight
+            if request.image_duration_seconds is not None:
+                if group.media_type != "image":
+                    raise LibraryError("仅图片库可设置默认展示时长")
+                group.image_duration_seconds = request.image_duration_seconds
             self.config_store.save_config(config_id, updated)
             return self._pool_result(updated, root, pool_id, idempotent=False)
 
@@ -855,6 +865,8 @@ class LibraryService:
         for category in config.timeline:
             if category not in config.sources:
                 continue
+            if config.workflow_type == "generic" and config.sources[category].media_type == "image":
+                continue
             target = self.resolve_slice_target(config_id, category)
             number = category.split("_", 1)[1] if is_benefit_category(category) else ""
             group_label = config.sources[category].label.strip()
@@ -896,6 +908,8 @@ class LibraryService:
             or category in {"pre_roll", "hook", "ending", "end_card"}
             or is_benefit_category(category)
         ):
+            if config.workflow_type == "generic" and config.sources[category].media_type == "image":
+                raise LibraryError("图片库不能作为视频切片入库目标")
             unresolved_target = resolve_directory(
                 config, config.sources[category].directory
             )

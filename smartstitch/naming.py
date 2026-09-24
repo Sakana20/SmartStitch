@@ -23,7 +23,9 @@ class NamingError(ValueError):
 
 def category_is_naming_source(config: AppConfig, category: str) -> bool:
     patterns = config.output.naming.source_metadata.categories
-    return any(pattern == "pool_*" or pattern == category for pattern in patterns)
+    return category in patterns or (
+        "pool_*" in patterns and config.sources[category].media_type == "video"
+    )
 
 
 def _parse_restriction_date(value: str, formats: list[str]) -> date:

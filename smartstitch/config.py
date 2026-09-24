@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from .models import AppConfig, AssetItemConfig, ConfigUpdateRequest, WeightUpdate
+from .models import AppConfig, AssetItemConfig, ConfigUpdateRequest, WeightUpdate, resolve_directory
 
 
 class ConfigError(ValueError):
@@ -260,12 +260,30 @@ class ConfigStore:
                     group = config.sources[category]
                 else:
                     raise ConfigError(f"未知素材类别: {category}")
+                if config.workflow_type != "generic" and any(
+                    item.image_duration_seconds is not None for item in category_updates
+                ):
+                    raise ConfigError("逐张图片时长仅支持通用项目图片库")
+                if config.workflow_type == "generic":
+                    allowed = set(group.extensions)
+                    directory = resolve_directory(config, group.directory).resolve()
+                    for item in category_updates:
+                        if Path(item.path).suffix.lower() not in allowed:
+                            raise ConfigError(f"{category}: 素材类型与库类型不符")
+                        item_path = Path(item.path).expanduser()
+                        if not item_path.is_absolute():
+                            item_path = directory / item_path
+                        if not item_path.resolve().is_relative_to(directory):
+                            raise ConfigError(f"{category}: 素材路径越过视频库目录")
+                        if group.media_type == "video" and item.image_duration_seconds is not None:
+                            raise ConfigError(f"{category}: 视频库不能设置图片时长")
                 group.items = [
                     AssetItemConfig(
                         path=item.path,
                         enabled=item.enabled,
                         weight=item.weight,
                         tags=item.tags,
+                        image_duration_seconds=item.image_duration_seconds,
                     )
                     for item in category_updates
                 ]

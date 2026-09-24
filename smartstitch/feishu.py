@@ -778,7 +778,11 @@ class FeishuSyncManager:
         items = list(job.get("items") or [])
         if target.get("row_scope") == "succeeded_only":
             items = [item for item in items if item.get("status") == "succeeded"]
-        is_taobao_flash = job.get("workflow_type") == "taobao_flash"
+        sync_config = job.get("feishu_base_sync") or {}
+        field_schema = sync_config.get("field_schema", "auto")
+        if field_schema == "auto":
+            field_schema = job.get("workflow_type", "generic")
+        is_taobao_flash = field_schema == "taobao_flash"
         if is_taobao_flash:
             client.ensure_taobao_flash_sync_schema(base_token, table_id)
         else:

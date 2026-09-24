@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.request import urlopen
 
+from .runtime import resource_root
+
 
 MODEL_CONFIGS = {
     "x2plus": {"scale": 2, "sha256": "4acf0afa2828e82b88e1d712b4b7604977698c99aa1505276c943922be6b3938"},
@@ -56,22 +58,35 @@ def model_asset_name(model_name: str) -> str:
     return f"RealESRGAN_{model_name}_522_fp16"
 
 
+def _model_complete(path: Path, model_name: str, *, require_marker: bool = True) -> bool:
+    if not all((path / part).is_file() for part in (
+        "Manifest.json", "Data/com.apple.CoreML/model.mlmodel",
+        "Data/com.apple.CoreML/weights/weight.bin",
+    )):
+        return False
+    marker = path.parent / f"{model_asset_name(model_name)}.sha256"
+    return not require_marker or (marker.is_file() and marker.read_text().strip() == model_config(model_name)["sha256"])
+
+
 def model_directory(data_directory: Path, model_name: str = "x2plus") -> Path:
     override = os.environ.get("SMARTSTITCH_UPSCALE_MODEL", "").strip()
-    return Path(override).expanduser().resolve() if override and model_name == "x2plus" else data_directory / "models" / f"{model_asset_name(model_name)}.mlpackage"
+    if override and model_name == "x2plus":
+        return Path(override).expanduser().resolve()
+    bundled = resource_root() / "models" / f"{model_asset_name(model_name)}.mlpackage"
+    if _model_complete(bundled, model_name):
+        return bundled
+    return data_directory / "models" / f"{model_asset_name(model_name)}.mlpackage"
 
 
 def model_status(data_directory: Path, model_name: str = "x2plus") -> dict[str, Any]:
     config = model_config(model_name)
     path = model_directory(data_directory, model_name)
-    available = (path / "Manifest.json").is_file() and (
-        path / "Data/com.apple.CoreML/model.mlmodel"
-    ).is_file()
-    marker = path.parent / f"{model_asset_name(model_name)}.sha256"
-    if not (os.environ.get("SMARTSTITCH_UPSCALE_MODEL") and model_name == "x2plus"):
-        available = available and marker.is_file() and marker.read_text().strip() == config["sha256"]
+    override = bool(os.environ.get("SMARTSTITCH_UPSCALE_MODEL") and model_name == "x2plus")
+    available = _model_complete(path, model_name, require_marker=not override)
+    bundled = path == resource_root() / "models" / f"{model_asset_name(model_name)}.mlpackage"
     return {"available": available, "model": model_name, "scale": config["scale"], "model_sha256": config["sha256"],
-            "platform_supported": platform.system() == "Darwin" and platform.machine() == "arm64"}
+            "platform_supported": platform.system() == "Darwin" and platform.machine() == "arm64",
+            "source": ("bundled" if bundled else "override" if override else "installed") if available else "missing"}
 
 
 def prepare_model(data_directory: Path, zip_source: Path | None = None, *, model_name: str = "x2plus") -> dict[str, Any]:
@@ -179,7 +194,7 @@ def _load_model(data_directory: Path, model_name: str = "x2plus"):
     except ImportError as exc:
         raise ValueError("未安装 coremltools，无法运行超分") from exc
     if not model_status(data_directory, model_name)["available"]:
-        raise ValueError("超分模型尚未准备，请先下载模型")
+        raise ValueError("超分模型尚未准备，请先安装模型")
     model = ct.models.MLModel(str(model_directory(data_directory, model_name)), compute_units=ct.ComputeUnit.ALL)
     spec = model.get_spec()
     scale = model_config(model_name)["scale"]

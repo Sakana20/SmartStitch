@@ -14,6 +14,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
+from PIL import Image
+
 from .naming import NamingError, category_is_naming_source, parse_asset_naming
 from .models import (
     AppConfig,
@@ -29,6 +31,7 @@ from .models import (
 from .probe_cache import CachedProbe, MediaProbeCache, ProbeFingerprint
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
 VISUAL_BORDER_IMAGE_EXTENSIONS = {".png", ".webp"}
 VISUAL_BORDER_EXTENSIONS = VISUAL_BORDER_IMAGE_EXTENSIONS | {".mov"}
 VISUAL_BORDER_VIDEO_CODECS = {"qtrle", "prores"}
@@ -78,6 +81,12 @@ def probe_media(
     timeout_seconds: float | None = None,
 ) -> MediaProbe:
     if path.suffix.lower() in IMAGE_EXTENSIONS:
+        try:
+            with Image.open(path) as picture:
+                if getattr(picture, "n_frames", 1) != 1:
+                    raise ValueError("图片库仅支持静态图片")
+        except OSError as exc:
+            raise ValueError(f"无法读取图片: {exc}") from exc
         command = [
             "ffprobe",
             "-v",
@@ -163,7 +172,7 @@ def probe_media(
 
 def _probe_profile(path: Path, image_duration: float) -> str:
     if path.suffix.lower() in IMAGE_EXTENSIONS:
-        return f"image-v1:{image_duration:.9g}"
+        return f"image-v2:{image_duration:.9g}"
     return "video-v1"
 
 
@@ -469,7 +478,10 @@ def _prepare_group(config: AppConfig, group: SourceGroupConfig) -> _PreparedGrou
     # A deleted file is no longer a scan candidate: keeping it here would turn a
     # normal library deletion into a permanent "文件不存在 / 异常" row. Existing
     # but unreadable files remain candidates and are still reported as damaged.
-    existing_explicit = {path for path in explicit if path.is_file()}
+    existing_explicit = {
+        path for path in explicit
+        if path.is_file() and path.suffix.lower() in set(group.extensions)
+    }
     candidates = sorted(
         set(discovered) | existing_explicit, key=lambda item: str(item).casefold()
     )
@@ -574,6 +586,9 @@ def scan_group(
             path=str(path),
             name=path.name,
             media_type="image" if path.suffix.lower() in IMAGE_EXTENSIONS else "video",
+            image_duration_seconds=(
+                item.image_duration_seconds if item is not None else None
+            ),
             enabled=enabled,
             weight=weight,
             tags=tags,
@@ -583,8 +598,13 @@ def scan_group(
             size_bytes=stat.st_size,
             modified_at=stat.st_mtime,
         )
+        image_duration = (
+            item.image_duration_seconds
+            if item is not None and item.image_duration_seconds is not None
+            else group.image_duration_seconds
+        )
         result = (
-            probe_session.get(path, group.image_duration_seconds)
+            probe_session.get(path, image_duration)
             if probe_session is not None
             else None
         )
@@ -594,10 +614,15 @@ def scan_group(
             elif result is not None:
                 raise ValueError(result.error or "ffprobe 无法读取媒体")
             else:
-                asset.probe = probe_media(path, group.image_duration_seconds)
+                asset.probe = probe_media(path, image_duration)
         except Exception as exc:
             asset.valid = False
             asset.error = str(exc)
+        if asset.valid and asset.media_type == "image" and asset.probe is not None:
+            frames = max(1, round(image_duration * config.output.fps))
+            asset.probe = asset.probe.model_copy(
+                update={"duration": frames / config.output.fps}
+            )
         assets.append(asset)
 
     selectable = [asset for asset in assets if asset.selectable]
@@ -882,7 +907,15 @@ def scan_config(
         ],
     )
     probe_session.prefetch(
-        (path, group.image_duration_seconds)
+        (
+            path,
+            (
+                prepared_groups[category].explicit[path].image_duration_seconds
+                if path in prepared_groups[category].explicit
+                and prepared_groups[category].explicit[path].image_duration_seconds is not None
+                else group.image_duration_seconds
+            ),
+        )
         for category, group in config.sources.items()
         if group.mode != SourceMode.DISABLED
         for path in prepared_groups[category].candidates
@@ -902,6 +935,24 @@ def scan_config(
             label = group.label.strip()
             name = f"{label}（{category}）" if label else category
             warnings.append(f"{name}: {len(invalid)} 个文件不可用")
+        if config.workflow_type == "generic" and group.mode != SourceMode.DISABLED:
+            directory = prepared_groups[category].directory
+            if directory.is_dir():
+                opposite = VIDEO_EXTENSIONS if group.media_type == "image" else IMAGE_EXTENSIONS
+                try:
+                    iterator = directory.rglob("*") if config.scanner.recursive else directory.iterdir()
+                    ignored_count = sum(
+                        path.is_file() and path.suffix.lower() in opposite
+                        and not path.name.startswith(".")
+                        for path in iterator
+                    )
+                except OSError:
+                    ignored_count = 0
+                if ignored_count:
+                    warnings.append(
+                        f"{group.label or category}（{category}）: "
+                        f"忽略 {ignored_count} 个类型不符的素材"
+                    )
 
     if config.workflow_type == "generic" and config.output.naming.enabled:
         naming_categories = [

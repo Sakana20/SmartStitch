@@ -24,6 +24,8 @@ ln -s /Applications "${STAGING}/Applications"
 mkdir -p "${STAGING}/Open Source Licenses/sources"
 cp "${PROJECT_ROOT}/THIRD_PARTY_NOTICES.md" \
   "${STAGING}/Open Source Licenses/README.md"
+cp "${PROJECT_ROOT}/packaging/licenses/Real-ESRGAN-BSD-3-Clause.txt" \
+  "${STAGING}/Open Source Licenses/"
 cp "${PROJECT_ROOT}/packaging/build_ffmpeg.sh" \
   "${STAGING}/Open Source Licenses/"
 cp "${PROJECT_ROOT}/packaging/pkg-config-x264" \

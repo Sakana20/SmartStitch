@@ -407,9 +407,14 @@ def test_sync_manager_upserts_and_verifies_rows(tmp_path):
     assert fake_client.uploaded == ["/output/demo-1.mp4"]
 
 
-def test_taobao_flash_sync_uses_existing_table_schema_and_daily_sequence(tmp_path):
+@pytest.mark.parametrize("workflow_type", ["taobao_flash", "generic"])
+def test_taobao_flash_sync_uses_existing_table_schema_and_daily_sequence(
+    tmp_path, workflow_type
+):
     job = make_job()
-    job["workflow_type"] = "taobao_flash"
+    job["workflow_type"] = workflow_type
+    if workflow_type == "generic":
+        job["feishu_base_sync"]["field_schema"] = "taobao_flash"
     fake_client = FakeFeishuBaseClient()
     existing_timestamp = FeishuSyncManager._timestamp_ms(job["finished_at"])
     fake_client.records.append(

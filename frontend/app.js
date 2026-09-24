@@ -753,6 +753,17 @@ function mountClusterControlTool(container) {
   let disposed = false;
   let timer = null;
   let updating = false;
+  let discovered = [];
+  let searched = false;
+  let clusterStatus = null;
+  let connecting = false;
+  let disconnecting = false;
+  let draggingNodes = false;
+  let lastSelectedUrl = null;
+  let lastSelectedNodeId = null;
+  const selectedUrls = new Set();
+  const selectedNodeIds = new Set();
+  let cleanupMarquee = null;
   const form = document.createElement("div");
   form.className = "cluster-gate";
   form.innerHTML = `<p>正在加载集群控制…</p><small class="cluster-gate-error hidden" role="alert"></small>`;
@@ -767,15 +778,26 @@ function mountClusterControlTool(container) {
       panel.className = "cluster-control-tool";
       panel.innerHTML = `
         <p class="toolbox-intro">本机 App 作为固定主控，统一规划与派发。每台工作机仍使用自己的本机数据库；NAS 只需挂载同一份 SmartStitch 共享目录。</p>
+        <section class="cluster-topology" data-cluster-topology aria-label="SmartStitch 集群拓扑">
+          <div class="cluster-topology-toolbar"><div><h3>集群拓扑</h3><p>空白处拖动重新框选，按住 Shift 可追加；选中后批量连接或断开。</p></div>
+            <div class="actions"><button class="button secondary small" type="button" data-cluster-discover>搜索局域网</button><button class="button secondary small" type="button" data-cluster-select-all>全选待连接</button><button class="button secondary small" type="button" data-cluster-select-connected>全选已连接</button><button class="button primary small" type="button" data-cluster-connect disabled>连接选中工作机（0）</button><button class="button secondary small" type="button" data-cluster-disconnect disabled>断开选中工作机（0）</button></div>
+          </div>
+          <div class="cluster-topology-canvas" data-cluster-canvas>
+            <div class="cluster-topology-master"><span class="cluster-topology-icon" aria-hidden="true"></span><span><strong>本机主控</strong><small data-cluster-master-name>正在加载…</small></span></div>
+            <div class="cluster-topology-stem" aria-hidden="true"></div>
+            <div class="cluster-topology-nodes" data-cluster-topology-nodes></div>
+          </div>
+          <p class="cluster-topology-summary" data-cluster-summary aria-live="polite"></p>
+        </section>
         <div class="cluster-control-grid">
           <section class="cluster-control-card"><h3>本机作为工作机</h3><div data-cluster-worker></div></section>
-          <section class="cluster-control-card"><h3>连接工作机</h3>
+          <section class="cluster-control-card"><h3>手动连接工作机</h3>
             <form data-cluster-node-form class="cluster-control-form">
               <label class="field"><span>工作机地址</span><input name="url" required placeholder="http://剪辑室-Mac.local:端口"></label>
               <label class="field"><span>工作机令牌（可选）</span><input name="token" type="password" autocomplete="one-time-code" placeholder="对方开启令牌保护时填写"></label>
               <p class="cluster-control-hint">局域网工作机默认无需令牌；如果对方开启了令牌保护，再粘贴其显示的令牌。</p>
-              <div class="actions"><button class="button secondary small" type="button" data-cluster-discover>搜索局域网</button><button class="button primary small" type="submit">连接工作机</button></div>
-            </form><div data-cluster-discovered></div><div data-cluster-nodes></div>
+              <div class="actions"><button class="button primary small" type="submit">连接工作机</button></div>
+            </form>
           </section>
         </div>
         <section class="cluster-control-card"><h3>新建集群渲染</h3>
@@ -800,12 +822,88 @@ function mountClusterControlTool(container) {
         box.textContent = cause.message || String(cause);
         box.classList.remove("hidden");
       };
+      const clearError = () => panel.querySelector("[data-cluster-error]").classList.add("hidden");
+      const nodeLabel = node => node.display_name ? `${node.display_name} · ${node.name}` : node.name;
+      const availableNodes = () => {
+        const connectedUrls = new Set((clusterStatus?.nodes || []).map(node => node.url.replace(/\/$/, "")));
+        const ownId = clusterStatus?.worker?.node_id?.slice(0, 8);
+        return discovered.filter(node => !connectedUrls.has(node.url.replace(/\/$/, "")) && !(ownId && node.name.includes(ownId)));
+      };
+      const updateSelection = () => {
+        panel.querySelectorAll("[data-cluster-select-url]").forEach(node => {
+          const active = selectedUrls.has(node.dataset.clusterSelectUrl);
+          node.classList.toggle("is-selected", active);
+          node.setAttribute("aria-pressed", String(active));
+        });
+        panel.querySelectorAll("[data-cluster-select-node]").forEach(node => {
+          const active = selectedNodeIds.has(node.dataset.clusterSelectNode);
+          node.classList.toggle("is-selected", active);
+          node.querySelector("[data-cluster-node-choice]").setAttribute("aria-pressed", String(active));
+        });
+        const pendingCount = availableNodes().filter(node => selectedUrls.has(node.url)).length;
+        const connectedCount = (clusterStatus?.nodes || []).filter(node => selectedNodeIds.has(node.node_id)).length;
+        const busy = connecting || disconnecting;
+        const connect = panel.querySelector("[data-cluster-connect]");
+        connect.textContent = connecting ? "正在连接…" : `连接选中工作机（${pendingCount}）`;
+        connect.disabled = busy || pendingCount === 0;
+        const disconnect = panel.querySelector("[data-cluster-disconnect]");
+        disconnect.textContent = disconnecting ? "正在断开…" : `断开选中工作机（${connectedCount}）`;
+        disconnect.disabled = busy || connectedCount === 0;
+        const selectAll = panel.querySelector("[data-cluster-select-all]");
+        selectAll.disabled = busy || availableNodes().length === 0;
+        selectAll.textContent = availableNodes().length > 0 && pendingCount === availableNodes().length ? "取消全选" : "全选待连接";
+        const selectConnected = panel.querySelector("[data-cluster-select-connected]");
+        selectConnected.disabled = busy || !clusterStatus?.nodes?.length;
+        selectConnected.textContent = clusterStatus?.nodes?.length && connectedCount === clusterStatus.nodes.length ? "取消全选已连接" : "全选已连接";
+        panel.querySelector("[data-cluster-summary]").textContent = `已连接 ${clusterStatus?.nodes?.length || 0} 台 · 待连接 ${availableNodes().length} 台 · 已选待连接 ${pendingCount} 台 · 已选已连接 ${connectedCount} 台`;
+      };
+      const renderTopology = () => {
+        if (!clusterStatus || draggingNodes) return;
+        const own = clusterStatus.worker;
+        panel.querySelector("[data-cluster-master-name]").textContent = own.display_name ? `${own.display_name} · ${own.name}` : own.name;
+        const connected = clusterStatus.nodes.map(node => `
+          <div class="cluster-topology-node is-connected ${node.online ? "is-online" : "is-offline"} ${selectedNodeIds.has(node.node_id) ? "is-selected" : ""}" data-cluster-select-node="${escapeHtml(node.node_id)}">
+            <span class="cluster-topology-link" aria-hidden="true"></span>
+            <button class="cluster-topology-choice" type="button" data-cluster-node-choice aria-pressed="${selectedNodeIds.has(node.node_id)}" aria-label="选择 ${escapeHtml(nodeLabel(node))}">
+              <span class="cluster-topology-icon" aria-hidden="true"></span>
+              <strong>${escapeHtml(nodeLabel(node))}</strong><small>${escapeHtml(node.url)}</small>
+              <span class="cluster-topology-state">${node.online ? `已连接 · ${node.active}/${node.capacity} 正在渲染` : "已连接 · 离线"}</span>
+            </button>
+            <button class="cluster-topology-remove" type="button" data-cluster-remove="${escapeHtml(node.node_id)}" aria-label="移除 ${escapeHtml(nodeLabel(node))}">移除</button>
+          </div>`);
+        const pending = availableNodes();
+        const selectable = pending.map(node => `
+          <button class="cluster-topology-node is-discovered ${selectedUrls.has(node.url) ? "is-selected" : ""}" type="button" data-cluster-select-url="${escapeHtml(node.url)}" aria-pressed="${selectedUrls.has(node.url)}">
+            <span class="cluster-topology-link" aria-hidden="true"></span><span class="cluster-topology-icon" aria-hidden="true"></span>
+            <strong>${escapeHtml(node.name)}</strong><small>${escapeHtml(node.url)}</small>
+            <span class="cluster-topology-state">待连接</span>
+          </button>`);
+        panel.querySelector("[data-cluster-topology-nodes]").innerHTML = [...connected, ...selectable].join("") || `<p class="cluster-topology-empty">${searched ? "未发现其他工作机。可用下方地址手动连接。" : "点击“搜索局域网”发现工作机。"}</p>`;
+        updateSelection();
+      };
+      const searchWorkers = async () => {
+        const button = panel.querySelector("[data-cluster-discover]");
+        button.disabled = true;
+        button.textContent = "正在搜索…";
+        try {
+          const found = await clusterApi("/discover");
+          discovered = [...new Map(found.map(node => [node.url, node])).values()];
+          searched = true;
+          const urls = new Set(discovered.map(node => node.url));
+          for (const url of selectedUrls) if (!urls.has(url)) selectedUrls.delete(url);
+          renderTopology();
+        } finally {
+          button.disabled = false;
+          button.textContent = "搜索局域网";
+        }
+      };
       const refresh = async () => {
         if (disposed || updating) return;
         updating = true;
         try {
           const data = await clusterApi("/status");
           if (disposed) return;
+          clusterStatus = data;
           const worker = data.worker;
           const workerHost = worker.name.endsWith(".local") ? worker.name : `${worker.name}.local`;
           panel.querySelector("[data-cluster-worker]").innerHTML = `
@@ -816,18 +914,107 @@ function mountClusterControlTool(container) {
             ${worker.token_required ? `<p>工作机令牌：<button class="cluster-token" type="button" data-cluster-copy-token title="点击复制令牌" aria-label="复制工作机令牌">${escapeHtml(worker.token)}</button></p>` : ""}
             <button class="button secondary small" type="button" data-cluster-token-toggle="${worker.token_required ? "off" : "on"}">${worker.token_required ? "关闭令牌保护" : "开启令牌保护"}</button>
             <button class="button secondary small" type="button" data-cluster-worker-toggle="${worker.enabled ? "stop" : "start"}">${worker.enabled ? "下线本机工作机" : "启用本机工作机"}</button>`;
-          panel.querySelector("[data-cluster-nodes]").innerHTML = data.nodes.length ? data.nodes.map(node => `
-            <div class="cluster-node-row"><div><strong>${node.display_name ? `${escapeHtml(node.display_name)} · ` : ""}${escapeHtml(node.name)}</strong><small>${escapeHtml(node.url)} · ${node.online ? `在线 · ${node.active}/${node.capacity} 正在渲染` : "离线"}</small></div><button class="text-btn" type="button" data-cluster-remove="${escapeHtml(node.node_id)}">移除</button></div>`).join("") : "<p>尚未连接工作机。</p>";
+          for (const node of data.nodes) selectedUrls.delete(node.url);
+          const connectedIds = new Set(data.nodes.map(node => node.node_id));
+          for (const id of selectedNodeIds) if (!connectedIds.has(id)) selectedNodeIds.delete(id);
+          renderTopology();
           panel.querySelector("[data-cluster-jobs]").innerHTML = data.jobs.length ? data.jobs.map(job => `
             <div class="cluster-job-row"><div><strong>${escapeHtml(job.config_name)}</strong><small>${escapeHtml(job.status)} · 成功 ${job.success_count}/${job.count} · 失败 ${job.failure_count} · ${escapeHtml(job.created_at)}</small></div><div class="actions"><button class="text-btn" type="button" data-cluster-detail="${escapeHtml(job.id)}">查看任务</button>${["queued", "running"].includes(job.status) ? `<button class="text-btn" type="button" data-cluster-cancel="${escapeHtml(job.id)}">取消</button>` : `<button class="text-btn" type="button" data-cluster-delete="${escapeHtml(job.id)}">删除记录</button>`}</div></div>`).join("") : "<p>暂无集群任务。</p>";
         } catch (cause) { if (!disposed) showError(cause); }
         finally { updating = false; }
       };
       panel.addEventListener("click", async event => {
-        const action = event.target.closest("[data-cluster-copy-token], [data-cluster-token-toggle], [data-cluster-worker-toggle], [data-cluster-discover], [data-cluster-remove], [data-cluster-cancel], [data-cluster-delete], [data-cluster-detail], [data-cluster-found]");
+        const action = event.target.closest("[data-cluster-copy-token], [data-cluster-token-toggle], [data-cluster-worker-toggle], [data-cluster-discover], [data-cluster-select-all], [data-cluster-select-connected], [data-cluster-connect], [data-cluster-disconnect], [data-cluster-select-url], [data-cluster-select-node], [data-cluster-remove], [data-cluster-cancel], [data-cluster-delete], [data-cluster-detail]");
         if (!action) return;
         try {
-          if (action.hasAttribute("data-cluster-copy-token")) {
+          if (action.hasAttribute("data-cluster-select-url") || action.hasAttribute("data-cluster-select-node")) {
+            if (connecting || disconnecting) return;
+            if (action.dataset.clusterIgnoreClick === "true") { delete action.dataset.clusterIgnoreClick; return; }
+            if (action.hasAttribute("data-cluster-select-node")) {
+              const nodes = clusterStatus?.nodes || [];
+              const id = action.dataset.clusterSelectNode;
+              const index = nodes.findIndex(node => node.node_id === id);
+              if (event.shiftKey && lastSelectedNodeId && index >= 0) {
+                const previous = nodes.findIndex(node => node.node_id === lastSelectedNodeId);
+                if (previous >= 0) for (const node of nodes.slice(Math.min(previous, index), Math.max(previous, index) + 1)) selectedNodeIds.add(node.node_id);
+              } else if (selectedNodeIds.has(id)) selectedNodeIds.delete(id);
+              else selectedNodeIds.add(id);
+              lastSelectedNodeId = id;
+              updateSelection();
+              return;
+            }
+            const nodes = availableNodes();
+            const url = action.dataset.clusterSelectUrl;
+            const index = nodes.findIndex(node => node.url === url);
+            if (event.shiftKey && lastSelectedUrl && index >= 0) {
+              const previous = nodes.findIndex(node => node.url === lastSelectedUrl);
+              if (previous >= 0) for (const node of nodes.slice(Math.min(previous, index), Math.max(previous, index) + 1)) selectedUrls.add(node.url);
+            } else if (selectedUrls.has(url)) selectedUrls.delete(url);
+            else selectedUrls.add(url);
+            lastSelectedUrl = url;
+            updateSelection();
+            return;
+          } else if (action.hasAttribute("data-cluster-select-all")) {
+            if (connecting || disconnecting) return;
+            const nodes = availableNodes();
+            const allSelected = nodes.every(node => selectedUrls.has(node.url));
+            nodes.forEach(node => allSelected ? selectedUrls.delete(node.url) : selectedUrls.add(node.url));
+            updateSelection();
+            return;
+          } else if (action.hasAttribute("data-cluster-select-connected")) {
+            if (connecting || disconnecting) return;
+            const nodes = clusterStatus?.nodes || [];
+            const allSelected = nodes.every(node => selectedNodeIds.has(node.node_id));
+            nodes.forEach(node => allSelected ? selectedNodeIds.delete(node.node_id) : selectedNodeIds.add(node.node_id));
+            updateSelection();
+            return;
+          } else if (action.hasAttribute("data-cluster-connect")) {
+            const nodes = availableNodes().filter(node => selectedUrls.has(node.url));
+            if (!nodes.length || connecting || disconnecting) return;
+            connecting = true;
+            updateSelection();
+            const failures = [];
+            let successes = 0;
+            try {
+              for (const node of nodes) {
+                try {
+                  await clusterApi("/nodes", { method: "POST", body: JSON.stringify({ url: node.url, token: "" }) });
+                  selectedUrls.delete(node.url);
+                  successes++;
+                } catch (cause) { failures.push({ node, reason: cause.message || String(cause) }); }
+              }
+              await refresh();
+              if (successes) toast(`已连接 ${successes} 台工作机`);
+              if (failures.length) {
+                const nodeForm = panel.querySelector("[data-cluster-node-form]");
+                nodeForm.querySelector('[name="url"]').value = failures[0].node.url;
+                showError(new Error(`${failures.length} 台连接失败：${failures.map(({ node, reason }) => `${node.name}：${reason}`).join("；")}。已将第一台失败的地址填入手动连接。`));
+              }
+              else clearError();
+            } finally { connecting = false; updateSelection(); }
+            return;
+          } else if (action.hasAttribute("data-cluster-disconnect")) {
+            const nodes = (clusterStatus?.nodes || []).filter(node => selectedNodeIds.has(node.node_id));
+            if (!nodes.length || connecting || disconnecting) return;
+            disconnecting = true;
+            updateSelection();
+            const failures = [];
+            let successes = 0;
+            try {
+              for (const node of nodes) {
+                try {
+                  await clusterApi(`/nodes/${encodeURIComponent(node.node_id)}`, { method: "DELETE" });
+                  selectedNodeIds.delete(node.node_id);
+                  successes++;
+                } catch (cause) { failures.push(`${nodeLabel(node)}：${cause.message || cause}`); }
+              }
+              await refresh();
+              if (successes) toast(`已断开 ${successes} 台工作机`);
+              if (failures.length) showError(new Error(`${failures.length} 台断开失败：${failures.join("；")}`));
+              else clearError();
+            } finally { disconnecting = false; updateSelection(); }
+            return;
+          } else if (action.hasAttribute("data-cluster-copy-token")) {
             const value = action.textContent.trim();
             try {
               if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
@@ -850,25 +1037,10 @@ function mountClusterControlTool(container) {
           } else if (action.dataset.clusterWorkerToggle) {
             await clusterApi(`/worker/${action.dataset.clusterWorkerToggle}`, { method: "POST" });
           } else if (action.hasAttribute("data-cluster-discover")) {
-            action.disabled = true;
-            const found = await clusterApi("/discover");
-            panel.querySelector("[data-cluster-discovered]").innerHTML = found.length ? found.map(node => `<button class="text-btn cluster-found" type="button" data-cluster-found="${escapeHtml(node.url)}">连接 ${escapeHtml(node.name)} · ${escapeHtml(node.url)}</button>`).join("") : "<p>没有发现工作机，可手动填写地址。</p>";
-            action.disabled = false;
-          } else if (action.dataset.clusterFound) {
-            const nodeForm = panel.querySelector("[data-cluster-node-form]");
-            nodeForm.querySelector('[name="url"]').value = action.dataset.clusterFound;
-            const workerToken = nodeForm.querySelector('[name="token"]').value.trim();
-            try {
-              await clusterApi("/nodes", { method: "POST", body: JSON.stringify({ url: action.dataset.clusterFound, token: workerToken }) });
-              nodeForm.reset();
-              panel.querySelector("[data-cluster-error]").classList.add("hidden");
-              toast("工作机已连接");
-            } catch (cause) {
-              if (!workerToken) nodeForm.querySelector('[name="token"]').focus();
-              throw cause;
-            }
+            await searchWorkers();
           } else if (action.dataset.clusterRemove) {
             await clusterApi(`/nodes/${encodeURIComponent(action.dataset.clusterRemove)}`, { method: "DELETE" });
+            selectedNodeIds.delete(action.dataset.clusterRemove);
           } else if (action.dataset.clusterCancel) {
             await clusterApi(`/jobs/${encodeURIComponent(action.dataset.clusterCancel)}/cancel`, { method: "POST" });
           } else if (action.dataset.clusterDelete) {
@@ -880,6 +1052,71 @@ function mountClusterControlTool(container) {
           }
           await refresh();
         } catch (cause) { showError(cause); action.disabled = false; }
+      });
+      panel.querySelector("[data-cluster-topology]").addEventListener("pointerdown", event => {
+        if (connecting || disconnecting || event.button !== 0 || event.pointerType === "touch" || event.target.closest("input,select,textarea,a,[data-cluster-remove],.cluster-topology-toolbar button")) return;
+        const startNode = event.target.closest("[data-cluster-select-url], [data-cluster-select-node]");
+        const pointerId = event.pointerId;
+        const startX = event.clientX;
+        const startY = event.clientY;
+        const originalUrls = new Set(selectedUrls);
+        const originalIds = new Set(selectedNodeIds);
+        const startSelected = startNode && (startNode.hasAttribute("data-cluster-select-url")
+          ? originalUrls.has(startNode.dataset.clusterSelectUrl) : originalIds.has(startNode.dataset.clusterSelectNode));
+        const mode = startNode ? (startSelected ? "remove" : "add") : (event.shiftKey || event.metaKey || event.ctrlKey ? "add" : "replace");
+        let marquee = null;
+        const finish = upEvent => {
+          if (upEvent && upEvent.pointerId !== pointerId) return;
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", finish);
+          window.removeEventListener("pointercancel", finish);
+          marquee?.remove();
+          document.body.classList.remove("asset-marquee-active");
+          if (draggingNodes) {
+            if (startNode) startNode.dataset.clusterIgnoreClick = "true";
+            draggingNodes = false;
+            lastSelectedUrl = null;
+            lastSelectedNodeId = null;
+            renderTopology();
+          }
+          cleanupMarquee = null;
+        };
+        const move = moveEvent => {
+          if (moveEvent.pointerId !== pointerId) return;
+          if (!draggingNodes && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 5) return;
+          if (!draggingNodes) {
+            draggingNodes = true;
+            marquee = document.createElement("div");
+            marquee.className = "asset-selection-marquee";
+            document.body.append(marquee);
+            document.body.classList.add("asset-marquee-active");
+          }
+          const left = Math.min(startX, moveEvent.clientX);
+          const top = Math.min(startY, moveEvent.clientY);
+          const right = Math.max(startX, moveEvent.clientX);
+          const bottom = Math.max(startY, moveEvent.clientY);
+          Object.assign(marquee.style, { left: `${left}px`, top: `${top}px`, width: `${right - left}px`, height: `${bottom - top}px` });
+          selectedUrls.clear();
+          selectedNodeIds.clear();
+          if (mode !== "replace") {
+            originalUrls.forEach(url => selectedUrls.add(url));
+            originalIds.forEach(id => selectedNodeIds.add(id));
+          }
+          panel.querySelectorAll("[data-cluster-select-url], [data-cluster-select-node]").forEach(node => {
+            const rect = node.getBoundingClientRect();
+            if (rect.left <= right && rect.right >= left && rect.top <= bottom && rect.bottom >= top) {
+              const selected = node.hasAttribute("data-cluster-select-url") ? selectedUrls : selectedNodeIds;
+              const id = node.hasAttribute("data-cluster-select-url") ? node.dataset.clusterSelectUrl : node.dataset.clusterSelectNode;
+              if (mode === "remove") selected.delete(id);
+              else selected.add(id);
+            }
+          });
+          updateSelection();
+        };
+        cleanupMarquee = () => finish({ pointerId });
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", finish);
+        window.addEventListener("pointercancel", finish);
       });
       panel.querySelector("[data-cluster-node-form]").addEventListener("submit", async event => {
         event.preventDefault();
@@ -913,6 +1150,7 @@ function mountClusterControlTool(container) {
         finally { submit.disabled = false; }
       });
       await refresh();
+      searchWorkers().catch(showError);
       timer = setInterval(refresh, 3000);
     } catch (cause) {
       if (disposed) return;
@@ -924,6 +1162,7 @@ function mountClusterControlTool(container) {
   return () => {
     disposed = true;
     if (timer) clearInterval(timer);
+    cleanupMarquee?.();
   };
 }
 
@@ -1208,7 +1447,7 @@ function mountVideoUpscaleTool(container) {
     if (!model || disposed || model.model !== selectedModel()) return;
     const label = escapeHtml(selectedModel());
     const size = selectedModel() === "animevideo" ? "约 1.1 MB" : "约 30 MB";
-    modelBox.innerHTML = model.available ? `<span class="cluster-live">${label} 模型已就绪</span>` :
+    modelBox.innerHTML = model.available ? `<span class="cluster-live">${label} 模型已就绪${model.source === "bundled" ? " · App 内置，无需下载" : ""}</span>` :
       `${model.platform_supported ? `本机尚未安装 ${label} 模型。` : "当前设备不支持 CoreML 超分。"} ${model.platform_supported ? `<button id="upscaleDownloadModel" class="button secondary small" type="button">下载官方模型（${size}）</button>` : ""}`;
     modelBox.querySelector("#upscaleDownloadModel")?.addEventListener("click", async event => {
       const button = event.currentTarget;
@@ -1629,6 +1868,7 @@ function assetWeightSnapshot() {
       enabled: asset.enabled,
       weight: Number(asset.weight),
       tags: asset.tags,
+      image_duration_seconds: asset.image_duration_seconds ?? null,
     }))));
 }
 
@@ -3767,6 +4007,9 @@ function renderAssets() {
   $("#assetTable").innerHTML = displayedAssets.length ? displayedAssets.map(asset => {
     const probe = asset.probe;
     const meta = probe ? (asset.media_type === "image" ? `${probe.width}×${probe.height} · 图片` : `${probe.width}×${probe.height} · ${formatDuration(probe.duration)} · ${probe.fps ? probe.fps.toFixed(2) + "fps" : "—"}`) : "无法读取";
+    const imageDefault = state.config?.sources?.[state.assetCategory]?.image_duration_seconds ?? 1.5;
+    const imageDurationControl = asset.media_type === "image" && !fixedAsset && state.config?.workflow_type === "generic"
+      ? `<div class="image-duration-control"><label>展示 <input class="asset-image-duration" type="number" min="0.1" max="60" step="0.1" value="${asset.image_duration_seconds ?? ""}" placeholder="${imageDefault}" ${editable ? "" : "disabled"}> 秒</label><button class="text-btn asset-image-duration-reset" type="button" ${editable ? "" : "disabled"}>恢复默认</button><small>${asset.image_duration_seconds == null ? `默认 ${imageDefault} 秒` : `单独设置 · 默认 ${imageDefault} 秒`}</small></div>` : "";
     const percent = asset.enabled && asset.valid && total ? (asset.weight / total * 100).toFixed(1) : "0.0";
     const isSelected = selected.has(asset.id);
     return `<tr data-id="${asset.id}" class="${isSelected ? "asset-row-selected" : ""}">
@@ -3774,7 +4017,7 @@ function renderAssets() {
       <td>${fixedAsset ? '<span class="valid">固定</span>' : `<button class="asset-enable-button ${asset.enabled ? "enabled" : "disabled"}" type="button" data-enabled="${asset.enabled}" aria-pressed="${asset.enabled}" title="点击${asset.enabled ? "停用" : "启用"}该素材" ${editable ? "" : "disabled"}>${asset.enabled ? "已启用" : "已停用"}</button>`}</td>
       <td><div class="file-name" title="${escapeHtml(asset.name)}">${escapeHtml(asset.name)}</div><div class="file-path" title="${escapeHtml(asset.path)}">${escapeHtml(asset.path)}</div></td>
       <td><span class="asset-date">${asset.modified_at ? escapeHtml(formatAssetDate(asset.modified_at)) : "—"}</span></td>
-      <td><span class="media-meta">${escapeHtml(meta)}</span></td>
+      <td><span class="media-meta">${escapeHtml(meta)}</span>${asset.media_type === "image" && !fixedAsset && state.config?.workflow_type === "generic" ? `<button type="button" class="text-btn asset-image-preview" data-image-path="${escapeHtml(asset.path)}">查看图片</button>` : ""}${imageDurationControl}</td>
       <td>${fixedAsset ? "—" : `<input class="tags-input asset-tags" value="${escapeHtml(asset.tags.join(","))}" placeholder="通用" ${editable ? "" : "disabled"}>`}</td>
       <td>${fixedAsset ? "不参与随机" : `<input class="weight-input asset-weight" type="number" min="0" step="0.1" value="${asset.weight}" ${editable ? "" : "disabled"}>`}</td>
       <td>${fixedAsset ? "100%" : `${percent}%`}</td>
@@ -3815,6 +4058,49 @@ function renderAssets() {
     if (targets.length > 1) {
       toast(`已将 ${targets.length} 个选中素材批量${nextEnabled ? "启用" : "停用"}`);
     }
+  }));
+  $$(".asset-image-duration").forEach(input => input.addEventListener("change", () => {
+    const value = input.value.trim();
+    if (value && (!Number.isFinite(Number(value)) || Number(value) < 0.1 || Number(value) > 60)) {
+      toast("图片展示时长需在 0.1～60 秒之间", true);
+      renderAssets();
+      return;
+    }
+    syncVisibleAssetValues(false);
+    const current = assets.find(item => item.id === input.closest("tr").dataset.id);
+    const selected = assetSelection();
+    const targets = selected.has(current.id) ? assets.filter(item => selected.has(item.id)) : [current];
+    targets.forEach(item => { item.image_duration_seconds = value ? Number(value) : null; });
+    renderAssets();
+    if (targets.length > 1) toast(`已设置 ${targets.length} 张图片的展示时长`);
+  }));
+  $$(".asset-image-duration-reset").forEach(button => button.addEventListener("click", () => {
+    syncVisibleAssetValues(false);
+    const current = assets.find(item => item.id === button.closest("tr").dataset.id);
+    const selected = assetSelection();
+    const targets = selected.has(current.id) ? assets.filter(item => selected.has(item.id)) : [current];
+    targets.forEach(item => { item.image_duration_seconds = null; });
+    renderAssets();
+    if (targets.length > 1) toast(`已恢复 ${targets.length} 张图片的默认时长`);
+  }));
+  $$(".asset-image-preview").forEach(button => button.addEventListener("click", () => {
+    const asset = assets.find(item => item.path === button.dataset.imagePath);
+    if (!asset) return;
+    const previewUrl = `/api/v1/configs/${encodeURIComponent(state.configId)}/image-preview?category=${encodeURIComponent(state.assetCategory)}&path=${encodeURIComponent(asset.path)}`;
+    const dialog = document.createElement("dialog");
+    dialog.className = "asset-image-dialog";
+    const requestedDuration = asset.image_duration_seconds ?? state.config.sources[state.assetCategory].image_duration_seconds ?? 1.5;
+    const frameCount = Math.max(1, Math.round(requestedDuration * state.config.output.fps));
+    const displayDuration = (frameCount / state.config.output.fps).toFixed(3);
+    dialog.innerHTML = `<button type="button" class="text-btn" aria-label="关闭图片预览">关闭</button><div class="asset-image-preview-frame"><img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(asset.name)}"></div><p>${escapeHtml(asset.name)} · 展示 ${displayDuration} 秒</p>`;
+    const frame = dialog.querySelector(".asset-image-preview-frame");
+    frame.style.aspectRatio = `${state.config.output.width} / ${state.config.output.height}`;
+    frame.style.backgroundColor = state.config.output.background_color;
+    frame.querySelector("img").style.objectFit = ({ fit_pad: "contain", fill_crop: "cover", stretch: "fill" })[state.config.output.resize_mode] || "contain";
+    dialog.querySelector("button").addEventListener("click", () => dialog.close());
+    dialog.addEventListener("close", () => dialog.remove());
+    document.body.append(dialog);
+    dialog.showModal();
   }));
   $$(".asset-selected").forEach((input, index) => input.addEventListener("click", event => {
     if (event.shiftKey && state.assetLastSelectedIndex != null) {
@@ -3917,6 +4203,8 @@ function syncVisibleAssetValues(rerender = true) {
     asset.enabled = row.querySelector(".asset-enable-button").dataset.enabled === "true";
     asset.weight = Number(row.querySelector(".asset-weight").value || 0);
     asset.tags = row.querySelector(".asset-tags").value.split(",").map(value => value.trim()).filter(Boolean);
+    const durationInput = row.querySelector(".asset-image-duration");
+    if (durationInput) asset.image_duration_seconds = durationInput.value.trim() ? Number(durationInput.value) : null;
   });
   if (rerender) renderAssets();
 }
@@ -3926,7 +4214,7 @@ async function saveWeights() {
   syncVisibleAssetValues(false);
   const items = Object.entries(state.scan.assets)
     .filter(([category]) => !["benefit_overlay", "visual_border"].includes(category))
-    .flatMap(([category, assets]) => assets.map(asset => ({ category, path: asset.path, enabled: asset.enabled, weight: Number(asset.weight), tags: asset.tags })));
+    .flatMap(([category, assets]) => assets.map(asset => ({ category, path: asset.path, enabled: asset.enabled, weight: Number(asset.weight), tags: asset.tags, image_duration_seconds: asset.image_duration_seconds ?? null })));
   const button = $("#saveWeightsBtn");
   button.disabled = true;
   button.textContent = "保存中…";
@@ -3939,6 +4227,7 @@ async function saveWeights() {
     });
     state.config = saved.config;
     state.configHash = saved.content_hash;
+    await scanAssets(false);
     state.assetEditSnapshot = assetWeightSnapshot();
     renderAssetEditStatus("已保存，继续独占编辑", "saved");
     toast("素材权重已保存，原配置已备份");
@@ -5089,7 +5378,7 @@ function renderSimpleConfig() {
           ${generic
             ? `<input class="simple-source-name" data-simple-source-name="${escapeHtml(category)}" value="${escapeHtml(label)}" aria-label="视频库名称">`
             : `<strong>${escapeHtml(label)}</strong>`}
-          <div class="simple-source-meta"><span class="${count && inventory?.directory_status !== "unavailable" ? "has-assets" : ""}">${sourceStatus}</span></div>
+          <div class="simple-source-meta"><span class="${count && inventory?.directory_status !== "unavailable" ? "has-assets" : ""}">${group.media_type === "image" ? "图片库 · " : ""}${sourceStatus}</span>${generic && group.media_type === "image" ? `<label>默认展示 <input type="number" min="0.1" max="60" step="0.1" data-simple-image-duration="${escapeHtml(category)}" value="${group.image_duration_seconds ?? 1.5}" aria-label="${escapeHtml(label)}默认展示时长"> 秒</label>` : ""}</div>
         </div>
         <button type="button" class="text-btn simple-source-directory" data-open-source-directory="${escapeHtml(category)}" title="打开文件夹：${escapeHtml(group.directory)}">${escapeHtml(folderName)} ↗</button>
         <label class="simple-source-switch">
@@ -5116,7 +5405,7 @@ function renderSimpleConfig() {
     ? [["full", "整条视频"], ["custom", "指定时间"]]
     : [["full", "整条视频"], ["main", "主要内容"], ["benefits", "利益点部分"], ["custom", "指定时间"]];
   const addButton = generic
-    ? `<button id="simpleAddPoolBtn" class="button secondary" type="button" ${categories.length >= 50 ? "disabled" : ""}>＋ 添加视频库</button>`
+    ? `<button id="simpleAddPoolBtn" class="button secondary" type="button" ${categories.length >= 50 ? "disabled" : ""}>＋ 添加素材库</button>`
     : `<button id="simpleAddBenefitBtn" class="button secondary" type="button" ${benefitCategories.length >= 20 ? "disabled" : ""}>＋ 添加利益点</button>`;
   const projectType = generic ? "通用视频拼接" : "淘宝闪购";
   const libraryHealth = !state.library?.managed
@@ -5426,6 +5715,15 @@ function bindSimpleConfigControls() {
   });
   $$('[data-simple-source-name]').forEach(input => input.addEventListener("input", () => {
     state.configDraft.sources[input.dataset.simpleSourceName].label = input.value;
+  }));
+  $$('[data-simple-image-duration]').forEach(input => input.addEventListener("change", () => {
+    const value = Number(input.value);
+    if (!Number.isFinite(value) || value < 0.1 || value > 60) {
+      toast("图片库默认展示时长需在 0.1～60 秒之间", true);
+      input.value = String(state.configDraft.sources[input.dataset.simpleImageDuration].image_duration_seconds ?? 1.5);
+      return;
+    }
+    state.configDraft.sources[input.dataset.simpleImageDuration].image_duration_seconds = value;
   }));
   $$('[data-simple-source-enabled]').forEach(input => input.addEventListener("change", () => {
     const category = input.dataset.simpleSourceEnabled;
@@ -5838,7 +6136,7 @@ function renderVisualConfig() {
       return `
       <div class="source-config-card pool-config-card" draggable="true" data-pool-card="${escapeHtml(category)}">
         <div class="source-config-heading">
-          <div class="source-config-title"><span class="pool-drag-handle" title="拖动改变拼接顺序">⠿</span><b>${String(poolIndex + 1).padStart(2, "0")}</b>${escapeHtml(group.label || category)} <small>${escapeHtml(category)}</small></div>
+          <div class="source-config-title"><span class="pool-drag-handle" title="拖动改变拼接顺序">⠿</span><b>${String(poolIndex + 1).padStart(2, "0")}</b>${escapeHtml(group.label || category)} <small>${group.media_type === "image" ? "图片库" : "视频库"} · ${escapeHtml(category)}</small></div>
           <div class="source-config-actions">
             <button type="button" class="text-btn" data-pool-action="up" data-pool-id="${escapeHtml(category)}" ${poolIndex <= 0 ? "disabled" : ""}>上移</button>
             <button type="button" class="text-btn" data-pool-action="down" data-pool-id="${escapeHtml(category)}" ${poolIndex === config.timeline.length - 1 ? "disabled" : ""}>下移</button>
@@ -5849,7 +6147,9 @@ function renderVisualConfig() {
           ${configInput("显示名称", `sources.${category}.label`, group.label || category)}
           ${configSelect("使用方式", `sources.${category}.mode`, group.mode, modeChoices)}
           ${configInput("默认权重", `sources.${category}.default_weight`, group.default_weight, { type: "number" })}
-          ${configInput("扩展名", `sources.${category}.extensions`, group.extensions, { type: "list", hint: "逗号分隔" })}
+          ${group.media_type === "image"
+            ? configInput("默认展示时长", `sources.${category}.image_duration_seconds`, group.image_duration_seconds ?? 1.5, { type: "number", hint: "秒；单张图片可在素材列表覆盖" })
+            : configInput("扩展名", `sources.${category}.extensions`, group.extensions, { type: "list", hint: "逗号分隔" })}
           <div class="config-field wide"><label>受管素材目录 <small>稳定路径，不随名称修改</small></label><code class="managed-pool-path">${escapeHtml(group.directory)}</code></div>
           ${configTextarea("说明", `sources.${category}.description`, group.description || "")}
         </div>
@@ -5954,7 +6254,7 @@ function renderVisualConfig() {
     ? `<div class="config-field wide"><label>拼接顺序 <small>在下方拖动视频库卡片调整</small></label><div class="managed-pool-path">${config.timeline.map(category => escapeHtml(config.sources[category]?.label || category)).join(" → ") || "尚未添加视频库"}</div></div>`
     : configInput("时间线顺序", "timeline", config.timeline, { type: "list", hint: "逗号分隔" });
   const sourceToolbar = generic
-    ? `<div class="benefit-config-toolbar"><div><strong>自定义视频库</strong><small>每个库抽取一个视频；拖动卡片决定最终拼接顺序</small></div><button id="addPoolBtn" class="button secondary small" type="button" ${config.timeline.length >= 50 ? "disabled" : ""}>+添加视频库</button></div>${config.timeline.length ? "" : '<div class="empty-pool-state">还没有视频库。添加第一个视频库后即可放入素材并生成。</div>'}`
+    ? `<div class="benefit-config-toolbar"><div><strong>自定义素材库</strong><small>每个库抽取一个视频或一张图片；拖动卡片决定拼接顺序</small></div><button id="addPoolBtn" class="button secondary small" type="button" ${config.timeline.length >= 50 ? "disabled" : ""}>+添加素材库</button></div>${config.timeline.length ? "" : '<div class="empty-pool-state">还没有素材库。添加第一个素材库后即可放入素材并生成。</div>'}`
     : `<div class="benefit-config-toolbar"><div><strong>多人利益点</strong><small>每段从自己的素材池中抽取 1 个片段</small></div><button id="addBenefitBtn" class="button secondary small" type="button" ${benefitCategories.length >= 20 ? "disabled" : ""}>+添加利益点</button></div>`;
   const overlayTimingChoices = generic
     ? [["full", "整条成片"], ["custom", "自定义时段"]]
@@ -6006,7 +6306,7 @@ function renderVisualConfig() {
     </details>
 
     <details class="config-section" data-config-section="sources" open>
-      <summary>视频素材 <small>${generic ? "可自由新增、编辑、删除和拖动排序" : "利益点段可独立增删和排序"}</small></summary>
+      <summary>${generic ? "视频与图片素材" : "视频素材"} <small>${generic ? "可自由新增、编辑、删除和拖动排序" : "利益点段可独立增删和排序"}</small></summary>
       <div class="config-section-body">
         ${sourceToolbar}
         ${sourceCards}
@@ -6275,9 +6575,64 @@ async function refreshConfigEditor(scrollTop = 0) {
   restoreActiveConfigScroll(scrollTop);
 }
 
+function chooseNewPoolDetails() {
+  return new Promise(resolve => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "pool-create-dialog";
+    const nextNumber = state.configDraft.timeline.length + 1;
+    dialog.innerHTML = `
+      <form class="pool-create-form">
+        <h2>添加素材库</h2>
+        <p>选择要放入的素材类型</p>
+        <div class="pool-type-options" role="group" aria-label="素材库类型">
+          <button type="button" class="pool-type-option selected" data-pool-type="video" aria-pressed="true"><strong>视频库</strong><small>每条成片抽取一个视频</small></button>
+          <button type="button" class="pool-type-option" data-pool-type="image" aria-pressed="false"><strong>图片库</strong><small>每条成片抽取一张图片</small></button>
+        </div>
+        <label>素材库名称<input name="poolName" type="text" maxlength="100" value="视频库 ${nextNumber}" required></label>
+        <label class="pool-create-duration" hidden>默认展示时长（秒）<input name="imageDuration" type="number" min="0.1" max="60" step="0.1" value="1.5"><small>单张图片也可以另设时长</small></label>
+        <p class="pool-create-error" role="alert"></p>
+        <div class="pool-create-actions"><button type="button" class="button secondary" data-pool-cancel>取消</button><button type="submit" class="button primary">创建素材库</button></div>
+      </form>`;
+    let mediaType = "video";
+    let result = null;
+    dialog.querySelectorAll("[data-pool-type]").forEach(option => option.addEventListener("click", () => {
+      const previousDefault = `${mediaType === "image" ? "图片" : "视频"}库 ${nextNumber}`;
+      mediaType = option.dataset.poolType;
+      dialog.querySelectorAll("[data-pool-type]").forEach(item => {
+        const selected = item === option;
+        item.classList.toggle("selected", selected);
+        item.setAttribute("aria-pressed", String(selected));
+      });
+      const nameInput = dialog.querySelector('[name="poolName"]');
+      if (nameInput.value === previousDefault) nameInput.value = `${mediaType === "image" ? "图片" : "视频"}库 ${nextNumber}`;
+      dialog.querySelector(".pool-create-duration").hidden = mediaType !== "image";
+    }));
+    dialog.querySelector("[data-pool-cancel]").addEventListener("click", () => dialog.close());
+    dialog.querySelector("form").addEventListener("submit", event => {
+      event.preventDefault();
+      const label = dialog.querySelector('[name="poolName"]').value.trim();
+      const durationInput = dialog.querySelector('[name="imageDuration"]');
+      const imageDuration = mediaType === "image" ? Number(durationInput.value) : 1.5;
+      const error = dialog.querySelector(".pool-create-error");
+      if (!label) { error.textContent = "请填写素材库名称"; return; }
+      if (mediaType === "image" && (!durationInput.value.trim() || !Number.isFinite(imageDuration) || imageDuration < 0.1 || imageDuration > 60)) {
+        error.textContent = "图片库时长需在 0.1～60 秒之间";
+        return;
+      }
+      result = { label, mediaType, imageDuration };
+      dialog.close();
+    });
+    dialog.addEventListener("close", () => { dialog.remove(); resolve(result); }, { once: true });
+    document.body.append(dialog);
+    dialog.showModal();
+  });
+}
+
 async function addPoolFromEditor(button) {
-  const label = window.prompt("新视频库名称", `视频库 ${state.configDraft.timeline.length + 1}`)?.trim();
-  if (!label) return;
+  const details = await chooseNewPoolDetails();
+  if (!details) return;
+  const { label, mediaType, imageDuration } = details;
+  const kind = mediaType === "image" ? "图片" : "视频";
   const scrollTop = configEditorScrollTop();
   button.disabled = true;
   button.textContent = "正在创建文件夹…";
@@ -6296,16 +6651,18 @@ async function addPoolFromEditor(button) {
         description: "",
         mode: "required",
         default_weight: 1,
+        media_type: mediaType,
+        image_duration_seconds: imageDuration,
         client_request_id: clientRequestId(),
         current_config_hash: saved.content_hash,
       }),
     });
     await refreshConfigEditor(scrollTop);
-    toast(`视频库“${label}”已创建：${added.directory}`);
+    toast(`${kind}库“${label}”已创建：${added.directory}`);
   } catch (error) {
     toast(error.message, true);
     button.disabled = false;
-    button.textContent = "+添加视频库";
+    button.textContent = "+添加素材库";
   }
 }
 

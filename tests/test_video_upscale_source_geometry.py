@@ -26,6 +26,30 @@ def test_model_status_api_uses_selected_model(tmp_path):
         app.state.instance_lock.release()
 
 
+@pytest.mark.parametrize("model_name", ["x2plus", "animevideo"])
+def test_bundled_model_is_ready_without_network_or_writable_install(tmp_path, monkeypatch, model_name):
+    resources = tmp_path / "app-resources"
+    name = upscale.model_asset_name(model_name)
+    package = resources / "models" / f"{name}.mlpackage"
+    (package / "Data/com.apple.CoreML/weights").mkdir(parents=True)
+    for relative in ("Manifest.json", "Data/com.apple.CoreML/model.mlmodel",
+                     "Data/com.apple.CoreML/weights/weight.bin"):
+        (package / relative).write_bytes(b"test")
+    (package.parent / f"{name}.sha256").write_text(upscale.MODEL_CONFIGS[model_name]["sha256"])
+    monkeypatch.setattr(upscale, "resource_root", lambda: resources)
+    monkeypatch.setattr(upscale.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(upscale.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(upscale, "urlopen", lambda *_args, **_kwargs: pytest.fail("bundled model tried to download"))
+
+    assert upscale.model_directory(tmp_path / "writable-data", model_name) == package
+    status = upscale.prepare_model(tmp_path / "writable-data", model_name=model_name)
+    assert status["available"] and status["source"] == "bundled"
+    assert not (tmp_path / "writable-data").exists()
+
+    (package.parent / f"{name}.sha256").write_text("invalid")
+    assert upscale.model_status(tmp_path / "writable-data", model_name)["source"] == "missing"
+
+
 def test_cluster_mode_scans_fixed_nas_folders(tmp_path):
     shared = tmp_path / "nas" / "Smartstitch"
     (shared / "超分" / "原素材").mkdir(parents=True)

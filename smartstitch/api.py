@@ -52,6 +52,7 @@ from .library import (
 )
 from .media import DisconnectSafeFileResponse
 from .models import (
+    IMAGE_EXTENSIONS,
     AddBenefitRequest,
     AddPoolRequest,
     BatchDedupRequest,
@@ -84,6 +85,7 @@ from .models import (
     UserProfileUpdateRequest,
     VisualDedupConfig,
     WeightUpdateRequest,
+    resolve_directory,
 )
 from .planner import PlanError, build_plan
 from .probe_cache import MediaProbeCache
@@ -1324,6 +1326,23 @@ def create_app(
             raise collaboration_http_error(exc) from exc
         except (ConfigError, FileNotFoundError) as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/configs/{config_id}/image-preview")
+    def image_preview(config_id: str, category: str, path: str) -> FileResponse:
+        try:
+            config = config_store.load(config_id)
+            group = config.sources.get(category)
+            if config.workflow_type != "generic" or group is None or group.media_type != "image":
+                raise HTTPException(404, "图片库不存在")
+            directory = resolve_directory(config, group.directory).resolve()
+            image_path = Path(path).expanduser().resolve()
+            if not image_path.is_relative_to(directory) or image_path.suffix.lower() not in IMAGE_EXTENSIONS:
+                raise HTTPException(404, "图片不在当前图片库")
+            if not image_path.is_file():
+                raise HTTPException(404, "图片不存在")
+            return FileResponse(image_path)
+        except (ConfigError, FileNotFoundError) as exc:
+            raise HTTPException(404, str(exc)) from exc
 
     @app.post("/api/v1/configs/{config_id}/scan")
     def scan(config_id: str) -> dict[str, object]:
