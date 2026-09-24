@@ -47,12 +47,13 @@ USER_FIELD_TYPES: dict[str, set[int | str]] = {
     "当日文件夹路径": {1, "text"},
 }
 TAOBAO_FLASH_MATERIAL_FIELD = "素材（命名：利益点-形式-日期-剪辑-特殊标识-序列）"
+TAOBAO_FLASH_REVIEW_FIELDS = ("素材审核状态", "审核")
 TAOBAO_FLASH_SYNC_FIELDS = [
     "出片日期",
     "剪辑",
     "视频",
     TAOBAO_FLASH_MATERIAL_FIELD,
-    "审核",
+    "素材审核状态",
     "_smartstitch_key",
 ]
 TAOBAO_FLASH_FIELD_TYPES: dict[str, set[int | str]] = {
@@ -60,7 +61,7 @@ TAOBAO_FLASH_FIELD_TYPES: dict[str, set[int | str]] = {
     "剪辑": {1, "text"},
     "视频": {17, "attachment"},
     TAOBAO_FLASH_MATERIAL_FIELD: {1, "text"},
-    "审核": {3, "select", "single_select"},
+    "素材审核状态": {3, "select", "single_select"},
     "_smartstitch_key": {1, "text"},
 }
 
@@ -281,19 +282,32 @@ class FeishuBaseClient:
 
     def ensure_taobao_flash_sync_schema(
         self, base_token: str, table_id: str
-    ) -> None:
-        self._ensure_field_types(base_token, table_id, TAOBAO_FLASH_FIELD_TYPES)
+    ) -> str:
+        fields = {
+            str(field.get("name") or field.get("field_name") or ""): field
+            for field in self.list_fields(base_token, table_id)
+        }
+        review_field = next((name for name in TAOBAO_FLASH_REVIEW_FIELDS if name in fields), None)
+        if review_field is None:
+            raise FeishuError("目标数据表缺少审核状态字段：素材审核状态或审核")
+        required_types = dict(TAOBAO_FLASH_FIELD_TYPES)
+        required_types[review_field] = required_types.pop("素材审核状态")
+        self._ensure_field_types(base_token, table_id, required_types, fields=fields)
+        return review_field
 
     def _ensure_field_types(
         self,
         base_token: str,
         table_id: str,
         required_types: dict[str, set[int | str]],
+        *,
+        fields: dict[str, dict[str, Any]] | None = None,
     ) -> None:
-        fields = {
-            str(field.get("name") or field.get("field_name") or ""): field
-            for field in self.list_fields(base_token, table_id)
-        }
+        if fields is None:
+            fields = {
+                str(field.get("name") or field.get("field_name") or ""): field
+                for field in self.list_fields(base_token, table_id)
+            }
         missing = [name for name in required_types if name not in fields]
         if missing:
             raise FeishuError(
@@ -782,9 +796,17 @@ class FeishuSyncManager:
         field_schema = sync_config.get("field_schema", "auto")
         if field_schema == "auto":
             field_schema = job.get("workflow_type", "generic")
+            if field_schema == "generic":
+                field_names = {
+                    str(field.get("name") or field.get("field_name") or "")
+                    for field in client.list_fields(base_token, table_id)
+                }
+                if TAOBAO_FLASH_MATERIAL_FIELD in field_names:
+                    field_schema = "taobao_flash"
         is_taobao_flash = field_schema == "taobao_flash"
+        review_field = ""
         if is_taobao_flash:
-            client.ensure_taobao_flash_sync_schema(base_token, table_id)
+            review_field = client.ensure_taobao_flash_sync_schema(base_token, table_id)
         else:
             client.ensure_sync_schema(base_token, table_id)
         existing = client.list_records(base_token, table_id)
@@ -809,7 +831,8 @@ class FeishuSyncManager:
             )
             fields = (
                 self._build_taobao_flash_fields(
-                    job, item, existing_fields, daily_sequences
+                    job, item, existing_fields, daily_sequences,
+                    review_field=review_field,
                 )
                 if is_taobao_flash
                 else self._build_fields(job, item)
@@ -872,6 +895,7 @@ class FeishuSyncManager:
         item: dict[str, Any],
         existing_fields: dict[str, Any],
         daily_sequences: dict[str, int],
+        review_field: str = "素材审核状态",
     ) -> dict[str, Any]:
         completed_at = item.get("finished_at") or job.get("finished_at") or _now()
         completed = cls._datetime_value(completed_at)
@@ -888,10 +912,10 @@ class FeishuSyncManager:
             "出片日期": int(completed.timestamp() * 1000),
             "剪辑": "",
             TAOBAO_FLASH_MATERIAL_FIELD: material_name,
-            "审核": "待审核",
+            review_field: "待审核",
             "_smartstitch_key": f"{job['id']}:{item['index']}",
         }
-        for name in ("剪辑", "审核"):
+        for name in ("剪辑", review_field):
             if existing_fields.get(name) not in (None, "", []):
                 fields[name] = existing_fields[name]
         return fields

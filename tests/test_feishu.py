@@ -43,6 +43,9 @@ class FakeFeishuBaseClient:
     def get_table(self, _token, table_id):
         return {"table_id": table_id, "name": "成片记录"}
 
+    def list_fields(self, _token, _table_id):
+        return [{"name": name, "type": 1} for name in self.fields]
+
     def resolve_base_url(self, url):
         return parse_base_url(url)
 
@@ -53,7 +56,7 @@ class FakeFeishuBaseClient:
         self.fields.update(SMARTSTITCH_TEXT_FIELDS)
 
     def ensure_taobao_flash_sync_schema(self, _token, _table_id):
-        self.fields = set(TAOBAO_FLASH_FIELD_TYPES)
+        return "素材审核状态" if "素材审核状态" in self.fields else "审核"
 
     def upload_attachment(self, _token, file_path):
         self.uploaded.append(str(file_path))
@@ -249,6 +252,19 @@ def test_base_client_validates_user_fields_and_only_creates_retained_fields(
     assert [call[2]["name"] for call in created] == SMARTSTITCH_TEXT_FIELDS
 
 
+@pytest.mark.parametrize("review_field", ["素材审核状态", "审核"])
+def test_base_client_accepts_existing_taobao_review_field(monkeypatch, review_field):
+    client = FeishuBaseClient("cli_demo", "secret")
+    fields = [
+        {"name": name if name != "素材审核状态" else review_field,
+         "type": next(iter(types))}
+        for name, types in TAOBAO_FLASH_FIELD_TYPES.items()
+    ]
+    monkeypatch.setattr(client, "list_fields", lambda _token, _table_id: fields)
+
+    assert client.ensure_taobao_flash_sync_schema("basc123", "tbl123") == review_field
+
+
 def test_base_client_uses_multipart_upload_above_direct_limit(tmp_path, monkeypatch):
     client = FeishuBaseClient("cli_demo", "secret")
     video = tmp_path / "demo.mp4"
@@ -407,15 +423,20 @@ def test_sync_manager_upserts_and_verifies_rows(tmp_path):
     assert fake_client.uploaded == ["/output/demo-1.mp4"]
 
 
-@pytest.mark.parametrize("workflow_type", ["taobao_flash", "generic"])
+@pytest.mark.parametrize("workflow_type,field_schema,review_field", [
+    ("taobao_flash", "auto", "素材审核状态"),
+    ("generic", "taobao_flash", "素材审核状态"),
+    ("generic", "auto", "素材审核状态"),
+    ("generic", "auto", "审核"),
+])
 def test_taobao_flash_sync_uses_existing_table_schema_and_daily_sequence(
-    tmp_path, workflow_type
+    tmp_path, workflow_type, field_schema, review_field
 ):
     job = make_job()
     job["workflow_type"] = workflow_type
-    if workflow_type == "generic":
-        job["feishu_base_sync"]["field_schema"] = "taobao_flash"
+    job["feishu_base_sync"]["field_schema"] = field_schema
     fake_client = FakeFeishuBaseClient()
+    fake_client.fields = (set(TAOBAO_FLASH_FIELD_TYPES) - {"素材审核状态"}) | {review_field}
     existing_timestamp = FeishuSyncManager._timestamp_ms(job["finished_at"])
     fake_client.records.append(
         {
@@ -445,19 +466,20 @@ def test_taobao_flash_sync_uses_existing_table_schema_and_daily_sequence(
         time.sleep(0.01)
 
     assert record["status"] == "succeeded"
-    assert fake_client.fields == set(TAOBAO_FLASH_SYNC_FIELDS)
+    expected_fields = (set(TAOBAO_FLASH_SYNC_FIELDS) - {"素材审核状态"}) | {review_field}
+    assert fake_client.fields == expected_fields
     first_fields = fake_client.records[1]["fields"]
     second_fields = fake_client.records[2]["fields"]
     assert first_fields[TAOBAO_FLASH_MATERIAL_FIELD] == "一口价二剪-0918-5"
     assert second_fields[TAOBAO_FLASH_MATERIAL_FIELD] == "一口价二剪-0918-6"
     assert first_fields["剪辑"] == ""
-    assert first_fields["审核"] == "待审核"
+    assert first_fields[review_field] == "待审核"
     assert first_fields["视频"] == [{"file_token": "file-token-1"}]
-    assert set(first_fields) == set(TAOBAO_FLASH_SYNC_FIELDS)
-    assert set(second_fields) == set(TAOBAO_FLASH_SYNC_FIELDS) - {"视频"}
+    assert set(first_fields) == expected_fields
+    assert set(second_fields) == expected_fields - {"视频"}
 
     first_fields["剪辑"] = "dq"
-    first_fields["审核"] = ["过审可投稿"]
+    first_fields[review_field] = ["过审可投稿"]
     manager.start(str(job["id"]))
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
@@ -469,7 +491,7 @@ def test_taobao_flash_sync_uses_existing_table_schema_and_daily_sequence(
     assert record["inserted_count"] == 0
     assert record["updated_count"] == 2
     assert first_fields["剪辑"] == "dq"
-    assert first_fields["审核"] == ["过审可投稿"]
+    assert first_fields[review_field] == ["过审可投稿"]
     assert first_fields[TAOBAO_FLASH_MATERIAL_FIELD] == "一口价二剪-0918-5"
     assert fake_client.uploaded == ["/output/demo-1.mp4"]
 
@@ -492,6 +514,9 @@ def test_sync_manager_retries_transient_errors(tmp_path):
 
         def ensure_sync_schema(self, *args):
             return fake_client.ensure_sync_schema(*args)
+
+        def list_fields(self, *args):
+            return fake_client.list_fields(*args)
 
         def list_records(self, *args):
             return fake_client.list_records(*args)
