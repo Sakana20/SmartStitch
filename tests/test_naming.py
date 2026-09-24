@@ -132,6 +132,22 @@ def test_builder_uses_selected_asset_segments_and_editable_text(tmp_path):
     assert changed.naming.benefit == "买一送一"
 
 
+def test_builder_selected_fields_accept_extra_filename_segments(tmp_path):
+    from smartstitch.models import NamingBlockConfig
+
+    sample = "沪上阿姨-奶茶-店员.mp4"
+    actual = naming_asset("pool_1", "霸王茶姬-奶茶-店员-优惠价.mp4")
+    signature = filename_signature(filename_tokens(sample))
+    for token_index, expected in ((0, "霸王茶姬"), (2, "奶茶")):
+        block = NamingBlockConfig.model_validate({
+            "id": f"field-{token_index}", "type": "source", "category": "pool_1",
+            "variants": [{"sample_name": sample, "signature": signature, "token_index": token_index}],
+        })
+        assert source_block_value(block, actual) == expected
+        with pytest.raises(NamingError):
+            source_block_value(block, naming_asset("pool_1", "霸王茶姬_奶茶.mp4"))
+
+
 def test_builder_date_fragment_and_missing_format(tmp_path):
     config = naming_config(tmp_path)
     sample = "00016_磊金夫妇-红果拿下了我全家-2027-05-17__001_pool-1_f0-10.mp4"
@@ -144,7 +160,7 @@ def test_builder_date_fragment_and_missing_format(tmp_path):
         "variants": [{"sample_name": sample, "signature": filename_signature(tokens), "token_index": 6}],
     })
     assert source_block_value(block, naming_asset("pool_1", sample)) == "2027-05-17"
-    with pytest.raises(NamingError, match="格式"):
+    with pytest.raises(NamingError, match="片段"):
         source_block_value(block, naming_asset("pool_1", "1.mp4"))
 
     data = config.model_dump(mode="json")

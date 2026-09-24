@@ -16,7 +16,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260924-126"/,
+  /href="\/styles\.css\?v=20260924-131"/,
   "前端交互或样式更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
@@ -442,9 +442,11 @@ assert.doesNotMatch(
 );
 assert.match(
   app,
-  /workflow_type === "generic"[\s\S]*id="simpleNamingEnabled"[\s\S]*id="simpleNamingProduct"[\s\S]*id="simpleNamingBenefit"[\s\S]*id="simpleNamingPreview"/,
-  "通用项目简单模式必须提供动态命名开关、产品、利益点和文件名预览",
+  /<h3>命名设置<\/h3>[\s\S]*<label class="simple-header-switch">[\s\S]*id="simpleNamingEnabled"[\s\S]*renderBuilderEditor\(config\)/,
+  "通用项目命名设置应由标题开关直接控制积木编辑器",
 );
+assert.doesNotMatch(app, /id="simpleNamingBuilderEnabled"|id="simpleNamingProduct"|id="simpleNamingBenefit"/, "简单模式不应再展示旧命名入口");
+assert.match(app, /\$\("#simpleNamingEnabled"\)[\s\S]*naming\.enabled = event\.target\.checked;[\s\S]*naming\.builder\.enabled = event\.target\.checked;/, "标题开关必须同时切换成片命名和积木命名");
 assert.match(
   app,
   /sequence_start: 1[\s\S]*template: "\{product\}-\{benefit\}-\{talents\}-\{restriction_date\}-\{sequence\}\.mp4"[\s\S]*sequence: String\(naming\.sequence_start \|\| 1\)/,
@@ -452,11 +454,15 @@ assert.match(
 );
 assert.match(
   app,
-  /id="simpleNamingSequenceStart"[^>]*min="1"[^>]*max="999999"[\s\S]*sequence_start = value/,
+  /id="builderSequenceStart"[^>]*min="1"[^>]*max="999999"[\s\S]*naming\.sequence_start = value/,
   "05 命名设置必须允许用户填写成片序号起点",
 );
 assert.ok(["function renderBuilderEditor(config)", 'id="builderPool"', 'id="builderSample"', "data-builder-token", "data-builder-block", 'id="builderNewText"'].every(value => app.includes(value)), "积木编辑器必须提供选库、选片段、排序和可编辑文字块");
-assert.ok(["function bindBuilderControls()", "data-builder-text", "data-builder-role", "dragstart", "naming-builder-preview"].every(value => app.includes(value)), "积木编辑器必须能编辑、拖动并进行实际命名预览");
+assert.match(app, /<select id="builderSample"/, "文件名应使用可打开的下拉选择框");
+assert.doesNotMatch(app, /<datalist id="builderSampleList"/, "文件名不应使用仅靠输入触发的建议列表");
+assert.ok(["function bindBuilderControls()", "data-builder-text", "dragstart", "naming-builder-preview"].every(value => app.includes(value)), "积木编辑器必须能编辑、拖动并进行实际命名预览");
+assert.doesNotMatch(app, /data-builder-role|BUILDER_ROLE_OPTIONS|飞书字段/, "文件名积木编辑器不应展示飞书字段映射");
+assert.doesNotMatch(app, /data-builder-date-format|日期显示/, "文件名积木编辑器不应展示日期格式选择器");
 const builderTokenHelpers = app.match(/function builderTokens\(filename\) \{[\s\S]*?\n\}\n\nfunction builderPicker/)?.[0].replace(/\n\nfunction builderPicker$/, "");
 assert.ok(builderTokenHelpers);
 const builderHelpers = vm.runInNewContext(`${builderTokenHelpers}; ({ builderTokens, builderSignature })`);
@@ -474,6 +480,16 @@ const builderMarkup = builderEditor({
   output: { naming: { sequence_start: 1, builder: { blocks: [] } } },
 });
 assert.match(builderMarkup, /前贴[\s\S]*瑞幸[\s\S]*咖啡[\s\S]*输入任意文字/);
+const builderMarkupWithRole = builderEditor({
+  timeline: ["pool_1"], sources: { pool_1: { label: "前贴", mode: "required" } },
+  output: { naming: { sequence_start: 1, builder: { blocks: [
+    { id: "brand", type: "source", category: "pool_1", role: "product",
+      variants: [{ sample_name: "瑞幸-咖啡-ai1.mp4", token_index: 0 }] },
+    { id: "today", type: "date", date_format: "mmdd", role: "" },
+  ] } } },
+});
+assert.doesNotMatch(builderMarkupWithRole, /飞书字段|data-builder-role/, "已有映射的命名块也不应显示飞书字段选择器");
+assert.doesNotMatch(builderMarkupWithRole, /日期显示|data-builder-date-format/, "当天日期块不应显示日期格式选择器");
 assert.match(
   app,
   /simple-card-number">05<\/span><div><h3>命名设置<\/h3>[\s\S]*\$\{namingCard\}[\s\S]*simple-card-number">\$\{generic \? "06" : "05"\}<\/span><div><h3>输出设置<\/h3>/,
@@ -496,8 +512,8 @@ assert.match(
 );
 assert.match(
   app,
-  /data-config-section="output-naming"[\s\S]*output\.naming\.source_metadata\.pattern[\s\S]*testNamingPatternBtn/,
-  "高级模式必须提供素材文件名解析规则和测试入口",
+  /data-config-section="output-naming"[\s\S]*在简单模式的“命名设置”中启用并编辑素材片段、文字、日期和序号[\s\S]*output\.naming\.duplicate_suffix/,
+  "高级模式只保留积木式命名的设置入口和重名后缀",
 );
 assert.match(
   css,

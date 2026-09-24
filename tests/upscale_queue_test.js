@@ -39,4 +39,7 @@ assert.match(list.innerHTML, /20\/40 帧/);
 assert.match(list.innerHTML, /width:50%/);
 click();
 assert.equal(opened, "upscale-1");
+context.state.upscaleJobs = [{ ...context.state.upscaleJobs[0], mode: "local" }];
+vm.runInNewContext("renderJobs()", context);
+assert.match(list.innerHTML, /本机超分批次/);
 console.log("upscale queue rendering and detail routing ok");

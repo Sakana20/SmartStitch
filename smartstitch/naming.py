@@ -35,11 +35,19 @@ def filename_signature(tokens: list[str]) -> str:
 def source_block_value(block: NamingBlockConfig, asset: Asset) -> str:
     tokens = filename_tokens(asset.name)
     signature = filename_signature(tokens)
-    variant = next((item for item in block.variants if item.signature == signature), None)
+    compatible = [
+        item for item in block.variants
+        if len(tokens) > item.token_index
+        and signature[:item.token_index + 1] == item.signature[:item.token_index + 1]
+        and (
+            len(signature) <= item.token_index + 1
+            or len(item.signature) <= item.token_index + 1
+            or signature[item.token_index + 1] == item.signature[item.token_index + 1]
+        )
+    ]
+    variant = max(compatible, key=lambda item: (item.signature == signature, item.token_index), default=None)
     if variant is None:
-        raise NamingError(f"{asset.name}: 文件名格式与命名块样本不匹配")
-    if variant.token_index >= len(tokens):
-        raise NamingError(f"{asset.name}: 缺少选定的文件名片段")
+        raise NamingError(f"{asset.name}: 缺少选定片段或前面字段的分隔方式不匹配")
     value = tokens[variant.token_index].strip()
     if not value or value in {"-", "_"}:
         raise NamingError(f"{asset.name}: 选定的文件名片段为空")

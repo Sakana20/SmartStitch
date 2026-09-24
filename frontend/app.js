@@ -1381,11 +1381,11 @@ function mountVideoUpscaleTool(container) {
   let job = null;
   let model = null;
   container.innerHTML = `<div class="prores-tool">
-    <label id="upscaleSourceRow" class="field"><span>源视频</span><div class="directory-picker-row">
-      <input id="upscaleSource" type="text" data-path-input placeholder="选择或粘贴 MP4、MOV、M4V、MKV 文件路径">
-      <button id="upscaleChooseVideo" class="button secondary small" type="button">选择视频</button>
+    <label id="upscaleSourceRow" class="field"><span>源视频文件夹</span><div class="directory-picker-row">
+      <input id="upscaleSource" type="text" data-path-input placeholder="选择包含视频的文件夹；只处理第一层">
+      <button id="upscaleChooseSource" class="button secondary small" type="button">选择文件夹</button>
     </div></label>
-    <label id="upscaleOutputRow" class="field"><span>输出文件夹 <small>留空则保存在源视频旁边</small></span><div class="directory-picker-row">
+    <label id="upscaleOutputRow" class="field"><span>输出文件夹 <small>留空则写入源文件夹下的“已处理”</small></span><div class="directory-picker-row">
       <input id="upscaleOutput" type="text" data-path-input placeholder="可选择输出文件夹">
       <button id="upscaleChooseOutput" class="button secondary small" type="button">选择文件夹</button>
     </div></label>
@@ -1395,7 +1395,7 @@ function mountVideoUpscaleTool(container) {
     <div id="upscaleNodes" class="toolbox-intro" hidden></div>
     <p class="toolbox-intro">x2plus 适合数字人和欧美风格 3D 动画；animevideo 适合线条、平涂为主的 2D 动漫。按所选模型原生倍率推理后缩回源视频宽高，输出帧率跟随源视频，保留音频并生成独立 MP4。</p>
     <div id="upscaleModel" class="toolbox-intro"></div>
-    <div class="actions"><button id="upscalePreview" class="button secondary" type="button">预检视频</button><button id="upscaleStart" class="button primary" type="button" disabled>加入任务队列</button></div>
+    <div class="actions"><button id="upscalePreview" class="button secondary" type="button">预检文件夹</button><button id="upscaleStart" class="button primary" type="button" disabled>加入任务队列</button></div>
     <div id="upscalePreviewResult" aria-live="polite"></div>
     <div id="upscaleResult" aria-live="polite"></div>
   </div>`;
@@ -1418,7 +1418,7 @@ function mountVideoUpscaleTool(container) {
   const outputPath = () => normalizePathInput(output.value) || null;
   const selectedModel = () => modelSelect.value;
   const modelReadyOnNode = node => node.online && node.video_upscale?.models?.[selectedModel()]?.available;
-  const canRun = () => mode.value === "cluster" ? clusterNodes.some(modelReadyOnNode) && preview?.pending_count > 0 && !preview?.invalid_count : Boolean(model?.available && model.model === selectedModel());
+  const canRun = () => mode.value === "cluster" ? clusterNodes.some(modelReadyOnNode) && preview?.pending_count > 0 && !preview?.invalid_count : Boolean(model?.available && model.model === selectedModel() && preview?.pending_count > 0 && !preview?.invalid_count);
   const refreshNodes = async () => {
     if (mode.value !== "cluster") { nodesBox.hidden = true; return; }
     nodesBox.hidden = false;
@@ -1445,7 +1445,7 @@ function mountVideoUpscaleTool(container) {
     const clusterMode = mode.value === "cluster";
     sourceRow.hidden = clusterMode; outputRow.hidden = clusterMode; nasBox.hidden = !clusterMode;
     modelBox.hidden = clusterMode;
-    previewButton.textContent = clusterMode ? "刷新 NAS 视频" : "预检视频";
+    previewButton.textContent = clusterMode ? "刷新 NAS 视频" : "预检文件夹";
     preview = null; previewBox.replaceChildren(); startButton.disabled = true;
     refreshNodes();
     if (clusterMode) refreshNas();
@@ -1488,7 +1488,7 @@ function mountVideoUpscaleTool(container) {
     resultBox.innerHTML = `<section class="prores-result"><strong>${job.status === "completed" ? "超分完成" : ["failed", "partial_failed"].includes(job.status) ? "超分失败" : job.status === "cancelled" ? "已取消" : "正在超分"} · ${job.processed_frames}/${job.total_frames} 帧</strong>
       <progress value="${job.processed_frames}" max="${job.total_frames}"></progress>
       <p>阶段：${escapeHtml(job.phase || "等待中")}</p>
-      ${job.kind === "batch" ? `<p>NAS 批次：完成 ${job.completed_files}/${job.total_files} 条，失败 ${job.failed_files} 条</p><p>输出目录：${escapeHtml(job.output_directory)}</p>${job.items.map(item => `<p>${escapeHtml(item.name)} · ${escapeHtml(item.status)}${item.error ? ` · ${escapeHtml(item.error)}` : ""}</p>`).join("")}` : ""}
+      ${job.kind === "batch" ? `<p>${job.mode === "cluster" ? "NAS" : "本机"}批次：完成 ${job.completed_files}/${job.total_files} 条，失败 ${job.failed_files} 条</p><p>输出目录：${escapeHtml(job.output_directory)}</p>${job.items.map(item => `<p>${escapeHtml(item.name)} · ${escapeHtml(item.status)}${item.error ? ` · ${escapeHtml(item.error)}` : ""}</p>`).join("")}` : ""}
       ${job.model ? `<p>模型：${escapeHtml(job.model)} · 原生 ${escapeHtml(String(job.scale || 2))} 倍后回缩</p>` : ""}
       ${job.width && job.height && job.fps ? `<p>输出规格：${escapeHtml(String(job.width))}×${escapeHtml(String(job.height))} · ${escapeHtml(String(job.fps))} fps（取自源视频）</p>` : ""}
       ${job.output_path ? `<p>输出：${escapeHtml(job.output_path)}</p>` : ""}
@@ -1511,10 +1511,11 @@ function mountVideoUpscaleTool(container) {
   };
   const scheduleRefresh = () => { clearInterval(timer); timer = setInterval(refresh, 1000); refresh(); };
   source.addEventListener("input", () => { preview = null; previewBox.replaceChildren(); startButton.disabled = true; });
-  container.querySelector("#upscaleChooseVideo").addEventListener("click", async event => {
+  output.addEventListener("input", () => { preview = null; previewBox.replaceChildren(); startButton.disabled = true; });
+  container.querySelector("#upscaleChooseSource").addEventListener("click", async event => {
     const button = event.currentTarget; button.disabled = true;
     try {
-      const selected = await api("/system/video-file-picker", { method: "POST" });
+      const selected = await api("/system/directory-picker", { method: "POST" });
       if (!selected.cancelled) { source.value = selected.path; source.dispatchEvent(new Event("input")); }
     } catch (error) { toast(error.message, true); }
     finally { button.disabled = false; }
@@ -1523,19 +1524,20 @@ function mountVideoUpscaleTool(container) {
     const button = event.currentTarget; button.disabled = true;
     try {
       const selected = await api("/system/directory-picker", { method: "POST" });
-      if (!selected.cancelled) output.value = selected.path;
+      if (!selected.cancelled) { output.value = selected.path; output.dispatchEvent(new Event("input")); }
     } catch (error) { toast(error.message, true); }
     finally { button.disabled = false; }
   });
   previewButton.addEventListener("click", async event => {
     if (mode.value === "cluster") { event.currentTarget.disabled = true; try { await refreshNas(); await refreshNodes(); } finally { event.currentTarget.disabled = false; } return; }
-    if (!sourcePath()) return toast("请先选择视频", true);
+    if (!sourcePath()) return toast("请先选择源视频文件夹", true);
     const button = event.currentTarget; button.disabled = true;
     try {
-      preview = await api("/tools/video-upscale/preview", { method: "POST", body: JSON.stringify({ source: sourcePath(), model: selectedModel() }) });
-      if (disposed) return;
-      previewBox.innerHTML = `<section class="prores-result"><strong>${escapeHtml(String(preview.width))}×${escapeHtml(String(preview.height))} · ${preview.frames} 帧 · ${preview.duration.toFixed(2)} 秒</strong><p>本次输出：${escapeHtml(String(preview.width))}×${escapeHtml(String(preview.height))} · ${escapeHtml(preview.fps)} fps · ${preview.has_audio ? "保留音频" : "无音频"}</p></section>`;
-      if (mode.value === "cluster") await refreshNodes();
+      const requestedSource = sourcePath(), requestedOutput = outputPath(), requestedModel = selectedModel();
+      const result = await api("/tools/video-upscale/local-preview", { method: "POST", body: JSON.stringify({ source: requestedSource, output_directory: requestedOutput, model: requestedModel }) });
+      if (disposed || mode.value !== "local" || requestedSource !== sourcePath() || requestedOutput !== outputPath() || requestedModel !== selectedModel()) return;
+      preview = result;
+      previewBox.innerHTML = `<section class="prores-result"><strong>待处理 ${preview.pending_count} 条 · 已有结果 ${preview.skipped_count} 条 · 不可处理 ${preview.invalid_count} 条</strong><p>输出目录：${escapeHtml(preview.output_directory)}</p>${preview.items.slice(0, 30).map(item => `<p>${escapeHtml(item.name)} · ${item.status === "pending" ? `${item.width}×${item.height} · ${escapeHtml(item.fps)} fps · ${item.frames} 帧` : item.status === "skipped" ? "已有同模型结果，跳过" : `不可处理：${escapeHtml(item.error || "未知原因")}`}</p>`).join("")}${preview.items.length > 30 ? `<p>另有 ${preview.items.length - 30} 条</p>` : ""}</section>`;
       startButton.disabled = !canRun() || Boolean(job && !terminal.has(job.status));
     } catch (error) { preview = null; toast(error.message, true); }
     finally { button.disabled = false; }
@@ -1543,7 +1545,7 @@ function mountVideoUpscaleTool(container) {
   startButton.addEventListener("click", async () => {
     if (mode.value === "cluster") {
       if (!preview || preview.model !== selectedModel() || !preview.pending_count || preview.invalid_count) return toast("请刷新 NAS 视频", true);
-    } else if (!preview || preview.source !== sourcePath() || preview.model.model !== selectedModel()) return toast("请重新预检视频", true);
+    } else if (!preview || preview.model !== selectedModel() || !preview.pending_count || preview.invalid_count) return toast("请重新预检文件夹", true);
     startButton.disabled = true;
     try {
       job = await api("/tools/video-upscale", { method: "POST", body: JSON.stringify({ source: mode.value === "cluster" ? null : sourcePath(), output_directory: mode.value === "cluster" ? null : outputPath(), mode: mode.value, model: selectedModel() }) });
@@ -1556,7 +1558,7 @@ function mountVideoUpscaleTool(container) {
   });
   api("/tools/video-upscale/latest").then(latest => {
     if (disposed || !latest) return;
-    if (latest.kind === "batch") { mode.value = "cluster"; updateMode(); }
+    if (latest.mode === "cluster") { mode.value = "cluster"; updateMode(); }
     job = latest; videoUpscaleJobId = latest.id; renderJob();
     if (!terminal.has(job.status)) scheduleRefresh();
   }).catch(() => {});
@@ -4382,7 +4384,7 @@ function renderJobs() {
     const total = isUpscale ? Number(job.total_frames || 0) : isSlice ? job.output_unit_count : job.count;
     const pct = isSlice ? Number(job.progress || 0) * 100 : (total ? Math.max(0, Math.min(100, done / total * 100)) : 0);
     const sourceName = job.source?.name || job.source?.path?.split(/[\\/]/).pop();
-    const title = isUpscale ? job.kind === "batch" ? "NAS 超分批次" : String(job.source || "").split(/[\\/]/).pop() : isSlice ? sourceName : job.config_name;
+    const title = isUpscale ? job.kind === "batch" ? `${job.mode === "cluster" ? "NAS" : "本机"}超分批次` : String(job.source || "").split(/[\\/]/).pop() : isSlice ? sourceName : job.config_name;
     const typeLabel = isUpscale ? `${job.mode === "cluster" ? "集群" : "本机"}超分 · ${job.model}` : isSlice ? "切片入库" : (job.job_type === "batch_dedup" ? "批量去重" : job.job_type === "folder_concat" ? "文件夹拼接" : job.job_type === "cluster" ? "集群渲染" : "成片渲染");
     const counts = isUpscale ? job.kind === "batch" ? `完成 ${job.completed_files || 0} · 失败 ${job.failed_files || 0}` : `${job.status === "completed" ? "已生成" : "处理中"}` : `成功 ${job.success_count || 0} · 失败 ${job.failure_count || 0}`;
     const created = typeof job.created_at === "number" ? job.created_at * 1000 : job.created_at;
@@ -4414,7 +4416,7 @@ function renderUpscaleJobDetail(job) {
   const total = Number(job.total_frames || 0);
   const progress = total ? Math.max(0, Math.min(100, processed / total * 100)) : 0;
   const running = !["completed", "partial_failed", "failed", "cancelled", "interrupted"].includes(job.status);
-  const title = job.kind === "batch" ? "NAS 超分批次" : String(job.source || "").split(/[\\/]/).pop();
+  const title = job.kind === "batch" ? `${job.mode === "cluster" ? "NAS" : "本机"}超分批次` : String(job.source || "").split(/[\\/]/).pop();
   const items = job.kind === "batch" ? job.items || [] : [];
   $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">VIDEO UPSCALE #${escapeHtml(job.id.slice(0, 8))}</p><h2>${escapeHtml(title)}</h2><span class="status ${cls}">${escapeHtml(label)}</span><p>${escapeHtml(job.output_directory || job.output_path || "")}</p></div>
     <div class="big-progress"><div><span>总体进度</span><b>${progress.toFixed(1)}%</b></div><div class="bar"><i style="width:${progress}%"></i></div></div>
@@ -5356,20 +5358,17 @@ function builderPicker(config) {
   return picker;
 }
 
-const BUILDER_ROLE_OPTIONS = [
-  ["", "仅文件名"], ["product", "产品/文本"], ["benefit", "利益点"],
-  ["talent", "达人"], ["restriction_date", "限制日期"],
-];
-
 function renderBuilderEditor(config) {
   const naming = ensureOutputNaming(config);
   const blocks = naming.builder.blocks;
   const picker = builderPicker(config);
-  const sampleNames = (state.scan?.assets?.[picker.category] || []).map(asset => asset.name);
+  const sampleNames = [...new Set((state.scan?.assets?.[picker.category] || []).map(asset => asset.name))];
+  if (!sampleNames.includes(picker.sample)) {
+    picker.sample = sampleNames[0] || "";
+    picker.tokenIndex = -1;
+  }
   const tokens = builderTokens(picker.sample);
   const sourceTargets = blocks.filter(block => block.type === "source" && block.category === picker.category);
-  const roleOptions = selected => BUILDER_ROLE_OPTIONS.map(([value, label]) =>
-    `<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("");
   const cards = blocks.map((block, index) => {
     const title = block.type === "source"
       ? `${config.sources[block.category]?.label || block.category}：${builderTokens(block.variants[0]?.sample_name || "")[block.variants[0]?.token_index] || "片段"}`
@@ -5377,18 +5376,16 @@ function renderBuilderEditor(config) {
     const body = block.type === "text"
       ? `<input data-builder-text="${escapeHtml(block.id)}" value="${escapeHtml(block.text)}" aria-label="自填文字">`
       : `<strong>${escapeHtml(title)}</strong>`;
-    const options = block.type === "sequence" || block.type === "date" ? "" : `<label>飞书字段<select data-builder-role="${escapeHtml(block.id)}">${roleOptions(block.role)}</select></label>`;
-    const format = block.type === "date" || block.role === "restriction_date" ? `<label>日期显示<select data-builder-date-format="${escapeHtml(block.id)}">${block.type === "date" ? "" : `<option value="raw" ${block.date_format === "raw" ? "selected" : ""}>原样</option>`}<option value="mmdd" ${block.date_format === "mmdd" || block.type === "date" && block.date_format === "raw" ? "selected" : ""}>MMDD</option><option value="compact" ${block.date_format === "compact" ? "selected" : ""}>YYYYMMDD</option></select></label>` : "";
     const variants = block.type === "source" ? `<small>${block.variants.length} 种文件名格式 · ${escapeHtml(block.category)}</small>` : "";
     return `<div class="builder-block" draggable="true" data-builder-block="${escapeHtml(block.id)}">
-      <span class="builder-handle" title="拖动调整顺序">⠿</span><div class="builder-block-main">${body}${variants}</div>${options}${format}
+      <span class="builder-handle" title="拖动调整顺序">⠿</span><div class="builder-block-main">${body}${variants}</div>
       <div class="builder-block-actions">${block.type === "source" ? `<button type="button" class="text-btn" data-builder-repick="${escapeHtml(block.id)}">重选片段</button>` : ""}${block.type !== "sequence" && block.type !== "date" ? `<button type="button" class="text-btn" data-builder-copy="${escapeHtml(block.id)}">复制</button>` : ""}<button type="button" class="text-btn" data-builder-move="up" data-builder-id="${escapeHtml(block.id)}" ${index === 0 ? "disabled" : ""}>上移</button><button type="button" class="text-btn" data-builder-move="down" data-builder-id="${escapeHtml(block.id)}" ${index === blocks.length - 1 ? "disabled" : ""}>下移</button><button type="button" class="text-btn danger-text" data-builder-remove="${escapeHtml(block.id)}">删除</button></div>
     </div>`;
   }).join("");
   return `<div class="builder-editor">
-    <div class="builder-picker"><strong>1. 从文件名选片段</strong><div class="builder-picker-row"><label>素材库<select id="builderPool">${config.timeline.filter(category => config.sources[category]?.mode !== "disabled").map(category => `<option value="${escapeHtml(category)}" ${category === picker.category ? "selected" : ""}>${escapeHtml(config.sources[category]?.label || category)}</option>`).join("")}</select></label><label>文件名<input id="builderSample" list="builderSampleList" value="${escapeHtml(picker.sample)}" placeholder="选择或输入文件名"><datalist id="builderSampleList">${sampleNames.slice(0, 500).map(name => `<option value="${escapeHtml(name)}">`).join("")}</datalist></label></div>
+    <div class="builder-picker"><strong>1. 从文件名选片段</strong><div class="builder-picker-row"><label>素材库<select id="builderPool">${config.timeline.filter(category => config.sources[category]?.mode !== "disabled").map(category => `<option value="${escapeHtml(category)}" ${category === picker.category ? "selected" : ""}>${escapeHtml(config.sources[category]?.label || category)}</option>`).join("")}</select></label><label>文件名<select id="builderSample" ${sampleNames.length ? "" : "disabled"}>${sampleNames.length ? sampleNames.map(name => `<option value="${escapeHtml(name)}" ${name === picker.sample ? "selected" : ""}>${escapeHtml(name)}</option>`).join("") : '<option value="">该素材库暂无已扫描文件</option>'}</select></label></div>
       <div class="builder-tokens">${tokens.map((token, index) => token === "-" || token === "_" ? `<span>${escapeHtml(token)}</span>` : `<button type="button" class="builder-token ${picker.tokenIndex === index ? "active" : ""}" data-builder-token="${index}">${escapeHtml(token)}</button>`).join("") || '<small>请选择一个文件名</small>'}</div>
-      <div class="builder-picker-row">${picker.replaceId ? '<small>正在重选已有字段块的来源与片段</small>' : `<label>添加方式<select id="builderTarget"><option value="">新建素材字段块</option>${sourceTargets.map(block => `<option value="${escapeHtml(block.id)}" ${picker.targetId === block.id ? "selected" : ""}>给“${escapeHtml(builderTokens(block.variants[0]?.sample_name || "")[block.variants[0]?.token_index] || "片段")}”增加格式</option>`).join("")}</select></label>`}<button id="builderAddSource" type="button" class="button secondary small">${picker.replaceId ? "保存字段来源" : "添加所选片段"}</button></div>
+      <div class="builder-picker-row">${picker.replaceId ? '<small>正在重选已有字段块的来源与片段</small>' : `<label>添加方式<select id="builderTarget"><option value="">新建素材字段块</option>${sourceTargets.map(block => `<option value="${escapeHtml(block.id)}" ${picker.targetId === block.id ? "selected" : ""}>给“${escapeHtml(builderTokens(block.variants[0]?.sample_name || "")[block.variants[0]?.token_index] || "片段")}”增加格式</option>`).join("")}</select></label>`}<button id="builderAddSource" type="button" class="button secondary small" ${sampleNames.length ? "" : "disabled"}>${picker.replaceId ? "保存字段来源" : "添加所选片段"}</button></div>
     </div>
     <div class="builder-canvas"><strong>2. 拼接文件名</strong><small>拖动块调整顺序；文字可直接修改。扩展名 .mp4 自动添加。</small><div class="builder-block-list">${cards || '<div class="simple-empty-state">先添加一个素材片段或文字块</div>'}</div>
       <div class="builder-toolbar"><input id="builderNewText" placeholder="输入任意文字，例如最高25元红包"><button id="builderAddText" type="button" class="button secondary small">＋ 文字块</button><button id="builderAddSeparator" type="button" class="button secondary small">＋ 分隔符 -</button><button id="builderAddDate" type="button" class="button secondary small">＋ 日期 MMDD</button><button id="builderAddSequence" type="button" class="button secondary small" ${blocks.some(block => block.type === "sequence") ? "disabled" : ""}>＋ 序号</button></div>
@@ -5432,7 +5429,7 @@ function bindBuilderControls() {
   });
   $("#builderAddSource")?.addEventListener("click", () => {
     const picker = builderPicker(state.configDraft);
-    const sampleName = $("#builderSample")?.value.trim() || picker.sample;
+    const sampleName = $("#builderSample")?.value.trim() || "";
     const tokens = builderTokens(sampleName);
     if (!picker.category || picker.tokenIndex < 0 || !tokens[picker.tokenIndex]) {
       toast("请先选择素材库、文件名和一个片段", true); return;
@@ -5491,14 +5488,6 @@ function bindBuilderControls() {
     if (!event.target.value) { event.target.value = block.text; toast("文字块不能为空", true); return; }
     block.text = event.target.value;
     stale();
-  }));
-  $$('[data-builder-role]').forEach(select => select.addEventListener("change", event => {
-    const block = blocks.find(item => item.id === event.target.dataset.builderRole);
-    if (block) { block.role = event.target.value; rerender(); }
-  }));
-  $$('[data-builder-date-format]').forEach(select => select.addEventListener("change", event => {
-    const block = blocks.find(item => item.id === event.target.dataset.builderDateFormat);
-    if (block) { block.date_format = event.target.value; stale(); }
   }));
   $$('[data-builder-remove]').forEach(button => button.addEventListener("click", () => {
     const index = blocks.findIndex(item => item.id === button.dataset.builderRemove);
@@ -5745,27 +5734,12 @@ function renderSimpleConfig() {
   const visual = ensureVisualDedup(config);
   const naming = generic ? ensureOutputNaming(config) : null;
   const feishu = ensureFeishuBaseSync(config);
-  const namingErrors = generic
-    ? (state.scan?.errors || []).filter(error => error.includes("命名") || error.includes("识别达人名"))
-    : [];
+  const builderNamingEnabled = generic && naming.enabled && naming.builder.enabled;
+  const legacyNamingEnabled = generic && naming.enabled && !naming.builder.enabled;
   const namingCard = generic ? `
     <section class="simple-config-card simple-wide-card simple-naming-card">
-      <header><span class="simple-card-number">05</span><div><h3>命名设置</h3><p>从素材文件名选片段，像积木一样组成成片名。</p></div></header>
-      <div class="simple-card-body simple-naming-card-body">
-        <label class="simple-toggle-row compact"><span><b>按业务信息命名</b><small>${naming.builder.enabled ? "按下方积木块生成文件名" : "使用产品-利益点-达人-限制日期生成文件名"}</small></span><input id="simpleNamingEnabled" class="switch-input" type="checkbox" ${naming.enabled ? "checked" : ""}></label>
-        <div id="simpleNamingFields" class="simple-naming-fields ${naming.enabled ? "" : "hidden"}">
-          <label class="simple-toggle-row compact"><span><b>积木式命名</b><small>选择文件名片段，加入可编辑文字和序号，自由排列</small></span><input id="simpleNamingBuilderEnabled" class="switch-input" type="checkbox" ${naming.builder.enabled ? "checked" : ""}></label>
-          ${naming.builder.enabled ? renderBuilderEditor(config) : `
-          <div class="simple-naming-inputs">
-            <label class="simple-large-field"><span>产品</span><input id="simpleNamingProduct" value="${escapeHtml(naming.product)}" placeholder="例如 红果短剧"></label>
-            <label class="simple-large-field"><span>利益点</span><input id="simpleNamingBenefit" value="${escapeHtml(naming.benefit)}" placeholder="例如 功能综述"></label>
-            <label class="simple-large-field"><span>序号起点</span><input id="simpleNamingSequenceStart" type="number" min="1" max="999999" step="1" value="${escapeHtml(naming.sequence_start || 1)}"></label>
-          </div>
-          <small class="simple-naming-help">达人和限制日期从抽中的剧情素材自动提取；序号从设定值开始逐条递增。</small>
-          <div class="simple-info-strip"><span class="${namingErrors.length ? "warning" : "ok"}">${namingErrors.length ? "命名预检异常" : "文件名预览"}</span><code id="simpleNamingPreview">${escapeHtml(naming.enabled ? namingExample(config) : "将继续使用原文件名模板")}</code>${namingErrors.length ? '<button class="text-btn" type="button" data-open-naming-advanced>查看高级规则 →</button>' : ""}</div>
-          `}
-        </div>
-      </div>
+      <header><span class="simple-card-number">05</span><div><h3>命名设置</h3><p>从素材文件名选片段，像积木一样组成成片名。</p></div><label class="simple-header-switch"><span>${builderNamingEnabled ? "已启用" : legacyNamingEnabled ? "旧规则运行中" : "未启用"}</span><input id="simpleNamingEnabled" class="switch-input" type="checkbox" ${builderNamingEnabled ? "checked" : ""}></label></header>
+      ${builderNamingEnabled ? `<div class="simple-card-body simple-naming-card-body">${renderBuilderEditor(config)}</div>` : legacyNamingEnabled ? '<div class="simple-card-body"><small>当前项目仍使用旧命名规则。打开右上角开关并配置积木块后，即可切换为积木命名。</small></div>' : ""}
     </section>` : "";
   const feishuCardNumber = generic ? "07" : "06";
   const feishuSecretHint = state.feishuSettings.app_secret_configured
@@ -6016,40 +5990,12 @@ function bindSimpleConfigControls() {
   }));
   $("#simpleConfigName")?.addEventListener("input", event => { state.configDraft.name = event.target.value; });
   $("#simpleNamingEnabled")?.addEventListener("change", event => {
-    ensureOutputNaming(state.configDraft).enabled = event.target.checked;
+    const naming = ensureOutputNaming(state.configDraft);
+    naming.enabled = event.target.checked;
+    naming.builder.enabled = event.target.checked;
     renderSimpleConfig();
   });
-  $("#simpleNamingBuilderEnabled")?.addEventListener("change", event => {
-    ensureOutputNaming(state.configDraft).builder.enabled = event.target.checked;
-    renderSimpleConfig();
-  });
-  if (ensureOutputNaming(state.configDraft).builder.enabled) bindBuilderControls();
-  $("#simpleNamingProduct")?.addEventListener("input", event => {
-    ensureOutputNaming(state.configDraft).product = event.target.value;
-    const preview = $("#simpleNamingPreview");
-    if (preview) preview.textContent = namingExample(state.configDraft);
-  });
-  $("#simpleNamingBenefit")?.addEventListener("input", event => {
-    ensureOutputNaming(state.configDraft).benefit = event.target.value;
-    const preview = $("#simpleNamingPreview");
-    if (preview) preview.textContent = namingExample(state.configDraft);
-  });
-  $("#simpleNamingSequenceStart")?.addEventListener("input", event => {
-    const value = Number(event.target.value);
-    if (Number.isInteger(value) && value >= 1 && value <= 999999) {
-      ensureOutputNaming(state.configDraft).sequence_start = value;
-    }
-    const preview = $("#simpleNamingPreview");
-    if (preview) preview.textContent = namingExample(state.configDraft);
-  });
-  $("#simpleNamingSequenceStart")?.addEventListener("change", event => {
-    const value = Number(event.target.value);
-    const normalized = Number.isInteger(value) && value >= 1 && value <= 999999 ? value : 1;
-    ensureOutputNaming(state.configDraft).sequence_start = normalized;
-    event.target.value = String(normalized);
-    const preview = $("#simpleNamingPreview");
-    if (preview) preview.textContent = namingExample(state.configDraft);
-  });
+  if (ensureOutputNaming(state.configDraft).enabled && ensureOutputNaming(state.configDraft).builder.enabled) bindBuilderControls();
   $$('[data-simple-source-name]').forEach(input => input.addEventListener("input", () => {
     state.configDraft.sources[input.dataset.simpleSourceName].label = input.value;
   }));
@@ -6550,27 +6496,10 @@ function renderVisualConfig() {
   const feishu = ensureFeishuBaseSync(config);
   const namingSection = generic ? `
     <details class="config-section" data-config-section="output-naming">
-      <summary>成片命名 <small>${naming.builder.enabled ? "积木式命名已启用" : "产品、利益点与素材文件名解析"}</small></summary>
+      <summary>成片命名 <small>积木式命名</small></summary>
       <div class="config-section-body config-form-grid three">
-        ${configSwitch("启用业务动态命名", "output.naming.enabled", naming.enabled, "命名方式")}
-        ${naming.builder.enabled ? '<div class="config-field wide"><label>积木式命名</label><p>请在简单模式的“命名设置”中编辑素材字段块、文字块和顺序。</p></div>' : `
-        ${configInput("产品", "output.naming.product", naming.product, { className: "naming-option", placeholder: "例如 燕麦奶" })}
-        ${configInput("利益点", "output.naming.benefit", naming.benefit, { className: "naming-option", placeholder: "例如 第二件半价" })}
-        ${configInput("命名模板", "output.naming.template", naming.template, { wide: true, className: "naming-option", hint: "可用 product、benefit、talents、restriction_date、sequence" })}
-        ${configInput("参与解析的视频库", "output.naming.source_metadata.categories", naming.source_metadata.categories, { type: "list", wide: true, className: "naming-option", hint: "pool_* 表示所有通用视频库" })}
-        <div class="naming-option">${configSwitch("移除 SmartStitch 切片后缀", "output.naming.source_metadata.strip_smartstitch_suffix", naming.source_metadata.strip_smartstitch_suffix)}</div>
-        ${configInput("文件名解析正则", "output.naming.source_metadata.pattern", naming.source_metadata.pattern, { wide: true, className: "naming-option", hint: "必须包含 talent 和 restriction_date 命名分组" })}
-        ${configInput("允许的日期格式", "output.naming.source_metadata.restriction_date_formats", naming.source_metadata.restriction_date_formats, { type: "list", className: "naming-option", hint: "默认 %Y-%m-%d，逗号分隔" })}
-        <div class="naming-option">${configSelect("解析失败", "output.naming.source_metadata.on_unmatched", naming.source_metadata.on_unmatched, [["error", "报错并停止"], ["exclude", "排除未识别素材"]])}</div>
-        <div class="naming-option">${configSelect("达人合并", "output.naming.talent.merge", naming.talent.merge, [["ordered_unique", "按时间线去重"]])}</div>
-        ${configInput("达人连接符", "output.naming.talent.separator", naming.talent.separator, { className: "naming-option" })}
-        <div class="naming-option">${configSelect("限制日期合并", "output.naming.restriction_date.merge", naming.restriction_date.merge, [["earliest", "取最早日期"]])}</div>
-        ${configInput("日期输出格式", "output.naming.restriction_date.output_format", naming.restriction_date.output_format, { className: "naming-option" })}
+        <div class="config-field wide"><label>积木式命名</label><p>在简单模式的“命名设置”中启用并编辑素材片段、文字、日期和序号。</p></div>
         ${configInput("重名后缀", "output.naming.duplicate_suffix", naming.duplicate_suffix, { className: "naming-option", hint: "例如 -{serial:02d}" })}
-        <div class="config-field wide naming-option"><label>文件名示例 <small>使用当前扫描素材</small></label><code id="advancedNamingPreview" class="managed-pool-path">${escapeHtml(namingExample(config))}</code></div>
-        <div class="config-field wide naming-option naming-test-row"><button id="testNamingPatternBtn" class="button secondary small" type="button">用已扫描素材测试解析</button><div id="namingTestResult" class="naming-test-result"></div></div>
-        `}
-        ${naming.builder.enabled ? configInput("重名后缀", "output.naming.duplicate_suffix", naming.duplicate_suffix, { className: "naming-option" }) : ""}
       </div>
     </details>` : "";
   const feishuSecretHint = state.feishuSettings.app_secret_configured

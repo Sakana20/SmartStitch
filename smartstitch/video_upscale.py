@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -33,6 +34,7 @@ TILE = 512
 OVERLAP = 32
 PRE_PAD = 10
 SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv"}
+OUTPUT_STEM = re.compile(r"_SR(?:2x|_animevideo)_原尺寸(?:_\d+)?$")
 
 
 def _now() -> str:
@@ -375,8 +377,86 @@ class VideoUpscaleManager:
     def preview(self, source: str, model_name: str = "x2plus") -> dict[str, Any]:
         return {**probe_video(Path(source)), "model": model_status(self.data_directory, model_name)}
 
+    def preview_directory(self, source_directory: str, output_directory: str | None = None,
+                          model_name: str = "x2plus") -> dict[str, Any]:
+        model_config(model_name)
+        source = Path(source_directory).expanduser().resolve()
+        if not source.is_dir():
+            raise ValueError("请选择源视频文件夹")
+        output = Path(output_directory).expanduser().resolve() if output_directory else source / "已处理"
+        if output_directory and not output.is_dir():
+            raise ValueError("输出文件夹不存在")
+        if output.exists() and not output.is_dir():
+            raise ValueError("输出路径不是文件夹")
+        if not output_directory and output.is_symlink():
+            raise ValueError("默认“已处理”文件夹不能是符号链接，请明确选择输出文件夹")
+        items = []
+        used_names: set[str] = set()
+        for path in sorted(source.iterdir(), key=lambda entry: (entry.name.casefold(), entry.name)):
+            if path.name.startswith(".") or path.suffix.lower() not in SUFFIXES or not path.is_file():
+                continue
+            if not path.resolve().is_relative_to(source):
+                raise ValueError(f"源文件夹中包含指向目录外的视频：{path.name}")
+            if OUTPUT_STEM.search(path.stem):
+                continue
+            stem = path.stem + ("_SR2x_原尺寸" if model_name == "x2plus" else f"_SR_{model_name}_原尺寸")
+            target = output / f"{stem}.mp4"
+            number = 2
+            while target.name.casefold() in used_names:
+                target = output / f"{stem}_{number}.mp4"
+                number += 1
+            used_names.add(target.name.casefold())
+            if target.exists():
+                items.append({"name": path.name, "source": str(path), "output_path": str(target),
+                              "status": "skipped", "frames": 0})
+                continue
+            try:
+                info = probe_video(path)
+            except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                items.append({"name": path.name, "source": str(path), "output_path": str(target),
+                              "status": "invalid", "error": str(exc), "frames": 0})
+                continue
+            items.append({"name": path.name, "status": "pending", "output_path": str(target), **info})
+        return {"source_directory": str(source), "output_directory": str(output), "model": model_name,
+                "pending_count": sum(item["status"] == "pending" for item in items),
+                "skipped_count": sum(item["status"] == "skipped" for item in items),
+                "invalid_count": sum(item["status"] == "invalid" for item in items), "items": items}
+
     def prepare_model(self, zip_source: Path | None = None, *, model_name: str = "x2plus") -> dict[str, Any]:
         return prepare_model(self.data_directory, zip_source, model_name=model_name)
+
+    def create_batch(self, source_directory: str, output_directory: str | None = None,
+                     model_name: str = "x2plus") -> dict[str, Any]:
+        preview = self.preview_directory(source_directory, output_directory, model_name)
+        if preview["invalid_count"]:
+            raise ValueError("源文件夹中有无法处理的视频，请查看预检结果并移出或修复")
+        if not preview["pending_count"]:
+            raise ValueError("源文件夹中没有待处理视频")
+        if not model_status(self.data_directory, model_name)["available"]:
+            raise ValueError(f"{model_name} 模型未准备，请先在面板下载模型")
+        with self.lock:
+            if self.stopping or self.active_id:
+                raise ValueError("已有超分任务运行，或应用正在退出")
+            output = Path(preview["output_directory"])
+            output.mkdir(parents=True, exist_ok=True)
+            job_id = uuid.uuid4().hex
+            items = [{**item, "processed_frames": 0, "error": None}
+                     for item in preview["items"] if item["status"] == "pending"]
+            job = {"id": job_id, "kind": "batch", "mode": "local", "status": "queued", "phase": "queued",
+                   "source": preview["source_directory"], "output_directory": str(output),
+                   "model": model_name, "scale": model_config(model_name)["scale"], "items": items,
+                   "total_files": len(items), "completed_files": 0, "failed_files": 0,
+                   "processed_frames": 0, "total_frames": sum(item["frames"] for item in items),
+                   "created_at": _now(), "finished_at": None, "error": None}
+            self.jobs[job_id] = job
+            if self.database is not None:
+                self.database.save("upscale_local_jobs", job)
+            self.latest_id = self.active_id = job_id
+            self.cancel_event = threading.Event()
+            self.worker = threading.Thread(target=self._run_batch, args=(job_id, self.cancel_event, model_name),
+                                           daemon=True, name=f"local-upscale-batch-{job_id[:8]}")
+            self.worker.start()
+            return copy.deepcopy(job)
 
     def create(self, source: str, output_directory: str | None = None, model_name: str = "x2plus") -> dict[str, Any]:
         info = probe_video(Path(source))
@@ -411,6 +491,23 @@ class VideoUpscaleManager:
             return copy.deepcopy(job)
 
     def _run(self, job_id: str, info: dict[str, Any], target: Path, cancelled: threading.Event, model_name: str) -> None:
+        try:
+            self._update(job_id, status="running", phase="upscaling")
+            self._process_video(info, target, job_id, cancelled, model_name,
+                                lambda count: self._update(job_id, processed_frames=count),
+                                lambda phase: self._update(job_id, phase=phase))
+            self._update(job_id, status="completed", phase="completed", finished_at=_now())
+        except Exception as exc:
+            self._update(job_id, status="cancelled" if cancelled.is_set() else "failed",
+                         phase="finished", error=str(exc), finished_at=_now())
+        finally:
+            with self.lock:
+                self.process = None
+                self.active_id = None
+
+    def _process_video(self, info: dict[str, Any], target: Path, job_id: str,
+                       cancelled: threading.Event, model_name: str,
+                       progress: Callable[[int], None], phase: Callable[[str], None]) -> None:
         temporary = target.with_name(f".{target.stem}.{job_id}.tmp.mp4")
         try:
             source = Path(info["source"])
@@ -418,13 +515,12 @@ class VideoUpscaleManager:
                 raise RuntimeError("源视频在预检后发生变化")
             with tempfile.TemporaryDirectory(prefix="smartstitch-sr-", dir=self.data_directory) as directory:
                 silent = Path(directory) / "silent.mp4"
-                self._update(job_id, status="running", phase="upscaling")
                 process_segment(source, silent, info, 0, info["frames"], self.data_directory,
-                                cancelled, progress=lambda count: self._update(job_id, processed_frames=count),
+                                cancelled, progress=progress,
                                 process_callback=lambda process: self._set_process(process), model_name=model_name)
                 if cancelled.is_set():
                     raise RuntimeError("任务已取消")
-                self._update(job_id, phase="audio")
+                phase("audio")
                 mux_audio(silent, source, temporary, info)
                 if cancelled.is_set():
                     raise RuntimeError("任务已取消")
@@ -436,12 +532,53 @@ class VideoUpscaleManager:
                 if target.exists():
                     raise RuntimeError("输出文件已由其他任务创建，请重新提交")
                 os.replace(temporary, target)
-            self._update(job_id, status="completed", phase="completed", finished_at=_now())
-        except Exception as exc:
-            self._update(job_id, status="cancelled" if cancelled.is_set() else "failed",
-                         phase="finished", error=str(exc), finished_at=_now())
         finally:
             temporary.unlink(missing_ok=True)
+            with self.lock:
+                self.process = None
+
+    def _batch_item_update(self, job_id: str, index: int, **updates: Any) -> None:
+        with self.lock:
+            job = self.jobs[job_id]
+            job["items"][index].update(updates)
+            job["processed_frames"] = sum(item["frames"] if item["status"] == "completed"
+                                          else item.get("processed_frames", 0) for item in job["items"])
+            job["completed_files"] = sum(item["status"] == "completed" for item in job["items"])
+            job["failed_files"] = sum(item["status"] == "failed" for item in job["items"])
+            if self.database is not None:
+                self.database.save("upscale_local_jobs", job)
+
+    def _run_batch(self, job_id: str, cancelled: threading.Event, model_name: str) -> None:
+        try:
+            self._update(job_id, status="running", phase="processing")
+            for index, item in enumerate(self.jobs[job_id]["items"]):
+                if cancelled.is_set() or self.stopping:
+                    break
+                self._batch_item_update(job_id, index, status="running", error=None)
+                try:
+                    self._update(job_id, phase="upscaling")
+                    self._process_video(item, Path(item["output_path"]), job_id, cancelled, model_name,
+                                        lambda count, i=index: self._batch_item_update(job_id, i, processed_frames=count),
+                                        lambda phase: self._update(job_id, phase=phase))
+                    self._batch_item_update(job_id, index, status="completed", processed_frames=item["frames"])
+                except Exception as exc:
+                    self._batch_item_update(job_id, index, status="cancelled" if cancelled.is_set() else "failed",
+                                            error=str(exc))
+                    if cancelled.is_set():
+                        break
+            if cancelled.is_set() or self.stopping:
+                for index, item in enumerate(self.jobs[job_id]["items"]):
+                    if item["status"] in {"pending", "running"}:
+                        self._batch_item_update(job_id, index, status="cancelled")
+                self._update(job_id, status="cancelled", phase="finished", error="批次已取消", finished_at=_now())
+            else:
+                job = self.jobs[job_id]
+                status = "partial_failed" if job["failed_files"] and job["completed_files"] else "failed" if job["failed_files"] else "completed"
+                self._update(job_id, status=status, phase="completed" if status == "completed" else "finished",
+                             finished_at=_now())
+        except Exception as exc:
+            self._update(job_id, status="failed", phase="finished", error=str(exc), finished_at=_now())
+        finally:
             with self.lock:
                 self.process = None
                 self.active_id = None

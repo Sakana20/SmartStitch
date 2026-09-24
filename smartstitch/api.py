@@ -1732,6 +1732,15 @@ def create_app(
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.post("/api/v1/tools/video-upscale/local-preview")
+    def preview_local_video_upscale(request: VideoUpscaleRequest) -> dict[str, object]:
+        try:
+            if not request.source:
+                raise ValueError("请选择源视频文件夹")
+            return video_upscale_manager.preview_directory(request.source, request.output_directory, request.model)
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/v1/tools/video-upscale/nodes")
     def video_upscale_nodes() -> list[dict[str, object]]:
         return cluster_upscale_manager.nodes()
@@ -1749,8 +1758,10 @@ def create_app(
             if request.mode == "cluster":
                 return cluster_upscale_batch_manager.create(request.model)
             if not request.source:
-                raise ValueError("请选择源视频")
+                raise ValueError("请选择源视频文件夹" if request.mode == "local" else "请选择源视频")
             if request.mode == "local":
+                return video_upscale_manager.create_batch(request.source, request.output_directory, request.model)
+            if request.mode == "local-single":
                 return video_upscale_manager.create(request.source, request.output_directory, request.model)
             if request.mode == "cluster-single":
                 return cluster_upscale_manager.create(request.source, request.output_directory, request.model)
