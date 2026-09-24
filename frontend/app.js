@@ -533,7 +533,16 @@ function statusInfo(status) {
   return map[status] || [status, "neutral"];
 }
 
+function disableInputCorrection(field) {
+  if (!field.matches("input, textarea, [contenteditable]")) return;
+  field.setAttribute("autocorrect", "off");
+  field.setAttribute("autocapitalize", "off");
+  field.setAttribute("spellcheck", "false");
+}
+
 async function init() {
+  document.querySelectorAll("input, textarea, [contenteditable]").forEach(disableInputCorrection);
+  document.addEventListener("focusin", event => disableInputCorrection(event.target));
   bindEvents();
   try {
     const health = await api("/system/health");

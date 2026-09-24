@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartStitch · 智能混剪</title>
-    <link rel="stylesheet" href="/styles.css?v=20260923-116" />
+    <link rel="stylesheet" href="/styles.css?v=20260923-117" />
   </head>
   <body>
     <div class="noise"></div>
@@ -401,8 +401,8 @@
       <form id="loginForm" class="auth-card">
         <p class="eyebrow">SMARTSTITCH ACCOUNT</p><h2 id="loginTitle">登录 SmartStitch</h2>
         <p id="loginHint">请输入管理员分配的账号和密码。</p>
-        <label class="field"><span>用户名</span><input name="username" autocomplete="username" required /></label>
-        <label class="field"><span>密码</span><input name="password" type="password" autocomplete="current-password" required /></label>
+        <label class="field"><span>用户名</span><input name="username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false" required /></label>
+        <label class="field"><span>密码</span><input name="password" type="password" autocomplete="current-password" autocorrect="off" autocapitalize="off" spellcheck="false" required /></label>
         <button class="button primary" type="submit">登录</button>
         <small id="loginError" class="cluster-gate-error hidden" role="alert"></small>
       </form>
@@ -416,8 +416,8 @@
           <button class="drawer-close" data-close-user-profile>×</button>
         </div>
         <p id="accountSummary"></p>
-        <label class="field"><span>当前密码</span><input id="currentPasswordInput" type="password" autocomplete="current-password" /></label>
-        <label class="field"><span>新密码（至少 6 位）</span><input id="newPasswordInput" type="password" minlength="6" autocomplete="new-password" /></label>
+        <label class="field"><span>当前密码</span><input id="currentPasswordInput" type="password" autocomplete="current-password" autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
+        <label class="field"><span>新密码（至少 6 位）</span><input id="newPasswordInput" type="password" minlength="6" autocomplete="new-password" autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
         <div class="user-device-card"><span>当前电脑</span><strong id="userDeviceName">—</strong></div>
         <div class="actions right"><button id="switchUserProfileBtn" class="button secondary" type="button">退出登录</button><button id="saveUserProfileBtn" class="button primary" type="button">修改密码</button></div>
       </div>
@@ -439,7 +439,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/timeline-math.js?v=20260923-116" defer></script>
-    <script src="/app.js?v=20260923-116" defer></script>
+    <script src="/timeline-math.js?v=20260923-117" defer></script>
+    <script src="/app.js?v=20260923-117" defer></script>
   </body>
 </html>

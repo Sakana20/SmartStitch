@@ -165,6 +165,7 @@ class DesktopApplication:
                 width=1280,
                 height=820,
                 min_size=(960, 640),
+                text_select=True,
                 confirm_close=False,
             )
             window.events.closing += self._confirm_close(window)

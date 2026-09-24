@@ -84,6 +84,7 @@ def test_desktop_window_owns_server_lifecycle() -> None:
 
     assert server.started is True
     assert webview.created[0] == ("SmartStitch", server.url)
+    assert webview.created[1]["text_select"] is True
     assert webview.started == {"gui": "cocoa", "debug": False}
     assert all(manager.shutdown_timeouts for manager in managers)
     assert server.stop_timeouts
