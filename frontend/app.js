@@ -5372,14 +5372,15 @@ function renderSimpleConfig() {
     const movableCategories = generic ? categories : benefitCategories;
     const movableIndex = movableCategories.indexOf(category);
     return `
-      <article class="simple-source-card ${group.mode === "disabled" ? "is-disabled" : ""}" data-simple-source-card="${escapeHtml(category)}" ${draggable ? 'draggable="true"' : ""}>
+      <article class="simple-source-card ${generic ? "generic-pool-card" : ""} ${group.mode === "disabled" ? "is-disabled" : ""}" data-simple-source-card="${escapeHtml(category)}" ${draggable ? 'draggable="true"' : ""}>
         <div class="simple-source-step"><span>${String(index + 1).padStart(2, "0")}</span>${draggable ? '<i title="拖动改变顺序">⠿</i>' : ""}</div>
         <div class="simple-source-main">
           ${generic
-            ? `<input class="simple-source-name" data-simple-source-name="${escapeHtml(category)}" value="${escapeHtml(label)}" aria-label="视频库名称">`
+            ? `<input class="simple-source-name" data-simple-source-name="${escapeHtml(category)}" value="${escapeHtml(label)}" aria-label="素材库名称">`
             : `<strong>${escapeHtml(label)}</strong>`}
-          <div class="simple-source-meta"><span class="${count && inventory?.directory_status !== "unavailable" ? "has-assets" : ""}">${group.media_type === "image" ? "图片库 · " : ""}${sourceStatus}</span>${generic && group.media_type === "image" ? `<label>默认展示 <input type="number" min="0.1" max="60" step="0.1" data-simple-image-duration="${escapeHtml(category)}" value="${group.image_duration_seconds ?? 1.5}" aria-label="${escapeHtml(label)}默认展示时长"> 秒</label>` : ""}</div>
+          <div class="simple-source-meta"><span class="${count && inventory?.directory_status !== "unavailable" ? "has-assets" : ""}">${group.media_type === "image" ? "图片库 · " : ""}${sourceStatus}</span></div>
         </div>
+        ${generic ? `<div class="simple-source-duration">${group.media_type === "image" ? `<input type="text" inputmode="decimal" data-simple-image-duration="${escapeHtml(category)}" value="${group.image_duration_seconds ?? 1.5}" aria-label="${escapeHtml(label)}持续时间（秒）"><span>秒</span>` : ""}</div>` : ""}
         <button type="button" class="text-btn simple-source-directory" data-open-source-directory="${escapeHtml(category)}" title="打开文件夹：${escapeHtml(group.directory)}">${escapeHtml(folderName)} ↗</button>
         <label class="simple-source-switch">
           <span>参与拼接</span>
@@ -5497,7 +5498,7 @@ function renderSimpleConfig() {
     <section class="simple-config-card simple-wide-card">
       <header><span class="simple-card-number">03</span><div><h3>拼接顺序</h3><p>${generic ? "列表从上到下，就是成片从头到尾。" : "淘宝闪购主流程保持固定，利益点可以增删和排序。"}</p></div><button id="refreshSimpleAssetsBtn" class="button secondary small" type="button">↻ 刷新素材库</button></header>
       <div class="simple-card-body">
-        <div class="simple-logic-strip"><span>每个启用的视频库随机取 1 条</span><i>→</i><span>按下方顺序拼接</span><i>→</i><strong>输出成片</strong></div>
+        <div class="simple-logic-strip"><span>每个启用的素材库随机取 1 条</span><i>→</i><span>按下方顺序拼接</span><i>→</i><strong>输出成片</strong></div>
         <div class="simple-source-list">${sourceCards || '<div class="simple-empty-state">还没有视频库。添加第一个视频库后即可开始。</div>'}</div>
         <div class="simple-card-footer">${addButton}<small>拖动卡片或点击上下移动，编号会自动更新</small></div>
       </div>
@@ -5717,8 +5718,9 @@ function bindSimpleConfigControls() {
     state.configDraft.sources[input.dataset.simpleSourceName].label = input.value;
   }));
   $$('[data-simple-image-duration]').forEach(input => input.addEventListener("change", () => {
-    const value = Number(input.value);
-    if (!Number.isFinite(value) || value < 0.1 || value > 60) {
+    const raw = input.value.trim();
+    const value = Number(raw);
+    if (!raw || !Number.isFinite(value) || value < 0.1 || value > 60) {
       toast("图片库默认展示时长需在 0.1～60 秒之间", true);
       input.value = String(state.configDraft.sources[input.dataset.simpleImageDuration].image_duration_seconds ?? 1.5);
       return;
