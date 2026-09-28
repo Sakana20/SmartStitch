@@ -1,6 +1,8 @@
 const state = {
   configs: [],
   configId: null,
+  configLoadRevision: 0,
+  scanRevision: 0,
   config: null,
   configHash: null,
   library: null,
@@ -121,10 +123,10 @@ const configLeaseMaxDurationMs = 5 * 60 * 1000;
 const pathQuotePairs = { "'": "'", '"': '"', "‘": "’", "“": "”" };
 // Add tools here; each tool owns its panel through mount(container) when ready.
 const toolboxTools = [
-  { id: "cluster-control", title: "SmartStitch 集群控制", description: "连接在线工作机，统一派发和查看批量渲染。", cover: "/assets/tools/cluster-control.svg", order: 0, adminOnly: true, mount: mountClusterControlTool },
+  { id: "cluster-control", title: "SmartStitch 集群控制", description: "连接在线工作机，统一派发和查看批量渲染、NAS 视频超分。", cover: "/assets/tools/cluster-control.svg", order: 0, adminOnly: true, mount: mountClusterControlTool },
   { id: "user-management", title: "用户管理", description: "添加、暂停和管理登录账号。", cover: "/assets/tools/user-management.svg", order: 2, adminOnly: true, mount: mountUserManagementTool },
   { id: "jianying-prores-4444", title: "ProRes 4444 处理", description: "将黑底视频批量转换为带透明通道的 ProRes 4444 MOV。", cover: "/assets/tools/jianying-prores-4444.svg", order: 5, mount: mountProResAlphaTool },
-  { id: "video-upscale", title: "超分", description: "2 倍超分后按源视频的宽高和帧率输出，支持本机和集群处理。", cover: "/assets/tools/video-upscale.svg?v=2", order: 6, mount: mountVideoUpscaleTool },
+  { id: "video-upscale", title: "超分", description: "2 倍超分后按源视频的宽高和帧率输出，使用本机处理视频文件夹。", cover: "/assets/tools/video-upscale.svg?v=2", order: 6, mount: mountVideoUpscaleTool },
   { id: "folder-concat", title: "文件夹拼接", description: "选择两个文件夹，批量拼接视频。", cover: "/assets/tools/folder-concat.svg", order: 10, mount: mountFolderConcatTool },
   { id: "batch-dedup", title: "批量去重", description: "选择文件夹，逐条应用现有视觉去重效果。", cover: "/assets/tools/batch-dedup.svg", order: 20, mount: mountBatchDedupTool },
 ];
@@ -547,11 +549,10 @@ async function init() {
   document.querySelectorAll("input, textarea, [contenteditable]").forEach(disableInputCorrection);
   document.addEventListener("focusin", event => disableInputCorrection(event.target));
   bindEvents();
-  try {
-    const health = await api("/system/health");
+  api("/system/health").then(health => {
     $("#healthDot").classList.add("ok");
     $("#healthText").textContent = health.ffmpeg ? `FFmpeg 已就绪 · v${health.version}` : "FFmpeg 未找到";
-  } catch (error) { $("#healthText").textContent = "后端连接失败"; }
+  }).catch(() => { $("#healthText").textContent = "后端连接失败"; });
   await loadCurrentUser();
   if (!state.user) return;
   if (state.user.must_change_password) { openUserProfile(true); return; }
@@ -772,6 +773,7 @@ function mountClusterControlTool(container) {
   const selectedUrls = new Set();
   const selectedNodeIds = new Set();
   let cleanupMarquee = null;
+  let cleanupUpscale = null;
   const form = document.createElement("div");
   form.className = "cluster-gate";
   form.innerHTML = `<p>正在加载集群控制…</p><small class="cluster-gate-error hidden" role="alert"></small>`;
@@ -816,10 +818,12 @@ function mountClusterControlTool(container) {
             <button class="button primary" type="submit">开始集群渲染</button>
           </form><p class="cluster-control-hint">成片输出需设在 NAS 共享的 SmartStitch 目录内。至少连接一台在线工作机。</p>
         </section>
+        <section class="cluster-control-card"><h3>集群超分</h3><div data-cluster-upscale></div></section>
         <section class="cluster-control-card"><h3>集群任务</h3><div data-cluster-jobs></div></section>
         <p class="cluster-control-error hidden" data-cluster-error role="alert"></p>
       `;
       form.replaceWith(panel);
+      cleanupUpscale = mountVideoUpscaleTool(panel.querySelector("[data-cluster-upscale]"), "cluster");
       const configSelect = panel.querySelector('[name="config_id"]');
       const configs = await api("/configs");
       configSelect.innerHTML = configs.filter(config => config.valid).map(config => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name)}</option>`).join("");
@@ -1171,6 +1175,7 @@ function mountClusterControlTool(container) {
     disposed = true;
     if (timer) clearInterval(timer);
     cleanupMarquee?.();
+    cleanupUpscale?.();
   };
 }
 
@@ -1374,7 +1379,7 @@ function mountFolderConcatTool(container) {
   return () => { disposed = true; };
 }
 
-function mountVideoUpscaleTool(container) {
+function mountVideoUpscaleTool(container, executionMode = "local") {
   let disposed = false;
   let timer = null;
   let preview = null;
@@ -1390,7 +1395,6 @@ function mountVideoUpscaleTool(container) {
       <button id="upscaleChooseOutput" class="button secondary small" type="button">选择文件夹</button>
     </div></label>
     <label class="field"><span>超分模型</span><select id="upscaleModelSelect"><option value="x2plus">x2plus · 通用/3D（原生 2 倍）</option><option value="animevideo">animevideo · 2D 动漫视频（原生 4 倍）</option></select></label>
-    <label class="field"><span>执行位置</span><select id="upscaleMode"><option value="local">本机</option><option value="cluster">渲染集群</option></select></label>
     <div id="upscaleNas" class="toolbox-intro" hidden></div>
     <div id="upscaleNodes" class="toolbox-intro" hidden></div>
     <p class="toolbox-intro">x2plus 适合数字人和欧美风格 3D 动画；animevideo 适合线条、平涂为主的 2D 动漫。按所选模型原生倍率推理后缩回源视频宽高，输出帧率跟随源视频，保留音频并生成独立 MP4。</p>
@@ -1403,7 +1407,6 @@ function mountVideoUpscaleTool(container) {
   const output = container.querySelector("#upscaleOutput");
   const modelBox = container.querySelector("#upscaleModel");
   const modelSelect = container.querySelector("#upscaleModelSelect");
-  const mode = container.querySelector("#upscaleMode");
   const nasBox = container.querySelector("#upscaleNas");
   const sourceRow = container.querySelector("#upscaleSourceRow");
   const outputRow = container.querySelector("#upscaleOutputRow");
@@ -1418,9 +1421,9 @@ function mountVideoUpscaleTool(container) {
   const outputPath = () => normalizePathInput(output.value) || null;
   const selectedModel = () => modelSelect.value;
   const modelReadyOnNode = node => node.online && node.video_upscale?.models?.[selectedModel()]?.available;
-  const canRun = () => mode.value === "cluster" ? clusterNodes.some(modelReadyOnNode) && preview?.pending_count > 0 && !preview?.invalid_count : Boolean(model?.available && model.model === selectedModel() && preview?.pending_count > 0 && !preview?.invalid_count);
+  const canRun = () => executionMode === "cluster" ? clusterNodes.some(modelReadyOnNode) && preview?.pending_count > 0 && !preview?.invalid_count : Boolean(model?.available && model.model === selectedModel() && preview?.pending_count > 0 && !preview?.invalid_count);
   const refreshNodes = async () => {
-    if (mode.value !== "cluster") { nodesBox.hidden = true; return; }
+    if (executionMode !== "cluster") { nodesBox.hidden = true; return; }
     nodesBox.hidden = false;
     try {
       clusterNodes = await api("/tools/video-upscale/nodes");
@@ -1430,11 +1433,11 @@ function mountVideoUpscaleTool(container) {
     startButton.disabled = !preview || !canRun() || Boolean(job && !terminal.has(job.status));
   };
   const refreshNas = async () => {
-    if (mode.value !== "cluster") return;
+    if (executionMode !== "cluster") return;
     nasBox.textContent = "正在扫描 NAS 原素材…";
     try {
       const result = await api(`/tools/video-upscale/nas?model=${encodeURIComponent(selectedModel())}`);
-      if (disposed || mode.value !== "cluster" || result.model !== selectedModel()) return;
+      if (disposed || executionMode !== "cluster" || result.model !== selectedModel()) return;
       preview = result;
       nasBox.innerHTML = `<strong>NAS 集群批次</strong><br>原素材：${escapeHtml(result.source_directory)}<br>已处理：${escapeHtml(result.output_directory)}<br>待处理 ${result.pending_count} 条 · 已有结果 ${result.skipped_count} 条 · 不可处理 ${result.invalid_count} 条`;
       previewBox.innerHTML = result.items.length ? `<section class="prores-result">${result.items.slice(0, 30).map(item => `<p>${escapeHtml(item.name)} · ${item.status === "pending" ? `${item.width}×${item.height} · ${escapeHtml(item.fps)} fps · ${item.frames} 帧` : item.status === "skipped" ? "已有同模型结果，跳过" : `不可处理：${escapeHtml(item.error || "未知原因")}`}</p>`).join("")}${result.items.length > 30 ? `<p>另有 ${result.items.length - 30} 条</p>` : ""}</section>` : "<p>原素材文件夹中没有视频。</p>";
@@ -1442,7 +1445,7 @@ function mountVideoUpscaleTool(container) {
     } catch (error) { preview = null; nasBox.textContent = error.message; previewBox.replaceChildren(); startButton.disabled = true; }
   };
   const updateMode = () => {
-    const clusterMode = mode.value === "cluster";
+    const clusterMode = executionMode === "cluster";
     sourceRow.hidden = clusterMode; outputRow.hidden = clusterMode; nasBox.hidden = !clusterMode;
     modelBox.hidden = clusterMode;
     previewButton.textContent = clusterMode ? "刷新 NAS 视频" : "预检文件夹";
@@ -1450,7 +1453,6 @@ function mountVideoUpscaleTool(container) {
     refreshNodes();
     if (clusterMode) refreshNas();
   };
-  mode.addEventListener("change", updateMode);
   const renderModel = () => {
     if (!model || disposed || model.model !== selectedModel()) return;
     const label = escapeHtml(selectedModel());
@@ -1478,9 +1480,11 @@ function mountVideoUpscaleTool(container) {
   };
   modelSelect.addEventListener("change", () => {
     model = null; preview = null; previewBox.replaceChildren(); startButton.disabled = true;
-    loadModel(); refreshNodes(); if (mode.value === "cluster") refreshNas();
+    if (executionMode === "local") loadModel();
+    refreshNodes(); if (executionMode === "cluster") refreshNas();
   });
-  loadModel();
+  updateMode();
+  if (executionMode === "local") loadModel();
   const renderJob = () => {
     if (!job || disposed) return;
     const running = !terminal.has(job.status);
@@ -1502,9 +1506,9 @@ function mountVideoUpscaleTool(container) {
     });
   };
   const refresh = async () => {
-    if (!videoUpscaleJobId || disposed) return;
+    if (!job || disposed) return;
     try {
-      job = await api(`/tools/video-upscale/${encodeURIComponent(videoUpscaleJobId)}`);
+      job = await api(`/tools/video-upscale/${encodeURIComponent(job.id)}`);
       renderJob();
       if (terminal.has(job.status)) { clearInterval(timer); timer = null; }
     } catch (error) { if (!disposed) resultBox.textContent = error.message; }
@@ -1529,13 +1533,13 @@ function mountVideoUpscaleTool(container) {
     finally { button.disabled = false; }
   });
   previewButton.addEventListener("click", async event => {
-    if (mode.value === "cluster") { event.currentTarget.disabled = true; try { await refreshNas(); await refreshNodes(); } finally { event.currentTarget.disabled = false; } return; }
+    if (executionMode === "cluster") { event.currentTarget.disabled = true; try { await refreshNas(); await refreshNodes(); } finally { event.currentTarget.disabled = false; } return; }
     if (!sourcePath()) return toast("请先选择源视频文件夹", true);
     const button = event.currentTarget; button.disabled = true;
     try {
       const requestedSource = sourcePath(), requestedOutput = outputPath(), requestedModel = selectedModel();
       const result = await api("/tools/video-upscale/local-preview", { method: "POST", body: JSON.stringify({ source: requestedSource, output_directory: requestedOutput, model: requestedModel }) });
-      if (disposed || mode.value !== "local" || requestedSource !== sourcePath() || requestedOutput !== outputPath() || requestedModel !== selectedModel()) return;
+      if (disposed || executionMode !== "local" || requestedSource !== sourcePath() || requestedOutput !== outputPath() || requestedModel !== selectedModel()) return;
       preview = result;
       previewBox.innerHTML = `<section class="prores-result"><strong>待处理 ${preview.pending_count} 条 · 已有结果 ${preview.skipped_count} 条 · 不可处理 ${preview.invalid_count} 条</strong><p>输出目录：${escapeHtml(preview.output_directory)}</p>${preview.items.slice(0, 30).map(item => `<p>${escapeHtml(item.name)} · ${item.status === "pending" ? `${item.width}×${item.height} · ${escapeHtml(item.fps)} fps · ${item.frames} 帧` : item.status === "skipped" ? "已有同模型结果，跳过" : `不可处理：${escapeHtml(item.error || "未知原因")}`}</p>`).join("")}${preview.items.length > 30 ? `<p>另有 ${preview.items.length - 30} 条</p>` : ""}</section>`;
       startButton.disabled = !canRun() || Boolean(job && !terminal.has(job.status));
@@ -1543,12 +1547,12 @@ function mountVideoUpscaleTool(container) {
     finally { button.disabled = false; }
   });
   startButton.addEventListener("click", async () => {
-    if (mode.value === "cluster") {
+    if (executionMode === "cluster") {
       if (!preview || preview.model !== selectedModel() || !preview.pending_count || preview.invalid_count) return toast("请刷新 NAS 视频", true);
     } else if (!preview || preview.model !== selectedModel() || !preview.pending_count || preview.invalid_count) return toast("请重新预检文件夹", true);
     startButton.disabled = true;
     try {
-      job = await api("/tools/video-upscale", { method: "POST", body: JSON.stringify({ source: mode.value === "cluster" ? null : sourcePath(), output_directory: mode.value === "cluster" ? null : outputPath(), mode: mode.value, model: selectedModel() }) });
+      job = await api("/tools/video-upscale", { method: "POST", body: JSON.stringify({ source: executionMode === "cluster" ? null : sourcePath(), output_directory: executionMode === "cluster" ? null : outputPath(), mode: executionMode, model: selectedModel() }) });
       videoUpscaleJobId = job.id;
       toast("超分任务已加入任务队列");
       await loadJobs();
@@ -1557,8 +1561,7 @@ function mountVideoUpscaleTool(container) {
     } catch (error) { toast(error.message, true); startButton.disabled = false; }
   });
   api("/tools/video-upscale/latest").then(latest => {
-    if (disposed || !latest) return;
-    if (latest.mode === "cluster") { mode.value = "cluster"; updateMode(); }
+    if (disposed || !latest || latest.mode !== executionMode) return;
     job = latest; videoUpscaleJobId = latest.id; renderJob();
     if (!terminal.has(job.status)) scheduleRefresh();
   }).catch(() => {});
@@ -3804,91 +3807,137 @@ async function loadConfigs(preferredId = null) {
 }
 
 async function selectConfig(id) {
+  const revision = ++state.configLoadRevision;
+  const current = () => state.configId === id && state.configLoadRevision === revision;
   state.configId = id;
+  state.config = null; state.configHash = null; state.library = null; state.yaml = "";
+  state.scan = null; state.sourceInventory = null;
+  state.preview = null;
+  resetPreview();
   state.assetSelections = {};
   state.assetLastSelectedIndex = null;
   $("#configSelect").value = id;
+  $("#heroConfigName").textContent = state.configs.find(config => config.id === id)?.name || id;
+  $("#heroAssetCount").textContent = "正在加载配置…";
+  $("#scanSummary").textContent = "正在加载配置…";
+  $("#scanBtn").disabled = true;
+  $("#scanBtn").textContent = "重新扫描";
+  $("#assetTabs").replaceChildren();
+  $("#assetTableHead").replaceChildren();
+  $("#assetTable").innerHTML = '<tr><td colspan="9" style="text-align:center;padding:50px;color:var(--muted)">正在加载素材…</td></tr>';
+  updateGenerateAvailability();
   try {
     const result = await api(`/configs/${id}`);
+    if (!current()) return;
     state.config = result.config;
     state.configHash = result.content_hash;
     state.yaml = result.yaml_text;
-    try {
-      state.library = await api(`/libraries/by-config/${id}`);
-    } catch (_) {
-      state.library = null;
-    }
-    if (state.library?.config_updated) {
-      const migrated = await api(`/configs/${id}`);
-      state.config = migrated.config;
-      state.configHash = migrated.content_hash;
-      state.yaml = migrated.yaml_text;
-    }
-    if (state.library?.managed && state.library.health === "healthy") {
-      try {
-        const targets = await api(`/libraries/by-config/${id}/slice-targets`);
-        state.timeline.sliceTargets = targets.targets;
-      } catch (_) {
-        state.timeline.sliceTargets = [];
-      }
-      if (!$("#timelinePathInput").value && !state.timeline.sourceVideos.length) {
-        const rootPath = state.library.root_path.replace(/\/+$/, "");
-        $("#timelinePathInput").value = `${rootPath}/原始视频`;
-      }
-    } else {
-      state.timeline.sliceTargets = [];
-    }
+    state.timeline.sliceTargets = [];
     state.timeline.sliceUnits = [];
     state.timeline.mergeSelection = [];
     state.timeline.selectedSegmentId = null;
     resetTimelineHistory();
-    $("#heroConfigName").textContent = state.config.name;
-    $("#countInput").value = state.config.batch.default_count;
-    $("#concurrencyInput").value = state.config.batch.concurrency;
+    renderSelectedConfig();
     state.preview = null;
     resetPreview();
     if (state.timeline.analysis) renderTimeline();
-    await loadVisualBorderLibrary();
-    await loadSourceInventory();
-    await scanAssets(false);
-  } catch (error) { toast(error.message, true); }
+    $("#heroAssetCount").textContent = "素材正在后台加载，可先查看配置";
+    $("#scanSummary").textContent = "素材正在后台加载…";
+    updateGenerateAvailability();
+    // Return once the configuration is visible; NAS inspection and scanning
+    // continue independently of startup and task-list loading.
+    loadSelectedConfigResources(id, revision).catch(error => {
+      if (current()) {
+        $("#scanSummary").textContent = error.message;
+        $("#scanBtn").disabled = false;
+        toast(error.message, true);
+      }
+    });
+  } catch (error) {
+    if (current()) {
+      $("#heroAssetCount").textContent = "配置加载失败";
+      $("#scanSummary").textContent = error.message;
+      toast(error.message, true);
+    }
+  }
+}
+
+function renderSelectedConfig() {
+  $("#heroConfigName").textContent = state.config.name;
+  $("#countInput").value = state.config.batch.default_count;
+  $("#concurrencyInput").value = state.config.batch.concurrency;
+}
+
+async function loadSelectedConfigResources(id, revision) {
+  const current = () => state.configId === id && state.configLoadRevision === revision;
+  const visuals = loadVisualBorderLibrary();
+  let library = null;
+  try { library = await api(`/libraries/by-config/${id}`); } catch (_) {}
+  if (!current()) return;
+  state.library = library;
+  if (library?.config_updated) {
+    const migrated = await api(`/configs/${id}`);
+    if (!current()) return;
+    state.config = migrated.config;
+    state.configHash = migrated.content_hash;
+    state.yaml = migrated.yaml_text;
+    renderSelectedConfig();
+    updateGenerateAvailability();
+  }
+  if (library?.managed && library.health === "healthy") {
+    if (!$("#timelinePathInput").value && !state.timeline.sourceVideos.length) {
+      $("#timelinePathInput").value = `${library.root_path.replace(/\/+$/, "")}/原始视频`;
+    }
+  }
+  const targets = async () => {
+    if (!library?.managed || library.health !== "healthy") return;
+    try {
+      const result = await api(`/libraries/by-config/${id}/slice-targets`);
+      if (current()) state.timeline.sliceTargets = result.targets;
+    } catch (_) { if (current()) state.timeline.sliceTargets = []; }
+  };
+  await Promise.all([visuals, targets(), loadSourceInventory(), scanAssets(false)]);
 }
 
 async function loadVisualBorderLibrary() {
-  try {
-    state.visualBorderLibrary = await api("/global-assets/visual-borders");
-  } catch (_) {
-    state.visualBorderLibrary = null;
-  }
-  try {
-    state.visualEffectLibraries = await api("/global-assets/visual-effect-libraries");
-  } catch (_) {
-    state.visualEffectLibraries = null;
-  }
+  await Promise.all([
+    api("/global-assets/visual-borders").then(result => { state.visualBorderLibrary = result; })
+      .catch(() => { state.visualBorderLibrary = null; }),
+    api("/global-assets/visual-effect-libraries").then(result => { state.visualEffectLibraries = result; })
+      .catch(() => { state.visualEffectLibraries = null; }),
+  ]);
 }
 
 async function loadSourceInventory(showToast = false) {
   if (!state.configId) return false;
   const configId = state.configId;
+  const revision = state.configLoadRevision;
   try {
     const inventory = await api(`/configs/${configId}/source-inventory`);
-    if (state.configId !== configId) return false;
+    if (state.configId !== configId || state.configLoadRevision !== revision) return false;
     state.sourceInventory = inventory;
     return true;
   } catch (error) {
-    if (state.configId === configId) state.sourceInventory = null;
+    if (state.configId !== configId || state.configLoadRevision !== revision) return false;
+    state.sourceInventory = null;
     if (showToast) toast(`素材库概览刷新失败：${error.message}`, true);
     return false;
   }
 }
 
 async function scanAssets(showToast = true) {
-  if (!state.configId) return;
+  if (!state.configId || !state.config) return;
+  const configId = state.configId;
+  const configRevision = state.configLoadRevision;
+  const revision = ++state.scanRevision;
+  const current = () => state.configId === configId && state.configLoadRevision === configRevision && state.scanRevision === revision;
   const button = $("#scanBtn");
   button.disabled = true; button.textContent = "扫描中…";
   $("#scanSummary").textContent = "正在用 ffprobe 检查素材，请稍候…";
   try {
-    state.scan = await api(`/configs/${state.configId}/scan`, { method: "POST" });
+    const scan = await api(`/configs/${configId}/scan`, { method: "POST" });
+    if (!current()) return false;
+    state.scan = scan;
     const all = Object.values(state.scan.assets).flat();
     const valid = all.filter(asset => asset.valid && asset.enabled && asset.weight > 0).length;
     $("#heroAssetCount").textContent = `${valid} 个可用素材 · ${state.scan.ok ? "预检通过" : `${state.scan.errors.length} 个阻塞问题`}`;
@@ -3899,14 +3948,17 @@ async function scanAssets(showToast = true) {
     if (showToast) toast(state.scan.ok ? "素材扫描完成" : "扫描完成，但存在阻塞问题", !state.scan.ok);
     return true;
   } catch (error) {
+    if (!current()) return false;
     $("#scanSummary").textContent = error.message;
     toast(error.message, true);
     return false;
   }
   finally {
-    button.disabled = false;
-    button.textContent = "重新扫描";
-    updateGenerateAvailability();
+    if (current()) {
+      button.disabled = false;
+      button.textContent = "重新扫描";
+      updateGenerateAvailability();
+    }
   }
 }
 

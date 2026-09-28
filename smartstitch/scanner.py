@@ -11,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import lru_cache
+from itertools import zip_longest
 from pathlib import Path
 from typing import Iterable
 
@@ -909,19 +910,29 @@ def scan_config(
             if group.mode != SourceMode.DISABLED
         ],
     )
-    probe_session.prefetch(
-        (
-            path,
+    # Interleave libraries so a large first library cannot occupy the entire
+    # probe queue. All libraries share the same bounded ffprobe worker pool.
+    requests_by_group = [
+        [
             (
-                prepared_groups[category].explicit[path].image_duration_seconds
-                if path in prepared_groups[category].explicit
-                and prepared_groups[category].explicit[path].image_duration_seconds is not None
-                else group.image_duration_seconds
-            ),
-        )
+                path,
+                (
+                    prepared_groups[category].explicit[path].image_duration_seconds
+                    if path in prepared_groups[category].explicit
+                    and prepared_groups[category].explicit[path].image_duration_seconds is not None
+                    else group.image_duration_seconds
+                ),
+            )
+            for path in prepared_groups[category].candidates
+        ]
         for category, group in config.sources.items()
         if group.mode != SourceMode.DISABLED
-        for path in prepared_groups[category].candidates
+    ]
+    probe_session.prefetch(
+        request
+        for batch in zip_longest(*requests_by_group)
+        for request in batch
+        if request is not None
     )
     for category, group in config.sources.items():
         group_assets, group_errors = scan_group(

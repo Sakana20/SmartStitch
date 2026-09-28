@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 import urllib.parse
 from enum import StrEnum
@@ -769,6 +770,12 @@ class AppConfig(BaseModel):
                 raise ValueError(
                     "通用视频库必须填写显示名称: " + ", ".join(unlabeled)
                 )
+            # Reuse resolved parents within this validation. Calling resolve()
+            # on every saved asset repeats NAS lookups for the same ancestors.
+            # Read symlink flags in one directory listing instead of stat-ing
+            # every file separately; symlink targets still get fully resolved.
+            resolved_parents: dict[Path, Path] = {}
+            parent_symlinks: dict[Path, set[str] | None] = {}
             for category, group in self.sources.items():
                 extensions = set(group.extensions)
                 directory = resolve_directory(self, group.directory).resolve()
@@ -783,7 +790,25 @@ class AppConfig(BaseModel):
                     item_path = Path(item.path).expanduser()
                     if not item_path.is_absolute():
                         item_path = directory / item_path
-                    if not item_path.resolve().is_relative_to(directory):
+                    parent = item_path.parent
+                    if parent not in resolved_parents:
+                        resolved_parents[parent] = parent.resolve()
+                    resolved_item = resolved_parents[parent] / item_path.name
+                    resolved_parent = resolved_parents[parent]
+                    if resolved_parent not in parent_symlinks:
+                        try:
+                            with os.scandir(resolved_parent) as entries:
+                                parent_symlinks[resolved_parent] = {
+                                    entry.name for entry in entries if entry.is_symlink()
+                                }
+                        except OSError:
+                            # Preserve per-path checks if directory listing is denied.
+                            parent_symlinks[resolved_parent] = None
+                    links = parent_symlinks[resolved_parent]
+                    is_link = resolved_item.is_symlink() if links is None else item_path.name in links
+                    if is_link or item_path.name in {"", ".", ".."}:
+                        resolved_item = resolved_item.resolve()
+                    if not resolved_item.is_relative_to(directory):
                         raise ValueError(f"{category}: 素材条目越过素材库目录")
                     if item_path.suffix.lower() not in extensions:
                         raise ValueError(f"{category}: 素材条目扩展名与库类型不符")

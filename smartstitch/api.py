@@ -1224,12 +1224,7 @@ def create_app(
     @app.get("/api/v1/configs/{config_id}")
     def get_config(config_id: str) -> dict[str, object]:
         try:
-            config = config_store.load(config_id)
-            return {
-                "config": config.model_dump(mode="json"),
-                "yaml_text": config_store.raw(config_id),
-                "content_hash": config_store.content_hash(config_id),
-            }
+            return config_store.read_snapshot(config_id)
         except (ConfigError, FileNotFoundError) as exc:
             raise HTTPException(404, str(exc)) from exc
 

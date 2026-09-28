@@ -437,3 +437,123 @@ def test_more_than_twenty_benefit_segments_is_rejected(tmp_path):
 
     with pytest.raises(ValidationError, match="最多 20 个"):
         AppConfig.model_validate(data)
+
+
+def _generic_path_config(tmp_path, paths):
+    return {
+        "schema_version": 3,
+        "workflow_type": "generic",
+        "id": "path-test",
+        "name": "路径测试",
+        "source_root": str(tmp_path),
+        "timeline": ["pool_1"],
+        "sources": {"pool_1": {
+            "label": "素材", "directory": "source", "extensions": [".mp4"],
+            "items": [{"path": str(path)} for path in paths],
+        }},
+        "benefit_overlays": {"mode": "disabled", "file": ""},
+        "output": {"directory": str(tmp_path / "output")},
+    }
+
+
+def test_generic_validation_batches_directory_checks(tmp_path, monkeypatch):
+    from pathlib import Path
+    import smartstitch.models as model_module
+
+    directory = tmp_path / "source"
+    directory.mkdir()
+    paths = [directory / f"{index}.mp4" for index in range(50)]
+    for path in paths:
+        path.write_bytes(b"video")
+    original = model_module.os.scandir
+    checked = []
+
+    def counted_scandir(path):
+        checked.append(Path(path))
+        return original(path)
+
+    monkeypatch.setattr(model_module.os, "scandir", counted_scandir)
+    result = AppConfig.model_validate(_generic_path_config(tmp_path, paths))
+    assert len(result.sources["pool_1"].items) == 50
+    assert checked == [directory]
+
+
+@pytest.mark.parametrize("kind", ["file_link", "parent_link", "traversal"])
+def test_generic_validation_still_rejects_path_escape(tmp_path, kind):
+    directory = tmp_path / "source"
+    directory.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "video.mp4"
+    target.write_bytes(b"video")
+    if kind == "file_link":
+        path = directory / "link.mp4"
+        path.symlink_to(target)
+    elif kind == "parent_link":
+        link = directory / "linked"
+        link.symlink_to(outside, target_is_directory=True)
+        path = link / "video.mp4"
+    else:
+        path = directory / ".." / "outside" / "video.mp4"
+    with pytest.raises(ValidationError, match="素材条目越过素材库目录"):
+        AppConfig.model_validate(_generic_path_config(tmp_path, [path]))
+
+
+def test_generic_validation_keeps_internal_links_and_missing_items(tmp_path):
+    directory = tmp_path / "source"
+    directory.mkdir()
+    target = directory / "video.mp4"
+    target.write_bytes(b"video")
+    link = directory / "link.mp4"
+    link.symlink_to(target)
+    data = _generic_path_config(tmp_path, [link, directory / "missing.mp4"])
+    assert len(AppConfig.model_validate(data).sources["pool_1"].items) == 2
+
+
+def test_generic_validation_falls_back_when_listing_denied(tmp_path, monkeypatch):
+    import smartstitch.models as model_module
+
+    directory = tmp_path / "source"
+    directory.mkdir()
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"video")
+    link = directory / "link.mp4"
+    link.symlink_to(outside)
+
+    def denied(_path):
+        raise PermissionError("listing denied")
+
+    monkeypatch.setattr(model_module.os, "scandir", denied)
+    with pytest.raises(ValidationError, match="素材条目越过素材库目录"):
+        AppConfig.model_validate(_generic_path_config(tmp_path, [link]))
+
+
+def test_config_snapshot_reads_once_and_keeps_hash_consistent(tmp_path, monkeypatch):
+    import hashlib
+    from pathlib import Path
+
+    store = ConfigStore(tmp_path / "configs")
+    path = store.directory / "config-test.yaml"
+    content = yaml.safe_dump(config_data(tmp_path), allow_unicode=True).encode("utf-8")
+    path.write_bytes(content)
+    original = Path.read_bytes
+    reads = []
+
+    def read_once(file):
+        reads.append(file)
+        return original(file)
+
+    monkeypatch.setattr(Path, "read_bytes", read_once)
+    snapshot = store.read_snapshot("config-test")
+    assert reads == [path]
+    assert snapshot["config"]["name"] == "配置测试"
+    assert snapshot["yaml_text"] == content.decode("utf-8")
+    assert snapshot["content_hash"] == hashlib.sha256(content).hexdigest()
+
+
+def test_config_snapshot_rejects_unsafe_yaml(tmp_path):
+    store = ConfigStore(tmp_path / "configs")
+    (store.directory / "unsafe.yaml").write_text("!!python/object:builtins.object {}")
+    from smartstitch.config import ConfigError
+    with pytest.raises(ConfigError):
+        store.read_snapshot("unsafe")

@@ -13,6 +13,9 @@ import yaml
 from .models import AppConfig, AssetItemConfig, ConfigUpdateRequest, WeightUpdate, resolve_directory
 
 
+# Both implementations reject unsafe YAML constructors.
+SAFE_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 class ConfigError(ValueError):
     pass
 
@@ -91,7 +94,11 @@ class ConfigStore:
                 if path.name.startswith("template"):
                     continue
                 try:
-                    config = self.load_path(path)
+                    content = path.read_bytes()
+                    data = yaml.load(content, Loader=SAFE_YAML_LOADER)
+                    if not isinstance(data, dict):
+                        raise ConfigError("配置根节点必须是对象")
+                    config = self._to_runtime(AppConfig.model_validate(data))
                     configs.append(
                         {
                             "id": config.id,
@@ -99,7 +106,7 @@ class ConfigStore:
                             "enabled": config.enabled,
                             "description": config.description,
                             "path": str(path),
-                            "content_hash": self.content_hash(config.id),
+                            "content_hash": hashlib.sha256(content).hexdigest(),
                             "updated_at": path.stat().st_mtime,
                             "valid": True,
                         }
@@ -133,12 +140,23 @@ class ConfigStore:
 
     def load_path(self, path: Path) -> AppConfig:
         try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data = yaml.load(path.read_text(encoding="utf-8"), Loader=SAFE_YAML_LOADER)
             if not isinstance(data, dict):
                 raise ConfigError("配置根节点必须是对象")
             return self._to_runtime(AppConfig.model_validate(data))
         except (yaml.YAMLError, ValueError) as exc:
             raise ConfigError(str(exc)) from exc
+
+    def read_snapshot(self, config_id: str) -> dict[str, object]:
+        with self.lock:
+            content = self.path_for(config_id).read_bytes()
+            text = content.decode("utf-8")
+            config = self.validate_text(text)
+            return {
+                "config": config.model_dump(mode="json"),
+                "yaml_text": text,
+                "content_hash": hashlib.sha256(content).hexdigest(),
+            }
 
     def raw(self, config_id: str) -> str:
         with self.lock:
@@ -151,7 +169,7 @@ class ConfigStore:
 
     def validate_text(self, text: str) -> AppConfig:
         try:
-            data = yaml.safe_load(text)
+            data = yaml.load(text, Loader=SAFE_YAML_LOADER)
             if not isinstance(data, dict):
                 raise ConfigError("配置根节点必须是对象")
             return self._to_runtime(AppConfig.model_validate(data))
@@ -161,7 +179,7 @@ class ConfigStore:
     def save_text(self, config_id: str, request: ConfigUpdateRequest) -> AppConfig:
         with self.lock:
             try:
-                source_data = yaml.safe_load(request.yaml_text)
+                source_data = yaml.load(request.yaml_text, Loader=SAFE_YAML_LOADER)
             except yaml.YAMLError as exc:
                 raise ConfigError(str(exc)) from exc
             config = self.validate_text(request.yaml_text)
@@ -194,7 +212,7 @@ class ConfigStore:
             destination = self.path_for(new_id)
             if destination.exists():
                 raise ConfigError(f"配置已存在: {new_id}")
-            data = yaml.safe_load(self.raw(source_id))
+            data = yaml.load(self.raw(source_id), Loader=SAFE_YAML_LOADER)
             data["id"] = new_id
             data["name"] = new_name
             config = self.validate_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
@@ -213,7 +231,7 @@ class ConfigStore:
             template = self.directory / "template.commented.yaml"
             if not template.exists():
                 raise ConfigError("缺少配置模板 template.commented.yaml")
-            data = yaml.safe_load(template.read_text(encoding="utf-8"))
+            data = yaml.load(template.read_text(encoding="utf-8"), Loader=SAFE_YAML_LOADER)
             if not isinstance(data, dict):
                 raise ConfigError("配置模板格式不正确")
             data["id"] = new_id

@@ -628,3 +628,35 @@ def test_probe_media_reports_timeout(monkeypatch, tmp_path):
             tmp_path / "slow.mp4",
             timeout_seconds=3,
         )
+
+
+def test_scan_interleaves_libraries_with_shared_probe_limit(tmp_path, monkeypatch):
+    config = _probe_test_config(tmp_path, concurrency=2, cache_enabled=False)
+    for index in range(6):
+        (tmp_path / "source" / f"{index}.mp4").write_bytes(b"video")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "only.mp4").write_bytes(b"video")
+    config.sources["pool_2"] = config.sources["pool_1"].model_copy(
+        update={"directory": "second", "label": "第二素材库"}
+    )
+    config.timeline.append("pool_2")
+    first_pair = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    def fake_probe(path, *_args, **_kwargs):
+        with lock:
+            initial = len(first_pair) < 2
+            if initial:
+                first_pair.append(path.parent.name)
+        if initial:
+            barrier.wait(timeout=2)
+        return MediaProbe(duration=1, width=720, height=1280)
+
+    monkeypatch.setattr(scanner_module, "probe_media", fake_probe)
+    result = scan_config(config)
+    assert result.ok
+    assert set(first_pair) == {"source", "second"}
+    assert len(result.assets["pool_1"]) == 6
+    assert len(result.assets["pool_2"]) == 1
