@@ -358,6 +358,8 @@ def test_real_videotoolbox_export(tmp_path, resolution):
         assert job["status"] == "completed", job
         assert job["encoding"]["actual_video_encoders"] == ["h264_videotoolbox"], job["encoding"]
         assert job["encoding"]["fallback_count"] == 0
+        assert job["items"][0]["hardware_decode_requested"] is True
+        assert len(job["items"][0]["encoder_attempts"]) == 1
         info = inspect(Path(job["items"][0]["output_path"]))
         assert (info["width"], info["height"]) == (job["output_width"], job["output_height"])
         assert info["fps"] == "30000/1001" and info["has_audio"]

@@ -126,7 +126,26 @@ def test_background_encoder_plan_detects_videotoolbox(tmp_path, monkeypatch):
     assert first["planned_video_encoder"] == VIDEOTOOLBOX_VIDEO_ENCODER
     assert first["hardware_acceleration_available"] is True
     assert second == first
-    assert calls == [["ffmpeg", "-hide_banner", "-encoders"]]
+    assert len(calls) == 1
+    assert Path(calls[0][0]).name == "ffmpeg"
+    assert calls[0][1:] == ["-hide_banner", "-encoders"]
+
+
+def test_software_preference_overrides_cached_hardware_slice_plan(tmp_path):
+    from smartstitch.codec_settings import CodecSettings, CodecSettingsStore
+    slicer, analysis_id, review_revision, config_hash = setup_slicer(tmp_path, lambda *_args, **_kwargs: None)
+    settings = CodecSettingsStore(tmp_path / "data")
+    settings.save(CodecSettings(software_codec_enabled=True))
+    slicer.codec_settings = settings
+    slicer._background_encoder_plan_cache = {"planned_video_encoder": VIDEOTOOLBOX_VIDEO_ENCODER}
+    batch = slicer.prepare(TimelineSliceRequest(
+        analysis_id=analysis_id, config_id="slice-library", review_revision=review_revision,
+        current_config_hash=config_hash, client_request_id="software-slice",
+        assignments=[{"segment_index": 1, "category": "hook"}],
+    ), prefer_hardware=True)
+    settings.save(CodecSettings(software_codec_enabled=False))
+    assert batch["encoding"]["policy"] == "software_only"
+    assert batch["items"][0]["planned_video_encoder"] == SOFTWARE_VIDEO_ENCODER
 
 
 @pytest.mark.parametrize("hardware_succeeds", [True, False])

@@ -123,6 +123,7 @@ async function main(landscape = false, mode = "local") {
   const detailContext = { RenderEta, landscape, $: selector => selector === "#jobDetail" ? detail : null,
     statusInfo: () => ["已完成", "success"], escapeHtml: value => String(value ?? "") };
   vm.createContext(detailContext);
+  vm.runInContext(app.match(/function codecDecodeLabel\(status\) \{[\s\S]*?\n\}/)[0], detailContext);
   vm.runInContext(detailSource, detailContext);
   detailContext.job = { id: "job-1080", status: "completed", output_width: landscape ? 1920 : 1080, output_height: landscape ? 1080 : 1920,
     total: 1, completed: 1, succeeded: 1, failed: 0, items: [] };

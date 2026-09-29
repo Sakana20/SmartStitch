@@ -233,6 +233,7 @@ class ClusterWorker:
                 "version": __version__, "active": active, "capacity": 1,
                 "canonical_root": str(self.config_store.canonical_directory),
                 "conversion_protocol": 2,
+                "conversion_codec_policy": 1,
                 "video_upscale": {**model_status(self.data_directory), "protocol": 2, "vfr_protocol": 1,
                                   "models": {name: model_status(self.data_directory, name) for name in MODEL_CONFIGS}},
             }
@@ -411,6 +412,10 @@ class ClusterWorker:
             localized = _localize(payload["config"], canonical, self.config_store.directory)
             item = _localize(payload["item"], canonical, self.config_store.directory)
             config = AppConfig.model_validate(localized)
+            from .codec_settings import CodecSettingsStore
+            if CodecSettingsStore(self.data_directory).get().software_codec_enabled:
+                config.output.software_codec_enabled = True
+                config.output.video_codec = "libx264"
             planned = _planned(item)
             for asset in [*planned.selections.values(), planned.overlay, planned.visual_border,
                           *(effect.asset for effect in planned.visual_effects)]:
@@ -886,7 +891,11 @@ class ClusterMaster:
                                               actual_duration=attempt["result"]["actual_duration"],
                                               actual_video_encoder=attempt["result"]["actual_video_encoder"],
                                               hardware_acceleration=attempt["result"]["hardware_acceleration"],
-                                              encoder_fallback_reason=attempt["result"]["encoder_fallback_reason"], error=None)
+                                              encoder_fallback_reason=attempt["result"]["encoder_fallback_reason"],
+                                              video_decode_status=attempt["result"].get("video_decode_status", "unknown"),
+                                              decoder_fallback_reason=attempt["result"].get("decoder_fallback_reason"),
+                                              codec_attempts=attempt["result"].get("codec_attempts", []),
+                                              video_decode_inputs=attempt["result"].get("video_decode_inputs", []), error=None)
                         elif attempt["status"] in {"failed", "cancelled", "interrupted"}:
                             next_status = "failed" if item["attempts"] > job["retry_count"] else "pending"
                             self._update_item(job_id, item["index"], status=next_status, error=attempt.get("error"))

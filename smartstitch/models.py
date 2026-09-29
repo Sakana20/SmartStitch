@@ -637,6 +637,7 @@ class OutputConfig(BaseModel):
     height: int = Field(default=1280, gt=0)
     fps: float = Field(default=30, gt=0)
     video_codec: str = "h264_videotoolbox"
+    software_codec_enabled: bool = False
     pixel_format: str = "yuv420p"
     video_preset: str = "medium"
     rate_control: Literal["crf", "vbr"] = "crf"

@@ -90,6 +90,7 @@ class TimelineSlicer:
         self.timeline_analyzer = timeline_analyzer
         self.library_service = library_service
         self.runner = runner
+        self.codec_settings = None
         self._prepare_lock = threading.RLock()
         self._execution_lock = threading.RLock()
         self._encoder_capability_lock = threading.Lock()
@@ -258,7 +259,7 @@ class TimelineSlicer:
         resolved_job_id = job_id or uuid.uuid4().hex
         encoding_plan = (
             self._background_encoder_plan()
-            if prefer_hardware
+            if prefer_hardware and not (self.codec_settings and self.codec_settings.get().software_codec_enabled)
             else self._software_encoder_plan()
         )
         batch = {

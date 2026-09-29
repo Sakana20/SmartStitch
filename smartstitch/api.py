@@ -33,6 +33,7 @@ from .collaboration import (
 from .accounts import AccountError, AccountStore, public_account
 from .cluster import ClusterMaster, ClusterWorker, NodeRegistration
 from .config import ConfigError, ConfigStore
+from .codec_settings import CodecSettings, CodecSettingsStore
 from .database import SQLiteStore
 from .feishu import (
     FeishuBaseClient,
@@ -283,6 +284,7 @@ def create_app(
         library_service = LibraryService(config_store)
         visual_border_library = VisualBorderLibrary(config_store.directory)
         database_store = SQLiteStore(resolved_data_directory / "smartstitch.db")
+        codec_settings = CodecSettingsStore(resolved_data_directory)
         media_probe_cache = MediaProbeCache(database_store)
         try:
             media_probe_cache.prune()
@@ -303,6 +305,7 @@ def create_app(
         feishu_sync_manager.resume_interrupted()
         timeline_analyzer = TimelineAnalyzer(resolved_data_directory / "timelines")
         timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
+        timeline_slicer.codec_settings = codec_settings
         slice_job_manager = SliceJobManager(timeline_slicer, database_store)
         prores_alpha_manager = ProResAlphaManager(visual_border_library)
         portrait_manager = LandscapeToPortraitManager(database_store)
@@ -393,6 +396,7 @@ def create_app(
     app.state.landscape_manager = landscape_manager
     app.state.video_upscale_manager = video_upscale_manager
     app.state.feishu_settings = feishu_settings
+    app.state.codec_settings = codec_settings
     app.state.feishu_sync_manager = feishu_sync_manager
     app.state.feishu_client_factory = FeishuBaseClient
     app.state.database_store = database_store
@@ -1993,6 +1997,20 @@ def create_app(
                 raise HTTPException(409, str(exc)) from exc
             return {"ok": True, "job_id": job_id}
         raise HTTPException(404, "超分任务不存在")
+
+    @app.get("/api/v1/settings/codecs")
+    def get_codec_settings() -> dict[str, object]:
+        try:
+            return codec_settings.get().model_dump()
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.put("/api/v1/settings/codecs")
+    def save_codec_settings(settings: CodecSettings) -> dict[str, object]:
+        try:
+            return codec_settings.save(settings).model_dump()
+        except OSError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/v1/tools/batch-dedup/settings")
     def get_batch_dedup_settings() -> dict[str, object]:

@@ -43,8 +43,10 @@ def available_nodes(cluster, selected=None):
 
 def submit_conversion(worker, payload):
     required = {'attempt_id', 'canonical_root', 'source_relative', 'source_sha256', 'direction', 'resolution', 'stage_relative'}
-    if set(payload) != required:
+    if not required <= set(payload) or set(payload) - required - {'software_codec_enabled'}:
         raise ValueError('转换请求字段无效')
+    if 'software_codec_enabled' in payload and type(payload['software_codec_enabled']) is not bool:
+        raise ValueError('编解码设置无效')
     attempt = payload['attempt_id']
     if not isinstance(attempt, str) or len(attempt) != 32 or any(c not in '0123456789abcdef' for c in attempt):
         raise ValueError('执行标识无效')
@@ -112,6 +114,8 @@ def run_worker(worker, payload, source, event):
                 raise ValueError('转换素材复制期间发生变化')
             cls = LandscapeToPortraitManager if payload['direction'] == 'landscape-to-portrait' else PortraitToLandscapeManager
             manager = cls(SQLiteStore(local / 'jobs.sqlite'))
+            from .codec_settings import CodecSettingsStore
+            manager.software_codec_override = bool(payload.get('software_codec_enabled')) or CodecSettingsStore(worker.data_directory).get().software_codec_enabled
             preview = manager.preview(str(inputs), str(local / 'output'), payload['resolution'])
             job = manager.create(preview['id'])
             while manager.active_count():
@@ -195,6 +199,8 @@ def run_batch(manager, job, nodes):
                                'source_relative': str(source.relative_to(root)), 'source_sha256': sha,
                                'stage_relative': str((folder / f'{attempt}.mp4').relative_to(root)),
                                'direction': job['direction'], 'resolution': job['resolution']}
+                    if node.get('conversion_codec_policy'):
+                        payload['software_codec_enabled'] = bool(job.get('software_codec_enabled'))
                     try:
                         completed_attempt = False
                         while not manager.cancelled.is_set():

@@ -21,6 +21,7 @@ from .database import SQLiteStore
 from .video_encoding import (
     SOFTWARE_VIDEO_ENCODER, VIDEOTOOLBOX_VIDEO_ENCODER,
     preferred_encoder_plan, video_encoder_arguments,
+    fallback_codec_attempts, hardware_decoder_available, hardware_decode_supported,
 )
 
 TABLE = "portrait_jobs"
@@ -96,6 +97,7 @@ def inspect(path: Path) -> dict[str, Any]:
     if stream.get("pix_fmt", "").startswith(("yuva", "rgba", "bgra", "argb", "abgr", "gbrap", "ya")):
         warnings.append("透明通道不保留")
     return {"width": width, "height": height, "fps": str(fps), "duration": duration,
+            "video_codec": stream.get("codec_name"),
             "has_audio": bool(audio), "warnings": warnings,
             "nominal_fps": stream.get("r_frame_rate", "0/1"),
             "frame_count": int(stream["nb_frames"]) if str(stream.get("nb_frames", "")).isdigit() else None}
@@ -119,9 +121,9 @@ def command(source: Path, target: Path, item: dict[str, Any]) -> list[str]:
              f"[fs]scale={width}:{height},setsar=1[fg];"
              "[bg][fg]overlay=(W-w)/2:(H-h)/2:format=auto,format=yuv420p[v]")
     return [str(shutil.which("ffmpeg")), "-hide_banner", "-v", "error", "-nostdin", "-y",
+            *(["-hwaccel", "videotoolbox"] if item.get("hardware_decode_requested") else []),
             "-i", str(source), "-filter_complex", graph, "-map", "[v]", "-map", "0:a:0?",
             *video_encoder_arguments(item.get("actual_video_encoder", SOFTWARE_VIDEO_ENCODER), software_preset="medium"),
-            *(["-allow_sw", "0"] if item.get("actual_video_encoder") == VIDEOTOOLBOX_VIDEO_ENCODER else []),
             "-fps_mode", "passthrough",
             "-c:a", "aac", "-b:a", "192k", "-map_metadata", "-1", "-metadata:s:v:0", "rotate=0",
             "-movflags", "+faststart", "-progress", "pipe:1", str(target)]
@@ -139,6 +141,9 @@ class LandscapeToPortraitManager:
 
     def __init__(self, store: SQLiteStore):
         self.store = store
+        from .codec_settings import CodecSettingsStore
+        self.codec_settings = CodecSettingsStore(store.path.parent)
+        self.software_codec_override = None
         store.ensure_job_table(self.table)
         store.mark_active_interrupted(self.table)
         for job in store.list(self.table):
@@ -241,8 +246,15 @@ class LandscapeToPortraitManager:
                        scheduled_at=scheduled_at.isoformat() if scheduled_at else None, created_at=now(), finished_at=None,
                        total=preview["pending_count"], completed=0, succeeded=0, failed=0,
                        current_file=None, current_progress=0)
-            job["encoding"] = {**preferred_encoder_plan(), "actual_video_encoders": [],
+            software_only = (self.codec_settings.get().software_codec_enabled
+                             if self.software_codec_override is None else self.software_codec_override)
+            if software_only and nodes and any(not node.get("conversion_codec_policy") for node in nodes):
+                raise ValueError("软解编解码设置需要更新所选工作机")
+            job["software_codec_enabled"] = software_only
+            plan = preferred_encoder_plan(software_only=True) if software_only else preferred_encoder_plan()
+            job["encoding"] = {**plan, "actual_video_encoders": [],
                                "fallback_count": 0, "fallback_reason": None}
+            job["hardware_decode_preferred"] = not software_only and hardware_decoder_available()
             for item in job["items"]:
                 if item["status"] == "pending":
                     item["status"] = "queued"
@@ -465,20 +477,26 @@ class LandscapeToPortraitManager:
                         item["output_path"] = str(target)
                         job["current_phase"] = "rendering"
                     planned = item["planned_video_encoder"]
-                    encoders = [planned]
-                    if planned == VIDEOTOOLBOX_VIDEO_ENCODER:
-                        if hardware_disabled_reason:
-                            encoders = [SOFTWARE_VIDEO_ENCODER]
-                            item["encoder_fallback_reason"] = hardware_disabled_reason
-                        else:
-                            encoders.append(SOFTWARE_VIDEO_ENCODER)
-                    for encoder in encoders:
+                    encoder = SOFTWARE_VIDEO_ENCODER if hardware_disabled_reason else planned
+                    hardware_decode = bool(job.get("hardware_decode_preferred")) and hardware_decode_supported(info.get("video_codec"))
+                    queue = [(encoder, hardware_decode)]
+                    tried = set()
+                    if hardware_disabled_reason:
+                        item["encoder_fallback_reason"] = hardware_disabled_reason
+                    while queue:
+                        encoder, hardware_decode = queue.pop(0)
+                        if (encoder, hardware_decode) in tried:
+                            continue
+                        tried.add((encoder, hardware_decode))
                         with self.lock:
                             if self.cancelled.is_set():
                                 break
                             job["current_progress"] = 0
                             item["actual_video_encoder"] = encoder
-                            attempt = {"encoder": encoder, "status": "running", "started_at": now()}
+                            item["hardware_decode_requested"] = hardware_decode
+                            item["video_decode_status"] = "requested_unconfirmed" if hardware_decode else "software"
+                            attempt = {"encoder": encoder, "hardware_decode_requested": hardware_decode,
+                                       "status": "running", "started_at": now()}
                             item["encoder_attempts"].append(attempt)
                             self._update_encoding_summary(job)
                             self.store.save(self.table, job)
@@ -490,13 +508,21 @@ class LandscapeToPortraitManager:
                                                finished_at=now(), error=str(exc))
                             if self.cancelled.is_set():
                                 break
-                            if encoder != VIDEOTOOLBOX_VIDEO_ENCODER:
+                            if isinstance(exc, (OSError, KeyError)):
                                 raise
+                            candidates = fallback_codec_attempts(encoder, hardware_decode, str(exc))
+                            candidates = [pair for pair in candidates if pair not in tried]
+                            if not candidates:
+                                raise
+                            queue = candidates
                             temporary.unlink(missing_ok=True)
                             with self.lock:
-                                hardware_disabled_reason = str(exc)
-                                item["encoder_fallback_reason"] = str(exc)
-                                job["encoding"]["fallback_reason"] = str(exc)
+                                if candidates[0][0] != encoder:
+                                    hardware_disabled_reason = str(exc)
+                                    item["encoder_fallback_reason"] = str(exc)
+                                    job["encoding"]["fallback_reason"] = str(exc)
+                                if hardware_decode and not candidates[0][1]:
+                                    item["decoder_fallback_reason"] = str(exc)
                                 self._update_encoding_summary(job)
                                 self.store.save(self.table, job)
                             continue

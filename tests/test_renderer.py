@@ -151,6 +151,7 @@ def test_render_falls_back_to_software_when_videotoolbox_is_unavailable(
         "smartstitch.renderer._videotoolbox_capability",
         lambda: (False, "test unavailable"),
     )
+    monkeypatch.setattr("smartstitch.renderer.hardware_decoder_available", lambda: False)
 
     output = tmp_path / "fallback.mp4"
     result = render_item(config, item, output, threading.Event())

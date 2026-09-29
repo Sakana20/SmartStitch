@@ -63,7 +63,8 @@ def setup(tmp_path, monkeypatch):
     ('landscape-to-portrait', '160x90', (720, 1280)),
     ('portrait-to-landscape', '90x160', (1280, 720)),
 ])
-def test_two_workers_real_conversion_and_isolated_records(setup, tmp_path, monkeypatch, direction, size, dimensions):
+@pytest.mark.parametrize('software_only', [False, True])
+def test_two_workers_real_conversion_and_isolated_records(setup, tmp_path, monkeypatch, direction, size, dimensions, software_only):
     apps, peers, shared, submitted = setup
     title = '横改竖' if direction == 'landscape-to-portrait' else '竖改横'
     inputs = shared / title / '原素材'
@@ -87,6 +88,7 @@ def test_two_workers_real_conversion_and_isolated_records(setup, tmp_path, monke
 
     monkeypatch.setattr(LandscapeToPortraitManager, '_render_and_verify', simultaneous)
     client = authenticated_client(apps[0])
+    assert client.put('/api/v1/settings/codecs', json={'software_codec_enabled': software_only}).status_code == 200
     preview = client.post(f'/api/v1/tools/{direction}/preview', json={'mode': 'cluster'}).json()
     response = client.post(f'/api/v1/tools/{direction}', json={'preview_id': preview['id'], 'mode': 'cluster'})
     assert response.status_code == 200, response.text
@@ -101,10 +103,14 @@ def test_two_workers_real_conversion_and_isolated_records(setup, tmp_path, monke
         info = inspect(Path(item['output_path']))
         assert (info['width'], info['height']) == dimensions
         assert info['has_audio']
+        if software_only:
+            assert item['actual_video_encoder'] == 'libx264'
+            assert item['hardware_decode_requested'] is False
     assert not (shared / title / '.暂存' / job['id']).exists()
     assert job['source_directory'] == str(inputs)
     assert job['output_directory'] == str(shared / title / '已处理')
     assert all(payload['source_relative'].startswith(title + '/原素材/') for _, payload in submitted)
+    assert all(payload['software_codec_enabled'] is software_only for _, payload in submitted)
     for app in apps[1:]:
         assert app.state.portrait_manager.list() == []
         assert app.state.landscape_manager.list() == []

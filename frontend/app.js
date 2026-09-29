@@ -134,6 +134,7 @@ const toolboxTools = [
   { id: "portrait-to-landscape", title: "竖改横", description: "批量转为横屏，清晰原画面叠加模糊背景。", cover: "/assets/tools/portrait-to-landscape.svg?v=2", order: 8, mount: mountLandscapeTool },
   { id: "folder-concat", title: "文件夹拼接", description: "选择两个文件夹，批量拼接视频。", cover: "/assets/tools/folder-concat.svg", order: 10, mount: mountFolderConcatTool },
   { id: "batch-dedup", title: "批量去重", description: "选择文件夹，逐条应用现有视觉去重效果。", cover: "/assets/tools/batch-dedup.svg", order: 20, mount: mountBatchDedupTool },
+  { id: "settings", title: "设置", description: "应用偏好与设置，更多选项即将加入。", cover: "/assets/tools/settings.svg", order: 30, mount: mountSettingsTool },
 ];
 let toolboxCleanup = null;
 let proresAlphaJobId = null;
@@ -1362,6 +1363,48 @@ function mountUserManagementTool(container) {
     } catch (error) { showError(error); }
   });
   refresh();
+}
+
+function mountSettingsTool(container) {
+  container.innerHTML = `
+    <div class="settings-tool">
+      <section class="settings-sections" aria-label="应用设置">
+        <div class="simple-toggle-row">
+          <span><b id="softwareCodecTitle">强制软解编解码</b><small id="softwareCodecHint">开启后使用软件解码和编码；关闭后优先使用硬件，失败时自动回退。仅影响新建任务。</small></span>
+          <input id="softwareCodecEnabled" class="switch-input" type="checkbox" role="switch" aria-labelledby="softwareCodecTitle" aria-describedby="softwareCodecHint" disabled>
+        </div>
+      </section>
+    </div>`;
+  const toggle = container.querySelector("#softwareCodecEnabled");
+  const hint = container.querySelector("#softwareCodecHint");
+  let disposed = false;
+  let saved = false;
+  api("/settings/codecs").then(settings => {
+    if (disposed) return;
+    saved = settings.software_codec_enabled;
+    toggle.checked = saved;
+    toggle.disabled = false;
+  }).catch(error => {
+    if (!disposed) hint.textContent = `无法读取设置：${error.message}`;
+  });
+  toggle.addEventListener("change", async () => {
+    toggle.disabled = true;
+    try {
+      const settings = await api("/settings/codecs", {
+        method: "PUT", body: JSON.stringify({ software_codec_enabled: toggle.checked }),
+      });
+      saved = settings.software_codec_enabled;
+      if (!disposed) {
+        toggle.checked = saved;
+        toast(saved ? "已开启软解编解码，新任务使用软件处理" : "新任务优先使用硬件编解码");
+      }
+    } catch (error) {
+      if (!disposed) { toggle.checked = saved; toast(`设置保存失败：${error.message}`); }
+    } finally {
+      if (!disposed) toggle.disabled = false;
+    }
+  });
+  return () => { disposed = true; };
 }
 
 function openToolboxTool(id) {
@@ -4630,7 +4673,7 @@ function renderPortraitJobDetail(job, landscape = false) {
       const itemProgress = item.status === "completed" ? 100 : item.status === "running" ? Math.max(0, Math.min(100, (job.mode === "cluster" ? (item.progress || 0) : (job.current_progress || 0)) * 100)) : 0;
       const description = item.status === "completed" ? item.output_path : item.width && item.height ? `${item.width}×${item.height} · ${item.fps} fps` : "";
       const itemEncoder = item.actual_video_encoder ? encoderLabel(item.actual_video_encoder) : item.planned_video_encoder ? `${encoderLabel(item.planned_video_encoder)}（计划）` : "libx264";
-      return `<div class="item-row"><b>${String(index + 1).padStart(2, "0")}</b><div class="portrait-item-description"><strong>${escapeHtml(item.name)}</strong><small class="item-selections">${description ? `${escapeHtml(description)} · ` : ""}${escapeHtml(itemEncoder)}${item.node_id ? ` · 工作机 ${escapeHtml(item.node_id.slice(0, 8))} · 尝试 ${item.attempts || 1}` : ""}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${itemProgress}%"></i></div></div><span class="status ${itemClass}">${escapeHtml(itemLabel)}</span>${item.encoder_fallback_reason ? `<div class="error-text">硬编回退原因：${escapeHtml(item.encoder_fallback_reason)}</div>` : ""}${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
+      return `<div class="item-row"><b>${String(index + 1).padStart(2, "0")}</b><div class="portrait-item-description"><strong>${escapeHtml(item.name)}</strong><small class="item-selections">${description ? `${escapeHtml(description)} · ` : ""}${escapeHtml(codecDecodeLabel(item.video_decode_status))} · ${escapeHtml(itemEncoder)}${item.node_id ? ` · 工作机 ${escapeHtml(item.node_id.slice(0, 8))} · 尝试 ${item.attempts || 1}` : ""}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${itemProgress}%"></i></div></div><span class="status ${itemClass}">${escapeHtml(itemLabel)}</span>${item.decoder_fallback_reason ? `<div class="error-text">硬解回退原因：${escapeHtml(item.decoder_fallback_reason)}</div>` : ""}${item.encoder_fallback_reason ? `<div class="error-text">硬编回退原因：${escapeHtml(item.encoder_fallback_reason)}</div>` : ""}${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
     }).join("")}</div>`;
   $("#cancelPortraitJob")?.addEventListener("click", async event => {
     event.currentTarget.disabled = true;
@@ -4930,6 +4973,10 @@ async function retryJobFeishuSync(job) {
   }
 }
 
+function codecDecodeLabel(status) {
+  return ({ software: "软件解码", requested_unconfirmed: "已请求硬件解码", hardware_confirmed: "硬件解码", mixed: "混合解码" })[status] || "解码方式未知";
+}
+
 function renderJobDetail(job) {
   const [label, cls] = statusInfo(job.status); const done = job.success_count + job.failure_count; const totalProgress = RenderEta.progress(job) * 100;
   $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">BATCH #${job.short_id}</p><h2>${escapeHtml(job.config_name)}</h2><span class="status ${cls}">${label}</span><p>${escapeHtml(job.output_directory)}</p></div>
@@ -4956,7 +5003,8 @@ function renderJobDetail(job) {
         .map(([category, asset]) => `${job.job_type === "batch_dedup" ? "源视频" : job.job_type === "folder_concat" ? (category === "pool_1" ? "A" : "B") : categoryLabel(category)}：${asset.name}`)
         .join("　·　");
       const worker = item.worker_name ? ` · 工作机：${item.worker_name}` : "";
-      return `<div class="item-row"><b>${String(item.index).padStart(2,"0")}</b><div><strong>${escapeHtml(item.output_name)}</strong><small class="item-selections">${escapeHtml(selections + worker)}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${item.progress*100}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
+      const codec = item.actual_video_encoder ? `${codecDecodeLabel(item.video_decode_status)} · ${item.actual_video_encoder === "h264_videotoolbox" ? "硬件编码" : item.actual_video_encoder}` : "";
+      return `<div class="item-row"><b>${String(item.index).padStart(2,"0")}</b><div><strong>${escapeHtml(item.output_name)}</strong><small class="item-selections">${escapeHtml(selections + worker)}</small>${codec ? `<small class="item-selections">${escapeHtml(codec)}</small>` : ""}<div class="mini-progress" style="margin-top:7px"><i style="width:${item.progress*100}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.decoder_fallback_reason ? `<div class="error-text">硬解回退原因：${escapeHtml(item.decoder_fallback_reason)}</div>` : ""}${item.encoder_fallback_reason ? `<div class="error-text">硬编回退原因：${escapeHtml(item.encoder_fallback_reason)}</div>` : ""}${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
     }).join("")}</div>`;
   $("#cancelJobBtn")?.addEventListener("click", () => cancelJob(job.id));
   $("#retryFeishuSyncBtn")?.addEventListener("click", () => retryJobFeishuSync(job));

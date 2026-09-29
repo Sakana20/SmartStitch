@@ -77,6 +77,12 @@ h1 em { color: var(--green); font-weight: 500; }
 .toolbox-empty { grid-column: 1 / -1; min-height: 240px; display: grid; place-content: center; gap: 8px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 18px; }
 .toolbox-empty strong { color: var(--ink); font-family: Georgia, "Songti SC", serif; font-size: 22px; font-weight: 500; }
 .toolbox-back { margin: -8px 0 22px -7px; }
+.settings-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 18px; }
+.settings-sections > * { min-width: 0; }
+.settings-sections .switch-input { cursor: pointer; }
+.settings-sections .switch-input:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
+@media (max-width: 680px) { .settings-sections { grid-template-columns: 1fr; } }
+.settings-sections .settings-placeholder { border-style: dashed; background: rgba(255,255,255,.45); color: var(--muted); }
 .cluster-gate, .cluster-placeholder { max-width: 470px; padding: 26px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.65); }
 .cluster-gate > strong, .cluster-placeholder > strong { display: block; font-family: Georgia, "Songti SC", serif; font-size: 21px; font-weight: 500; }
 .cluster-gate > p, .cluster-placeholder > p { margin: 10px 0 24px; color: var(--muted); font-size: 12px; line-height: 1.7; }

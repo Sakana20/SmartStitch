@@ -67,6 +67,8 @@ class JobManager:
     ):
         self.config_store = config_store
         self.data_directory = data_directory
+        from .codec_settings import CodecSettingsStore
+        self.codec_settings = CodecSettingsStore(data_directory)
         self.jobs_directory = data_directory / "jobs"
         self.batch_dedup_settings_path = data_directory / "batch_dedup_settings.json"
         self.jobs_directory.mkdir(parents=True, exist_ok=True)
@@ -111,6 +113,7 @@ class JobManager:
         if not output_root.is_dir():
             raise ValueError("输出位置不存在或不是文件夹")
         config = self._folder_concat_config(preview, output_root)
+        self._apply_codec_settings(config)
         scan = scan_config(config, probe_cache=self.media_probe_cache)
         assets_by_path = {
             category: {asset.path: asset for asset in scan.assets[category]}
@@ -216,9 +219,16 @@ class JobManager:
                            "directory": preview["directory_b"], "extensions": sorted(VIDEO_SUFFIXES)},
             },
             "benefit_overlays": {"mode": "disabled", "file": ""},
-            "output": {"directory": str(output_root), "video_codec": "libx264"},
+            "output": {"directory": str(output_root), "video_codec": "h264_videotoolbox"},
             "batch": {"minimum_free_space_gb": 0.5, "retry_count": 0},
         })
+
+    def _apply_codec_settings(self, config: AppConfig) -> None:
+        config.output.software_codec_enabled = self.codec_settings.get().software_codec_enabled
+        if config.output.software_codec_enabled:
+            config.output.video_codec = "libx264"
+        elif config.output.video_codec in {"libx264", "h264_videotoolbox"}:
+            config.output.video_codec = "h264_videotoolbox"
 
     def get_batch_dedup_settings(self) -> VisualDedupConfig:
         with self.lock:
@@ -263,6 +273,7 @@ class JobManager:
                 raise ValueError("配置已停用")
             if request.output_directory:
                 config.output.directory = request.output_directory
+        self._apply_codec_settings(config)
         global_borders = (
             self.visual_border_library.assets_for_effect_layers(config)
             if self.visual_border_library is not None
@@ -609,6 +620,10 @@ class JobManager:
                     actual_video_encoder=result["actual_video_encoder"],
                     hardware_acceleration=result["hardware_acceleration"],
                     encoder_fallback_reason=result["encoder_fallback_reason"],
+                    video_decode_status=result.get("video_decode_status", "unknown"),
+                    decoder_fallback_reason=result.get("decoder_fallback_reason"),
+                    codec_attempts=result.get("codec_attempts", []),
+                    video_decode_inputs=result.get("video_decode_inputs", []),
                     error=None,
                 )
                 return
