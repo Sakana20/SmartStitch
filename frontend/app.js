@@ -717,7 +717,6 @@ async function switchView(view) {
       });
     }
     if (!state.workerAttemptTimer) state.workerAttemptTimer = setInterval(loadWorkerAttempts, 3000);
-    if (!state.upscaleJobTimer) state.upscaleJobTimer = setInterval(loadUpscaleJobs, 1000);
   } else if (state.workerAttemptTimer) {
     clearInterval(state.workerAttemptTimer);
     state.workerAttemptTimer = null;
@@ -726,10 +725,7 @@ async function switchView(view) {
     state.queueEventSource.close();
     state.queueEventSource = null;
   }
-  if (view !== "jobs" && state.upscaleJobTimer) {
-    clearInterval(state.upscaleJobTimer);
-    state.upscaleJobTimer = null;
-  }
+  syncToolJobPolling();
   if (view === "timeline") refreshTimelineConfig();
 }
 
@@ -1146,8 +1142,7 @@ function mountClusterControlTool(container) {
             if (!window.confirm("删除这条集群任务记录？已生成的视频会保留。")) return;
             await clusterApi(`/jobs/${encodeURIComponent(action.dataset.clusterDelete)}`, { method: "DELETE" });
           } else if (action.dataset.clusterDetail) {
-            await switchView("jobs");
-            openJob(action.dataset.clusterDetail);
+            await openJob(action.dataset.clusterDetail);
           }
           await refresh();
         } catch (cause) { showError(cause); action.disabled = false; }
@@ -1248,6 +1243,7 @@ function mountClusterControlTool(container) {
           }) });
           toast(job.scheduled_at ? `已预约 ${job.count} 条集群渲染任务，${formatDate(job.scheduled_at)} 开始` : `已创建 ${job.count} 条集群渲染任务`);
           await refresh();
+          await openJob(job.id);
         } catch (cause) { showError(cause); }
         finally { submit.disabled = false; }
       });
@@ -1508,9 +1504,9 @@ function mountFolderConcatTool(container) {
       const job = await api("/tools/folder-concat", { method: "POST", body: JSON.stringify(payload) });
       toast(`已提交 ${job.count} 组视频拼接任务`);
       await loadJobs();
-      await switchView("jobs");
-      openJob(job.id);
-    } catch (error) { toast(error.message, true); button.disabled = false; }
+      await openJob(job.id);
+    } catch (error) { toast(error.message, true); }
+    finally { button.disabled = false; }
   });
   return () => { disposed = true; };
 }
@@ -1733,8 +1729,9 @@ function mountVideoUpscaleTool(container, executionMode = "local") {
       videoUpscaleJobId = job.id;
       toast(job.scheduled_at ? `超分任务已预约 ${formatDate(job.scheduled_at)} 开始` : "超分任务已加入任务队列");
       await loadJobs();
-      await switchView("jobs");
-      openUpscaleJob(job.id);
+      renderJob();
+      scheduleRefresh();
+      await openUpscaleJob(job.id);
     } catch (error) { toast(error.message, true); startButton.disabled = false; }
   });
   api("/tools/video-upscale/latest").then(latest => {
@@ -2025,9 +2022,9 @@ function mountBatchDedupTool(container) {
         });
         toast(`已提交 ${job.count} 条视频的去重任务`);
         await loadJobs();
-        await switchView("jobs");
-        openJob(job.id);
-      } catch (error) { toast(error.message, true); button.disabled = false; }
+        await openJob(job.id);
+      } catch (error) { toast(error.message, true); }
+      finally { button.disabled = false; }
     });
   };
   container.innerHTML = '<div class="empty-state">正在加载去重设置…</div>';
@@ -4523,7 +4520,8 @@ async function startJob() {
     const payload = { ...requestValues(), concurrency: Number($("#concurrencyInput").value), auto_start: true };
     const job = await api("/jobs", { method: "POST", body: JSON.stringify(payload) });
     toast("任务已开始生成");
-    await loadJobs(); switchView("jobs"); openJob(job.id);
+    await loadJobs();
+    await openJob(job.id);
   } catch (error) { toast(error.message, true); }
   finally { button.disabled = false; button.querySelector("span").textContent = "开始生成"; }
 }
@@ -4616,7 +4614,6 @@ function mountPortraitTool(container, landscape = false, mode = "local", nasRoot
       if (disposed) return;
       invalidate();
       await loadJobs();
-      switchView("jobs");
       await openPortraitJob(job.id, landscape);
       toast(job.scheduled_at ? `${title}任务已预约 ${formatDate(job.scheduled_at)} 开始` : `${title}任务已开始`);
     } catch (error) { if (!disposed) { invalidate(); toast(`${error.message}，请重新读取视频`, true); } }
@@ -4630,6 +4627,8 @@ async function openLandscapeJob(jobId) {
 }
 
 async function openPortraitJob(jobId, landscape = false) {
+  state.activeJob = null;
+  syncToolJobPolling();
   const endpoint = landscape ? "portrait-to-landscape" : "landscape-to-portrait";
   $("#jobDrawer").classList.add("open");
   $("#jobDrawer").setAttribute("aria-hidden", "false");
@@ -4640,6 +4639,7 @@ async function openPortraitJob(jobId, landscape = false) {
     const job = await api(`/tools/${endpoint}/${encodeURIComponent(jobId)}`);
     state.activeJob = { ...job, job_type: landscape ? "portrait_to_landscape" : "landscape_to_portrait" };
     renderPortraitJobDetail(job, landscape);
+    syncToolJobPolling();
   } catch (error) { toast(error.message, true); }
 }
 
@@ -4697,34 +4697,42 @@ async function loadJobs() {
   } catch (error) { toast(error.message, true); }
 }
 
+function syncToolJobPolling() {
+  const toolJob = ["video_upscale", "landscape_to_portrait", "portrait_to_landscape"].includes(state.activeJob?.job_type);
+  const needed = $("#jobsView")?.classList.contains("active") || (toolJob && !terminalStates.has(state.activeJob.status));
+  if (needed && !state.upscaleJobTimer) state.upscaleJobTimer = setInterval(loadUpscaleJobs, 1000);
+  if (!needed && state.upscaleJobTimer) {
+    clearInterval(state.upscaleJobTimer);
+    state.upscaleJobTimer = null;
+  }
+}
+
 async function loadUpscaleJobs() {
-  if (!$("#jobsView")?.classList.contains("active")) return;
+  const onJobsPage = $("#jobsView")?.classList.contains("active");
+  const activeJob = state.activeJob;
+  const endpoints = {
+    video_upscale: "video-upscale",
+    landscape_to_portrait: "landscape-to-portrait",
+    portrait_to_landscape: "portrait-to-landscape",
+  };
+  const endpoint = endpoints[activeJob?.job_type];
+  if (!onJobsPage && !endpoint) return;
   try {
-    state.upscaleJobs = await api("/tools/video-upscale/jobs");
-    state.portraitJobs = await api("/tools/landscape-to-portrait/jobs");
-    state.landscapeJobs = await api("/tools/portrait-to-landscape/jobs");
-    renderJobs();
-    if (state.activeJob?.job_type === "video_upscale") {
-      const job = await api(`/tools/video-upscale/${encodeURIComponent(state.activeJob.id)}`);
-      state.activeJob = { ...job, job_type: "video_upscale" };
-      renderUpscaleJobDetail(job);
+    if (onJobsPage) {
+      [state.upscaleJobs, state.portraitJobs, state.landscapeJobs] = await Promise.all([
+        api("/tools/video-upscale/jobs"), api("/tools/landscape-to-portrait/jobs"), api("/tools/portrait-to-landscape/jobs"),
+      ]);
+      renderJobs();
     }
-    if (state.activeJob?.job_type === "landscape_to_portrait") {
-      const activeId = state.activeJob.id;
-      const job = await api(`/tools/landscape-to-portrait/${encodeURIComponent(activeId)}`);
-      if (state.activeJob?.id === activeId && state.activeJob?.job_type === "landscape_to_portrait") {
-        state.activeJob = { ...job, job_type: "landscape_to_portrait" };
-        renderPortraitJobDetail(job);
-      }
+    if (endpoint && state.activeJob === activeJob) {
+      const job = await api(`/tools/${endpoint}/${encodeURIComponent(activeJob.id)}`);
+      // A response from a closed or replaced drawer must not restore its contents.
+      if (state.activeJob !== activeJob) return;
+      state.activeJob = { ...job, job_type: activeJob.job_type };
+      if (activeJob.job_type === "video_upscale") renderUpscaleJobDetail(job);
+      else renderPortraitJobDetail(job, activeJob.job_type === "portrait_to_landscape");
     }
-    if (state.activeJob?.job_type === "portrait_to_landscape") {
-      const activeId = state.activeJob.id;
-      const job = await api(`/tools/portrait-to-landscape/${encodeURIComponent(activeId)}`);
-      if (state.activeJob?.id === activeId && state.activeJob?.job_type === "portrait_to_landscape") {
-        state.activeJob = { ...job, job_type: "portrait_to_landscape" };
-        renderPortraitJobDetail(job, true);
-      }
-    }
+    syncToolJobPolling();
   } catch (error) {
     if (error.status === 401) {
       clearInterval(state.upscaleJobTimer);
@@ -4817,6 +4825,8 @@ function renderJobs() {
 }
 
 async function openUpscaleJob(jobId) {
+  state.activeJob = null;
+  syncToolJobPolling();
   $("#jobDrawer").classList.add("open");
   $("#jobDrawer").setAttribute("aria-hidden", "false");
   if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
@@ -4826,6 +4836,7 @@ async function openUpscaleJob(jobId) {
     const job = await api(`/tools/video-upscale/${encodeURIComponent(jobId)}`);
     state.activeJob = { ...job, job_type: "video_upscale" };
     renderUpscaleJobDetail(job);
+    syncToolJobPolling();
   } catch (error) { toast(error.message, true); }
 }
 
@@ -4888,6 +4899,8 @@ function renderUpscaleJobDetail(job) {
 }
 
 async function openJob(jobId) {
+  state.activeJob = null;
+  syncToolJobPolling();
   $("#jobDrawer").classList.add("open"); $("#jobDrawer").setAttribute("aria-hidden", "false");
   if (state.eventSource) state.eventSource.close();
   if (state.feishuSyncTimer) clearTimeout(state.feishuSyncTimer);
@@ -5020,6 +5033,8 @@ function renderJobDetail(job) {
 }
 
 async function openSliceJob(jobId) {
+  state.activeJob = null;
+  syncToolJobPolling();
   $("#jobDrawer").classList.add("open");
   $("#jobDrawer").setAttribute("aria-hidden", "false");
   if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
@@ -5142,6 +5157,8 @@ async function deleteAllJobRecords() {
 function closeDrawer() {
   $("#jobDrawer").classList.remove("open");
   state.activeJob = null;
+  syncToolJobPolling();
+  $("#jobDrawer").setAttribute("aria-hidden", "true");
   if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
   if (state.feishuSyncTimer) clearTimeout(state.feishuSyncTimer);
   state.feishuSyncTimer = null;

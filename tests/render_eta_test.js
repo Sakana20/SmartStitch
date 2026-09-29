@@ -79,3 +79,33 @@ assert.equal(element.textContent, '距开始 58 秒');
 eta.tick({ querySelectorAll: () => [element] }, 3000);
 assert.equal(element.textContent, '距开始 57 秒');
 console.log('render ETA: countdown, stages, retry, stalls, scheduling, renderer progress and shared clock ok');
+
+// Regression: startup + 1.1% progress once produced roughly nine minutes,
+// even when the rest of a fast slice finished two seconds later.
+const fastSlice = { id: 'fast-slice', job_type: 'timeline_slice', status: 'running', progress: 0 };
+key = eta.observe(fastSlice, undefined, 1000);
+fastSlice.progress = .011;
+eta.observe(fastSlice, undefined, 7000);
+assert.equal(eta.label(key, 7000), '正在估算剩余时间');
+fastSlice.progress = .98;
+fastSlice.eta = { remaining_seconds: null, sample_count: 0, updated_at: 'sample-1', phase: 'verifying', pending_count: 0 };
+eta.observe(fastSlice, undefined, 8000);
+assert.equal(eta.label(key, 8000), '正在完成最后处理');
+fastSlice.status = 'completed';
+assert.equal(eta.observe(fastSlice, undefined, 9000), null);
+
+// Both queue summaries and details use the same measured estimate.
+const slicedBatch = { id: 'measured-slices', job_type: 'timeline_slice', status: 'running', progress: .25,
+  eta: { remaining_seconds: 2, sample_count: 1, updated_at: 'sample-1', phase: 'encoding', pending_count: 2 } };
+key = eta.observe(slicedBatch, undefined, 1000);
+assert.equal(eta.label(key, 1000), '预计剩余约 2 秒');
+eta.observe(slicedBatch, undefined, 2000);
+assert.equal(eta.label(key, 2000), '预计剩余约 1 秒', 'identical snapshots must not reanchor the countdown');
+slicedBatch.progress = .75;
+slicedBatch.eta = { ...slicedBatch.eta, remaining_seconds: .4, updated_at: 'sample-2', pending_count: 0 };
+eta.observe(slicedBatch, undefined, 2200);
+assert.equal(eta.label(key, 2200), '预计剩余约 1 秒');
+slicedBatch.eta = { ...slicedBatch.eta, remaining_seconds: null, updated_at: 'sample-3', phase: 'probing_audio' };
+eta.observe(slicedBatch, undefined, 2300);
+assert.equal(eta.label(key, 2300), '正在检查音轨，暂无法估算');
+console.log('fast slicing regression and measured countdown calibration ok');

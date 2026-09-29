@@ -92,7 +92,7 @@ async function main(landscape = false, mode = "local") {
   assert.equal(request.body.preview_id, "preview-1");
   assert.equal(request.body.mode, mode);
   assert.equal(request.body.node_ids, undefined);
-  assert.equal(chosenView, "jobs");
+  assert.equal(chosenView, undefined, "creating a task must keep the current page");
   assert.equal(opened, "job-1");
   assert.equal(start.disabled, true, "consumed preflight cannot be submitted twice");
   const staleReading = read.handlers.click();

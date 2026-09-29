@@ -143,6 +143,72 @@ def test_reject_paths_offline_selection_and_old_workers(setup, tmp_path, monkeyp
     assert peer.post('/conversion-attempts', json=payload).status_code == 422
 
 
+def test_forced_software_rejects_worker_without_codec_policy(setup, monkeypatch):
+    apps, _, shared, _ = setup
+    from smartstitch.codec_settings import CodecSettings
+    apps[0].state.codec_settings.save(CodecSettings(software_codec_enabled=True))
+    manager = apps[0].state.portrait_manager
+    (shared / '横改竖' / '原素材' / 'video.mp4').write_bytes(b'listed before inspection')
+    preview = manager.preview(mode='cluster')
+    monkeypatch.setattr(manager.cluster, 'node_statuses', lambda: [
+        {'node_id': 'legacy', 'online': True, 'conversion_protocol': 2},
+    ])
+    with pytest.raises(ValueError, match='更新所选工作机'):
+        manager.create(preview['id'], 'cluster')
+    assert manager.active_count() == 0
+
+
+def test_new_conversion_worker_accepts_legacy_request_and_local_software_preference(setup):
+    apps, peers, shared, _ = setup
+    import uuid
+    from smartstitch.codec_settings import CodecSettings
+    source = shared / '横改竖' / '原素材' / 'legacy.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=s=160x90:r=20:d=0.2',
+                    '-c:v', 'libx264', str(source)], check=True)
+    apps[1].state.codec_settings.save(CodecSettings(software_codec_enabled=True))
+    attempt, job_id = uuid.uuid4().hex, uuid.uuid4().hex
+    payload = {'attempt_id': attempt, 'canonical_root': str(apps[1].state.config_store.canonical_directory),
+               'source_relative': str(source.relative_to(shared)), 'source_sha256': cluster._file_sha256(source),
+               'direction': 'landscape-to-portrait', 'resolution': '720p',
+               'stage_relative': f'横改竖/.暂存/{job_id}/0/{attempt}.mp4'}
+    peer = peers['http://127.0.0.1:9801']
+    response = peer.post('/conversion-attempts', json=payload)
+    assert response.status_code == 200, response.text
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        record = peer.get(f'/attempts/{attempt}').json()
+        if record['status'] in {'succeeded', 'failed', 'cancelled'}:
+            break
+        time.sleep(.02)
+    assert record['status'] == 'succeeded', record
+    assert record['result']['actual_video_encoder'] == 'libx264'
+    assert record['result']['hardware_decode_requested'] is False
+    assert (shared / payload['stage_relative']).is_file()
+    # A new optional field must retain strict boolean validation.
+    assert peer.post('/conversion-attempts', json={**payload, 'software_codec_enabled': 'false'}).status_code == 422
+
+
+def test_new_master_omits_codec_field_for_legacy_conversion_workers(setup, monkeypatch):
+    apps, _, shared, submitted = setup
+    source = shared / '横改竖' / '原素材' / 'legacy.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=s=160x90:r=20:d=0.2',
+                    '-c:v', 'libx264', str(source)], check=True)
+    original = cluster_conversion._request
+    def legacy_request(url, token, **kwargs):
+        if url.endswith('/conversion-attempts'):
+            assert 'software_codec_enabled' not in kwargs['payload']
+        result = original(url, token, **kwargs)
+        if url.endswith('/hello'):
+            result.pop('conversion_codec_policy', None)
+        return result
+    monkeypatch.setattr(cluster, '_request', legacy_request)
+    monkeypatch.setattr(cluster_conversion, '_request', legacy_request)
+    manager = apps[0].state.portrait_manager
+    job = wait(manager, manager.create(manager.preview(mode='cluster')['id'], 'cluster')['id'])
+    assert job['status'] == 'completed', job
+    assert submitted and all('software_codec_enabled' not in payload for _, payload in submitted)
+
+
 def test_cancel_workers_and_no_publication(setup, tmp_path, monkeypatch):
     apps, peers, shared, submitted = setup
     entered = threading.Event()

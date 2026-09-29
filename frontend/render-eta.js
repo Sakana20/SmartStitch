@@ -48,11 +48,29 @@ const RenderEta = (() => {
     else if (['joining', 'audio', 'committing', 'verifying'].includes(job.phase)) message = '正在完成最后处理';
     const p = progress(job, type);
     // Reset for retries, resumes, phase changes and a changing batch/frame denominator.
-    const signature = `${job.status}:${message}:${job.started_at || ''}:${job.total_frames || job.total || job.output_unit_count || job.count || ''}`;
+    const signature = `${job.status}:${message}:${job.started_at || ''}:${type === 'timeline_slice' ? job.eta_run_started_at || '' : ''}:${job.total_frames || job.total || job.output_unit_count || job.count || ''}`;
     let record = records.get(key);
     if (!record || record.signature !== signature || p < record.progress - 0.0001) {
       record = { signature, progress: p, baseline: p, baselineAt: now, changedAt: now, rate: null, endAt: null };
       records.set(key, record);
+    }
+    if (type === 'timeline_slice') {
+      // Slice progress arrives in bursts. Never extrapolate its startup trickle.
+      // The backend measures completed slices, so a fast batch can finish before
+      // it has enough samples to display a numerical estimate.
+      record.sliceEstimate = true;
+      const estimate = job.eta;
+      const token = estimate ? `${job.eta_run_started_at || ''}:${estimate.updated_at}` : null;
+      if (token !== record.estimateToken) {
+        const seconds = estimate?.remaining_seconds;
+        record.endAt = typeof seconds === 'number' && Number.isFinite(seconds) && seconds >= 0
+          ? now + seconds * 1000 : null;
+        record.estimateToken = token;
+      }
+      if (p > record.progress) record.changedAt = now;
+      record.progress = p;
+      if (!message && estimate?.phase === 'probing_audio') message = '正在检查音轨，暂无法估算';
+      if (!message && ['verifying', 'committing'].includes(estimate?.phase) && !estimate.pending_count) message = '正在完成最后处理';
     } else if (p > record.progress) {
       if (now - record.changedAt > 30000) {
         record.baseline = p;
@@ -83,7 +101,7 @@ const RenderEta = (() => {
     if (record.message) return record.message;
     if (now - record.changedAt > 30000) return '进度暂未更新，正在重新估算';
     if (record.progress >= 0.999) return '正在完成最后处理';
-    if (!record.rate || !Number.isFinite(record.endAt)) return '正在估算剩余时间';
+    if ((!record.rate && !record.sliceEstimate) || !Number.isFinite(record.endAt) || record.endAt === null) return '正在估算剩余时间';
     return record.endAt > now ? `预计剩余约 ${duration((record.endAt - now) / 1000)}` : '正在处理，等待进度更新';
   }
 

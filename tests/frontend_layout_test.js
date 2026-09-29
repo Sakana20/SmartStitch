@@ -16,7 +16,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260929-force-software-codecs"/,
+  /href="\/styles\.css\?v=20260929-slice-eta-fix"/,
   "前端交互或样式更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|render-eta\.js|app\.js)\?v=([^"]+)/g)]

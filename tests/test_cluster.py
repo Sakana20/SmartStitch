@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import yaml
+import pytest
 from fastapi.testclient import TestClient
 
 import smartstitch.cluster as cluster
@@ -33,7 +34,8 @@ def _clip(path: Path) -> None:
     ], check=True)
 
 
-def test_cluster_renders_one_item_using_worker_local_database(tmp_path, monkeypatch):
+@pytest.mark.parametrize("master_software,worker_software", [(False, False), (True, False), (False, True), (True, True)])
+def test_cluster_renders_one_item_using_worker_local_database(tmp_path, monkeypatch, master_software, worker_software):
     shared = tmp_path / "nas" / "Smartstitch"
     shared.mkdir(parents=True)
     _clip(shared / "source" / "pool_1" / "one.mp4")
@@ -49,6 +51,9 @@ def test_cluster_renders_one_item_using_worker_local_database(tmp_path, monkeypa
     (shared / "cluster-test.yaml").write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
     master_app = create_app(base_directory=tmp_path, config_directory=shared, data_directory=tmp_path / "master-data")
     worker_app = create_app(base_directory=tmp_path, config_directory=shared, data_directory=tmp_path / "worker-data")
+    from smartstitch.codec_settings import CodecSettings
+    master_app.state.codec_settings.save(CodecSettings(software_codec_enabled=master_software))
+    worker_app.state.codec_settings.save(CodecSettings(software_codec_enabled=worker_software))
     worker_app.state.user_profiles.update("张三")
     worker = worker_app.state.cluster_worker
     peer_client = TestClient(worker._app())
@@ -91,6 +96,12 @@ def test_cluster_renders_one_item_using_worker_local_database(tmp_path, monkeypa
         assert Path(job["items"][0]["output_path"]).is_file()
         attempt = worker.get(job["items"][0]["attempt_id"])
         assert attempt["status"] == "succeeded"
+        assert submitted[0]["config"]["output"]["software_codec_enabled"] is master_software
+        if master_software or worker_software:
+            assert attempt["result"]["actual_video_encoder"] == "libx264"
+            assert attempt["result"]["video_decode_status"] == "software"
+            assert "-hwaccel" not in attempt["result"]["ffmpeg_command"]
+            assert job["items"][0]["video_decode_status"] == "software"
         assert worker_app.state.job_manager.list_jobs() == []
         worker_app.state.accounts.bootstrap("admin", "管理员", "ClusterTest123@")
         worker_client = TestClient(worker_app)

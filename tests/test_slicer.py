@@ -541,7 +541,15 @@ def test_timeline_slicer_rejects_changed_source_before_ffmpeg(tmp_path):
     assert commands == []
 
 
-def test_timeline_slicer_with_real_ffmpeg(tmp_path):
+def test_timeline_slicer_with_real_ffmpeg(tmp_path, monkeypatch):
+    estimates = []
+    update_estimate = TimelineSlicer._update_remaining_estimate
+
+    def record_estimate(batch):
+        update_estimate(batch)
+        estimates.append(dict(batch["eta"]))
+
+    monkeypatch.setattr(TimelineSlicer, "_update_remaining_estimate", staticmethod(record_estimate))
     slicer, analysis_id, review_revision, config_hash = setup_slicer(
         tmp_path, subprocess.run
     )
@@ -599,6 +607,10 @@ def test_timeline_slicer_with_real_ffmpeg(tmp_path):
     assert result["success_count"] == 3
     durations = [probe_media(Path(item["output_path"])).duration for item in result["items"]]
     assert all(0.9 <= duration <= 1.1 for duration in durations)
+    assert estimates[0]["remaining_seconds"] is None
+    assert any(estimate["sample_count"] > 0 and estimate["remaining_seconds"] is not None
+               for estimate in estimates)
+    assert estimates[-1]["remaining_seconds"] is None
 
 
 def test_timeline_slicer_composite_with_real_ffmpeg_removes_middle_gap(tmp_path):

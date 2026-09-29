@@ -427,6 +427,7 @@ class TimelineSlicer:
         manifest_key = str(batch["request_key"])
         batch["status"] = "running"
         batch["started_at"] = batch.get("started_at") or datetime.now(UTC).isoformat()
+        batch["eta_run_started_at"] = datetime.now(UTC).isoformat()
         batch.setdefault("encoding", self._software_encoder_plan())
         self._publish(batch, manifest_path, on_update)
         source_has_audio: bool | None = None
@@ -1000,11 +1001,58 @@ class TimelineSlicer:
         batch["progress"] = min(completed / total_duration, 1.0)
 
     @staticmethod
+    def _update_remaining_estimate(batch: dict[str, Any]) -> None:
+        """Estimate slices from measured completed work, excluding queue/startup time."""
+        now = datetime.now(UTC)
+        remaining_seconds = None
+        samples = []
+        run_started = batch.get("eta_run_started_at")
+        active = [item for item in batch.get("items", []) if item.get("status") in {"pending", "running"}]
+        current = next((item for item in active if item.get("status") == "running"), None)
+        current_encoder = current.get("actual_video_encoder") if current else None
+        for item in batch.get("items", []):
+            if item.get("status") != "succeeded":
+                continue
+            if current_encoder and item.get("actual_video_encoder") != current_encoder:
+                continue
+            try:
+                started = datetime.fromisoformat(item["started_at"])
+                finished = datetime.fromisoformat(item["finished_at"])
+                if run_started and started < datetime.fromisoformat(run_started):
+                    continue
+                elapsed = (finished - started).total_seconds()
+                media_duration = float(item["total_duration_seconds"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if elapsed > 0 and media_duration > 0:
+                samples.append((elapsed, media_duration))
+        # Recent samples respond to speed changes without carrying a slow first
+        # slice through the entire batch.
+        samples = samples[-5:]
+        if batch.get("status") == "running" and samples:
+            seconds_per_media_second = sum(elapsed for elapsed, _ in samples) / sum(duration for _, duration in samples)
+            remaining_media = sum(
+                max(0.0, float(item.get("total_duration_seconds") or 0))
+                * (1.0 - (0.0 if item.get("phase") == "encoding_fallback"
+                          else max(0.0, min(1.0, float(item.get("progress") or 0)))))
+                for item in active
+            )
+            remaining_seconds = remaining_media * seconds_per_media_second
+        batch["eta"] = {
+            "remaining_seconds": remaining_seconds,
+            "sample_count": len(samples),
+            "updated_at": now.isoformat(),
+            "phase": current.get("phase") if current else None,
+            "pending_count": sum(item.get("status") == "pending" for item in active),
+        }
+
+    @staticmethod
     def _publish(
         batch: dict[str, Any],
         manifest_path: Path,
         on_update: Callable[[dict[str, Any]], None] | None,
     ) -> None:
+        TimelineSlicer._update_remaining_estimate(batch)
         if on_update is not None:
             on_update(batch)
         else:
