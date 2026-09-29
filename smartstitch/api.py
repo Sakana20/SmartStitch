@@ -158,6 +158,16 @@ class VideoUpscaleModelRequest(BaseModel):
     model: str = "x2plus"
 
 
+def _upscale_response(value):
+    """Keep internal PTS indexes out of browser previews and progress polling."""
+    if isinstance(value, dict):
+        return {key: _upscale_response(item) for key, item in value.items()
+                if key not in {"timing", "probe_info"}}
+    if isinstance(value, list):
+        return [_upscale_response(item) for item in value]
+    return value
+
+
 class WorkerTokenProtectionRequest(BaseModel):
     enabled: bool
 
@@ -1878,7 +1888,7 @@ def create_app(
         try:
             if not request.source:
                 raise ValueError("请选择源视频")
-            return video_upscale_manager.preview(request.source, request.model)
+            return _upscale_response(video_upscale_manager.preview(request.source, request.model))
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -1887,7 +1897,7 @@ def create_app(
         try:
             if not request.source:
                 raise ValueError("请选择源视频文件夹")
-            return video_upscale_manager.preview_directory(request.source, request.output_directory, request.model)
+            return _upscale_response(video_upscale_manager.preview_directory(request.source, request.output_directory, request.model))
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -1906,17 +1916,17 @@ def create_app(
     def create_video_upscale(request: VideoUpscaleRequest) -> dict[str, object]:
         try:
             if request.mode == "cluster":
-                return cluster_upscale_batch_manager.create(request.model, scheduled_at=request.scheduled_at)
+                return _upscale_response(cluster_upscale_batch_manager.create(request.model, scheduled_at=request.scheduled_at))
             if request.scheduled_at:
                 raise ValueError("预约超分仅支持 NAS 集群批次")
             if not request.source:
                 raise ValueError("请选择源视频文件夹" if request.mode == "local" else "请选择源视频")
             if request.mode == "local":
-                return video_upscale_manager.create_batch(request.source, request.output_directory, request.model)
+                return _upscale_response(video_upscale_manager.create_batch(request.source, request.output_directory, request.model))
             if request.mode == "local-single":
-                return video_upscale_manager.create(request.source, request.output_directory, request.model)
+                return _upscale_response(video_upscale_manager.create(request.source, request.output_directory, request.model))
             if request.mode == "cluster-single":
-                return cluster_upscale_manager.create(request.source, request.output_directory, request.model)
+                return _upscale_response(cluster_upscale_manager.create(request.source, request.output_directory, request.model))
             raise ValueError("未知超分执行位置")
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -1930,7 +1940,7 @@ def create_app(
                 + [job for job in database_store.list("upscale_jobs") if job["id"] not in child_ids])
         fields = ("id", "status", "phase", "kind", "mode", "model", "source", "output_path",
                   "output_directory", "processed_frames", "total_frames", "total_files",
-                  "completed_files", "failed_files", "prechecked_files", "scheduled_at", "created_at", "finished_at", "error")
+                  "completed_files", "failed_files", "prechecked_files", "frame_rate_mode", "scheduled_at", "created_at", "finished_at", "error")
         jobs.sort(key=lambda job: datetime.fromisoformat(job["created_at"]).timestamp()
                   if isinstance(job["created_at"], str) else job["created_at"], reverse=True)
         return [{key: job.get(key) for key in fields} for job in jobs[:limit]]
@@ -1941,19 +1951,19 @@ def create_app(
         cluster = cluster_upscale_manager.latest()
         batch = cluster_upscale_batch_manager.latest()
         candidates = [entry for entry in (local, cluster, batch) if entry]
-        return max(candidates, key=lambda entry: datetime.fromisoformat(entry["created_at"]).timestamp()
-                   if isinstance(entry["created_at"], str) else entry["created_at"]) if candidates else None
+        return _upscale_response(max(candidates, key=lambda entry: datetime.fromisoformat(entry["created_at"]).timestamp()
+                   if isinstance(entry["created_at"], str) else entry["created_at"])) if candidates else None
 
     @app.get("/api/v1/tools/video-upscale/{job_id}")
     def get_video_upscale(job_id: str) -> dict[str, object]:
         try:
-            return video_upscale_manager.get(job_id)
+            return _upscale_response(video_upscale_manager.get(job_id))
         except KeyError as exc:
             try:
-                return cluster_upscale_batch_manager.get(job_id)
+                return _upscale_response(cluster_upscale_batch_manager.get(job_id))
             except KeyError:
                 try:
-                    return cluster_upscale_manager.get(job_id)
+                    return _upscale_response(cluster_upscale_manager.get(job_id))
                 except KeyError:
                     raise HTTPException(404, "超分任务不存在") from exc
 
@@ -1961,12 +1971,12 @@ def create_app(
     def cancel_video_upscale(job_id: str) -> dict[str, object]:
         try:
             try:
-                return video_upscale_manager.cancel(job_id)
+                return _upscale_response(video_upscale_manager.cancel(job_id))
             except ValueError:
                 try:
-                    return cluster_upscale_batch_manager.cancel(job_id)
+                    return _upscale_response(cluster_upscale_batch_manager.cancel(job_id))
                 except ValueError:
-                    return cluster_upscale_manager.cancel(job_id)
+                    return _upscale_response(cluster_upscale_manager.cancel(job_id))
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -2014,6 +2024,19 @@ def create_app(
             return {"ok": True, "deleted_count": job_manager.delete_all()}
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/v1/jobs/events")
+    async def job_queue_events() -> StreamingResponse:
+        async def stream():
+            previous = ""
+            while not app.state.stream_shutdown_event.is_set():
+                payload = json.dumps(job_manager.list_jobs(), ensure_ascii=False)
+                if payload != previous:
+                    yield f"event: jobs_update\ndata: {payload}\n\n"
+                    previous = payload
+                await asyncio.sleep(1.0)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
 
     @app.get("/api/v1/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, object]:

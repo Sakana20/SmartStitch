@@ -17,6 +17,7 @@ dependencies = [
   "PyYAML>=6.0,<7",
   "truststore>=0.10,<1",
   "uvicorn[standard]>=0.32,<1",
+  "av>=16,<17",
 ]
 
 [project.optional-dependencies]

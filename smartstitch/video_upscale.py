@@ -134,7 +134,111 @@ def prepare_model(data_directory: Path, zip_source: Path | None = None, *, model
     return model_status(data_directory, model_name)
 
 
-def probe_video(source: Path) -> dict[str, Any]:
+def _positive_rate(value: Any) -> Fraction | None:
+    try:
+        rate = Fraction(str(value))
+        return rate if rate > 0 else None
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def _check_frame_timestamps(source: Path, ffprobe: str, video: dict[str, Any],
+                            timing: dict | None = None) -> tuple[Fraction, int]:
+    """Check decoded PTS without buffering images; optionally retain an integer index."""
+    time_base = _positive_rate(video.get("time_base"))
+    if time_base is None:
+        raise ValueError("无法读取视频时间基准，不能确认恒定帧率")
+    command = [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_frames",
+               "-show_entries", "frame=best_effort_timestamp,duration,pkt_duration", "-of", "compact=p=0", str(source)]
+    # Spool to disk rather than hold a potentially large frame list in memory.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as timestamps:
+        try:
+            result = subprocess.run(command, stdout=timestamps, stderr=subprocess.PIPE,
+                                    text=True, timeout=120, check=False)
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError("完整帧率检测超时，无法确认恒定帧率") from exc
+        if result.returncode:
+            raise ValueError((result.stderr or "完整帧率检测失败")[-800:])
+        timestamps.seek(0)
+        first = previous = None
+        minimum = maximum = None
+        frames = 0
+        variable = False
+        for line in timestamps:
+            if not line.strip():
+                continue
+            fields = dict(part.split("=", 1) for part in line.strip().split("|") if "=" in part)
+            # FFprobe can emit separate side-data lines; they are not frames.
+            if "best_effort_timestamp" not in fields and "side_data_type" in fields:
+                continue
+            try:
+                pts = int(fields["best_effort_timestamp"])
+            except (KeyError, ValueError) as exc:
+                raise ValueError("帧时间戳缺失，无法确认恒定帧率") from exc
+            if previous is not None:
+                delta = pts - previous
+                if delta <= 0:
+                    raise ValueError("帧时间戳不递增，无法确认恒定帧率")
+                minimum = delta if minimum is None else min(minimum, delta)
+                maximum = delta if maximum is None else max(maximum, delta)
+                if maximum - minimum > 1:
+                    variable = True
+            else:
+                first = pts
+            previous = pts
+            last_fields = fields
+            frames += 1
+        if frames < 2:
+            raise ValueError("有效帧不足，无法完整确认恒定帧率")
+        elapsed_ticks = previous - first
+        last_duration = _positive_rate(last_fields.get("duration") or last_fields.get("pkt_duration"))
+        if last_duration is None and str(video.get("duration_ts", "")).isdigit():
+            start_pts = video.get("start_pts")
+            last_duration = int(start_pts if start_pts is not None else first) + int(video["duration_ts"]) - previous
+        if last_duration is not None and last_duration > 0:
+            if last_duration < minimum - 1 or last_duration > maximum + 1:
+                variable = True
+        # A one-tick interval difference is valid rounding only when the whole
+        # timeline stays within one tick of an evenly spaced sequence.
+        timestamps.seek(0)
+        index = 0
+        for line in timestamps:
+            match = re.search(r"(?:^|\|)best_effort_timestamp=(-?\d+)(?:\||$)", line.strip())
+            if not match:
+                continue
+            deviation = (int(match[1]) - first) * (frames - 1) - index * elapsed_ticks
+            if abs(deviation) > frames - 1:
+                variable = True
+            index += 1
+        if variable and timing is None:
+            raise ValueError("完整检测确认可变帧率")
+        if timing is not None:
+            ticks = []
+            timestamps.seek(0)
+            for line in timestamps:
+                match = re.search(r"(?:^|\|)best_effort_timestamp=(-?\d+)(?:\||$)", line.strip())
+                if match:
+                    ticks.append(int(match[1]) - first)
+            if last_duration is None or last_duration <= 0:
+                if variable:
+                    raise ValueError("无法确定可变帧率视频末帧时长")
+                last_duration = previous - first if frames == 2 else ticks[-1] - ticks[-2]
+            timing.update(time_base=str(time_base), pts=ticks, last_duration=int(last_duration),
+                          start_pts=first, variable=variable)
+        if variable:
+            return Fraction(frames, elapsed_ticks + timing["last_duration"]) / time_base, frames
+        for value in (video.get("r_frame_rate"), video.get("avg_frame_rate")):
+            rate = _positive_rate(value)
+            if rate is None:
+                continue
+            interval = 1 / (rate * time_base)
+            if (abs(elapsed_ticks - (frames - 1) * interval) <= 1
+                    and abs(minimum - interval) <= 1 and abs(maximum - interval) <= 1):
+                return rate, frames
+        return Fraction(frames - 1, elapsed_ticks) / time_base, frames
+
+
+def probe_video(source: Path, *, force_timestamps: bool = False) -> dict[str, Any]:
     source = source.expanduser().resolve()
     if not source.is_file() or source.suffix.lower() not in SUFFIXES:
         raise ValueError("请选择 MP4、MOV、M4V 或 MKV 视频文件")
@@ -143,7 +247,7 @@ def probe_video(source: Path) -> dict[str, Any]:
         raise ValueError("找不到 FFprobe")
     command = [ffprobe, "-v", "error", "-show_entries",
                "format=duration:stream=index,codec_type,codec_name,width,height,pix_fmt,"
-               "r_frame_rate,avg_frame_rate,nb_read_frames,nb_frames,color_transfer:"
+               "r_frame_rate,avg_frame_rate,time_base,duration_ts,start_pts,nb_read_frames,nb_frames,color_transfer:"
                "stream_side_data=rotation", "-of", "json", str(source)]
     result = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
     if result.returncode:
@@ -163,13 +267,16 @@ def probe_video(source: Path) -> dict[str, Any]:
         raise ValueError("首版不支持 HDR 视频")
     if any(int(side.get("rotation", 0)) for side in video.get("side_data_list", [])):
         raise ValueError("首版暂不支持旋转元数据视频")
-    fps = Fraction(video.get("avg_frame_rate", "0/1"))
-    if fps <= 0 or fps != Fraction(video.get("r_frame_rate", "0/1")):
-        raise ValueError("首版只支持恒定帧率视频")
-    # MP4/MOV normally record an exact frame count. Avoid decoding the whole
-    # NAS video just to refresh the preview; count frames only when absent.
+    fps = _positive_rate(video.get("avg_frame_rate"))
+    nominal_fps = _positive_rate(video.get("r_frame_rate"))
+    full_check = force_timestamps or fps is None or nominal_fps is None or fps != nominal_fps
+    # MP4/MOV normally record an exact frame count. Reuse the full timestamp
+    # check's count when needed; otherwise count only if the header omits it.
     recorded_frames = video.get("nb_frames")
     frames = int(recorded_frames) if str(recorded_frames).isdigit() else 0
+    timing = {}
+    if full_check:
+        fps, frames = _check_frame_timestamps(source, ffprobe, video, timing)
     if frames <= 0:
         counted = subprocess.run(
             [*command[:3], "-count_frames", *command[3:]],
@@ -185,7 +292,11 @@ def probe_video(source: Path) -> dict[str, Any]:
         raise ValueError("无法确定视频帧数")
     return {"source": str(source), "width": width, "height": height,
             "fps": f"{fps.numerator}/{fps.denominator}", "frames": frames,
-            "duration": frames / float(fps), "has_audio": bool(audios),
+            "frame_rate_check": "timestamps" if full_check else "metadata",
+            "frame_rate_mode": "vfr" if timing.get("variable") else "cfr",
+            **({"timing": timing} if timing.get("variable") or force_timestamps else {}),
+            "duration": (float((timing["pts"][-1] + timing["last_duration"]) * Fraction(timing["time_base"]))
+                         if timing.get("variable") else frames / float(fps)), "has_audio": bool(audios),
             "audio_codec": audios[0].get("codec_name") if audios else None,
             "size_bytes": source.stat().st_size, "modified_ns": source.stat().st_mtime_ns}
 
@@ -290,6 +401,10 @@ def process_segment(
 
     if not (0 <= start < end <= info["frames"]):
         raise ValueError("超分帧范围无效")
+    if info.get("frame_rate_mode") == "vfr":
+        from .vfr import process_vfr_segment
+        return process_vfr_segment(source, output, info, start, end, data_directory,
+                                   cancelled, progress, process_callback, model_name)
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise ValueError("找不到 FFmpeg")
@@ -367,6 +482,15 @@ def mux_audio(silent: Path, source: Path, target: Path, info: dict[str, Any]) ->
                "-i", str(source), "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy",
                "-c:a", "aac", "-b:a", "192k", "-t", f"{info['duration']:.9f}",
                "-movflags", "+faststart", str(target)]
+    if info.get("frame_rate_mode") == "vfr":
+        timing = info["timing"]
+        offset = float(timing["start_pts"] * Fraction(timing["time_base"]))
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-copyts",
+                   "-itsoffset", f"{offset:.12f}", "-i", str(silent), "-i", str(source),
+                   "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy",
+                   "-c:a", "aac", "-b:a", "192k", "-t", f"{offset + info['duration']:.12f}",
+                   "-avoid_negative_ts", "disabled", "-video_track_timescale",
+                   str(Fraction(timing["time_base"]).denominator), "-movflags", "+faststart", str(target)]
     result = subprocess.run(command, capture_output=True, text=True, timeout=180, check=False)
     if result.returncode:
         raise RuntimeError((result.stderr or "合并音频失败")[-1200:])
@@ -493,6 +617,7 @@ class VideoUpscaleManager:
             job = {"id": job_id, "status": "queued", "phase": "queued", "source": info["source"],
                    "model": model_name, "scale": config["scale"],
                    "width": info["width"], "height": info["height"], "fps": info["fps"],
+                   "frame_rate_mode": info.get("frame_rate_mode", "cfr"),
                    "output_path": str(target), "processed_frames": 0, "total_frames": info["frames"],
                    "created_at": _now(), "finished_at": None, "error": None}
             self.jobs[job_id] = job
@@ -538,7 +663,12 @@ class VideoUpscaleManager:
                 mux_audio(silent, source, temporary, info)
                 if cancelled.is_set():
                     raise RuntimeError("任务已取消")
-                output_info = probe_video(temporary)
+                if info.get("frame_rate_mode") == "vfr":
+                    from .vfr import verify_vfr_video
+                    verify_vfr_video(temporary, info, 0, info["frames"], audio=info["has_audio"], final=True)
+                    output_info = info.copy()
+                else:
+                    output_info = probe_video(temporary)
                 if (output_info["width"], output_info["height"], output_info["frames"], output_info["fps"]) != (
                     info["width"], info["height"], info["frames"], info["fps"]
                 ) or output_info["has_audio"] != info["has_audio"]:

@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .renderer import _run_ffmpeg_command
+from .scanner import probe_media
 from .visual_borders import EFFECT_LIBRARY_PATTERN, VisualBorderLibrary, VisualBorderLibraryError
 
 
@@ -47,7 +49,8 @@ def find_videos(directory: Path) -> list[Path]:
 
 def build_command(source: Path, output: Path, ffmpeg: str) -> list[str]:
     return [
-        ffmpeg, "-hide_banner", "-y", "-i", str(source), "-vf", ALPHA_FILTER,
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-progress", "pipe:1",
+        "-nostats", "-i", str(source), "-vf", ALPHA_FILTER,
         "-c:v", "prores_ks", "-profile:v", "4", "-qscale:v", "64",
         "-pix_fmt", "yuva444p10le", "-an", str(output),
     ]
@@ -62,6 +65,7 @@ class ProResAlphaManager:
         self.latest_id: str | None = None
         self.process: subprocess.Popen[str] | None = None
         self.stopping = False
+        self.cancel_event = threading.Event()
         self.worker: threading.Thread | None = None
 
     def preview(self, source_directory: str) -> dict[str, Any]:
@@ -138,8 +142,10 @@ class ProResAlphaManager:
                 "succeeded": 0,
                 "failed": 0,
                 "current_file": None,
+                "current_progress": 0.0,
                 "files": records,
                 "created_at": _now(),
+                "started_at": None,
                 "finished_at": None,
             }
             self.jobs[job_id] = job
@@ -166,6 +172,7 @@ class ProResAlphaManager:
     def shutdown(self, timeout: float = 8.0) -> None:
         with self.lock:
             self.stopping = True
+            self.cancel_event.set()
             if self.process is not None:
                 try:
                     self.process.terminate()
@@ -174,6 +181,16 @@ class ProResAlphaManager:
             worker = self.worker
         if worker is not None and worker is not threading.current_thread():
             worker.join(max(0.0, timeout))
+
+    def _track_process(self, process: subprocess.Popen[str] | None) -> None:
+        with self.lock:
+            self.process = process
+            if self.stopping and process is not None and process.poll() is None:
+                process.terminate()
+
+    def _update_progress(self, job_id: str, progress: float) -> None:
+        with self.lock:
+            self.jobs[job_id]["current_progress"] = progress
 
     def _run(self, job_id: str, files: list[Path], ffmpeg: str) -> None:
         try:
@@ -184,29 +201,27 @@ class ProResAlphaManager:
                         job["status"] = "interrupted"
                         break
                     job["status"] = "running"
+                    if job["started_at"] is None:
+                        job["started_at"] = _now()
                     job["current_file"] = source.name
+                    job["current_progress"] = 0.0
                     job["files"][index]["status"] = "running"
                     target = Path(job["files"][index]["output_directory"]) / job["files"][index]["output"]
                 temporary = target.with_name(f".{target.stem}.{job_id}.tmp.mov")
                 try:
-                    with self.lock:
-                        if self.stopping:
-                            job["status"] = "interrupted"
-                            break
-                        self.process = subprocess.Popen(
-                            build_command(source, temporary, ffmpeg),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                            text=True, errors="replace",
-                        )
-                    _, stderr = self.process.communicate()
-                    returncode = self.process.returncode
-                    with self.lock:
-                        self.process = None
+                    try:
+                        duration = probe_media(source, timeout_seconds=15).duration
+                    except (OSError, ValueError):
+                        duration = 0.0
+                    _run_ffmpeg_command(
+                        build_command(source, temporary, ffmpeg), duration, temporary,
+                        self.cancel_event,
+                        lambda progress: self._update_progress(job_id, progress),
+                        self._track_process,
+                    )
                     if self.stopping:
                         job["status"] = "interrupted"
                         break
-                    if returncode:
-                        raise RuntimeError((stderr or "FFmpeg 转换失败")[-1200:])
                     os.replace(temporary, target)
                     with self.lock:
                         job["files"][index]["status"] = "completed"
@@ -214,6 +229,9 @@ class ProResAlphaManager:
                         job["succeeded"] += 1
                 except (OSError, RuntimeError) as exc:
                     with self.lock:
+                        if self.stopping:
+                            job["status"] = "interrupted"
+                            break
                         job["files"][index]["status"] = "failed"
                         job["files"][index]["error"] = str(exc)
                         job["failed"] += 1
@@ -222,6 +240,7 @@ class ProResAlphaManager:
                     with self.lock:
                         if job["files"][index]["status"] in {"completed", "failed"}:
                             job["completed"] += 1
+                        job["current_progress"] = 0.0
             with self.lock:
                 if job["status"] != "interrupted":
                     job["status"] = "completed" if not job["failed"] else ("partial_failed" if job["succeeded"] else "failed")

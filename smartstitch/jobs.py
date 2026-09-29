@@ -651,6 +651,12 @@ class JobManager:
     def _summary(self, job: dict[str, Any]) -> dict[str, Any]:
         summary = copy.deepcopy(job)
         summary.pop("items", None)
+        # Include in-flight work without sending the full item list to the queue.
+        summary["progress"] = min(1.0, sum(
+            1.0 if item.get("status") in {"succeeded", "failed", "cancelled"}
+            else max(0.0, min(1.0, float(item.get("progress") or 0)))
+            for item in job.get("items", [])
+        ) / max(1, job.get("count", 0)))
         return summary
 
     def _write_manifest(self, job: dict[str, Any]) -> None:

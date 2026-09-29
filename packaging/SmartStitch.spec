@@ -2,7 +2,7 @@ import os
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules, copy_metadata
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules, copy_metadata
 
 
 project_root = Path(SPECPATH).parent
@@ -50,13 +50,14 @@ datas = [
     *copy_metadata("truststore"),
     *copy_metadata("uvicorn"),
     *copy_metadata("pywebview"),
+    *copy_metadata("av"),
 ]
-hiddenimports = collect_submodules("uvicorn") + ["webview.platforms.cocoa"]
+hiddenimports = collect_submodules("uvicorn") + collect_submodules("av") + ["webview.platforms.cocoa"]
 
 a = Analysis(
     [str(project_root / "packaging" / "launcher.py")],
     pathex=[str(project_root)],
-    binaries=[(str(ffmpeg), "bin"), (str(ffprobe), "bin")],
+    binaries=[(str(ffmpeg), "bin"), (str(ffprobe), "bin"), *collect_dynamic_libs("av")],
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

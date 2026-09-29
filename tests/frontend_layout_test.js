@@ -16,12 +16,12 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260928-sleep-protection"/,
+  /href="\/styles\.css\?v=20260929-render-eta"/,
   "前端交互或样式更新后必须刷新静态资源缓存版本",
 );
-const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|app\.js)\?v=([^"]+)/g)]
+const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|render-eta\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
-assert.equal(staticVersions.length, 3, "三个前端静态资源都必须声明缓存版本");
+assert.equal(staticVersions.length, 4, "四个前端静态资源都必须声明缓存版本");
 assert.equal(new Set(staticVersions).size, 1, "CSS 与 JS 必须使用同一个发布版本，避免新旧资源混用");
 assert.match(app, /id: "batch-dedup"[\s\S]*?mount: mountBatchDedupTool/, "批量去重卡片必须可打开");
 assert.match(app, /const availableDestinations = \(\) => \[[\s\S]*?effectLibraries\.map\(library =>/, "ProRes 保存位置必须从视觉特效库列表动态生成");

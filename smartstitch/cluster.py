@@ -175,6 +175,7 @@ class ClusterWorker:
         self.events: dict[str, threading.Event] = {}
         self.threads: dict[str, threading.Thread] = {}
         self.processes: dict[str, subprocess.Popen[str]] = {}
+        self.upscale_probe_cache: dict[tuple, dict[str, Any]] = {}
         self.server: uvicorn.Server | None = None
         self.server_thread: threading.Thread | None = None
         self.listener: socket.socket | None = None
@@ -232,7 +233,7 @@ class ClusterWorker:
                 "version": __version__, "active": active, "capacity": 1,
                 "canonical_root": str(self.config_store.canonical_directory),
                 "conversion_protocol": 2,
-                "video_upscale": {**model_status(self.data_directory), "protocol": 2,
+                "video_upscale": {**model_status(self.data_directory), "protocol": 2, "vfr_protocol": 1,
                                   "models": {name: model_status(self.data_directory, name) for name in MODEL_CONFIGS}},
             }
 
@@ -443,6 +444,8 @@ class ClusterWorker:
         required = {"kind", "protocol", "attempt_id", "job_id", "canonical_root", "source_relative",
                     "source_sha256", "stage_relative", "start", "end", "frames", "width", "height",
                     "fps", "model", "model_sha256"}
+        if "timing" in payload:
+            required.add("timing")
         if set(payload) != required or payload["kind"] != "video_upscale" or payload["protocol"] != 2:
             raise ValueError("超分任务协议不匹配")
         attempt_id = payload["attempt_id"]
@@ -481,15 +484,24 @@ class ClusterWorker:
                 raise ValueError("超分路径越过共享目录")
             if not source.is_file() or stage.exists() or stage.name != f"{attempt_id}.mp4":
                 raise ValueError("超分输入或暂存文件名无效")
-            info = probe_video(source)
-            if any(info[key] != payload[key] for key in ("frames", "width", "height", "fps")):
-                raise ValueError("超分输入视频参数不一致")
-            from .video_upscale import _sha256
-            if _sha256(source) != payload["source_sha256"]:
-                raise ValueError("超分输入校验失败")
+            if "timing" in payload:
+                # Full VFR probing belongs to the accepted attempt's background
+                # worker, so it cannot exceed the master's HTTP timeout.
+                info = {key: payload[key] for key in ("frames", "width", "height", "fps")}
+                info["vfr_request_timing"] = payload["timing"]
+                info["vfr_source_sha256"] = payload["source_sha256"]
+            else:
+                info = probe_video(source)
+                if any(info[key] != payload[key] for key in ("frames", "width", "height", "fps")):
+                    raise ValueError("超分输入视频参数不一致")
+                from .video_upscale import _sha256
+                if _sha256(source) != payload["source_sha256"]:
+                    raise ValueError("超分输入校验失败")
             start, end = payload["start"], payload["end"]
             if not isinstance(start, int) or not isinstance(end, int) or not 0 <= start < end <= info["frames"]:
                 raise ValueError("超分帧范围无效")
+            if info.get("frame_rate_mode") == "vfr":
+                raise ValueError("VFR 超分需要时间戳协议")
             value = {"attempt_id": attempt_id, "kind": "video_upscale", "request_digest": digest,
                      "batch_id": payload["job_id"], "output_name": source.name,
                      "start_frame": start, "end_frame": end, "status": "queued", "progress": 0.0,
@@ -508,6 +520,26 @@ class ClusterWorker:
         upload = stage.with_name(stage.name + ".upload")
         try:
             self._update(attempt_id, status="running")
+            if "vfr_request_timing" in info:
+                from .video_upscale import _sha256
+                from .vfr import segment_timing
+                stat = source.stat()
+                key = (str(source), stat.st_size, stat.st_mtime_ns, info["vfr_source_sha256"])
+                with self.lock:
+                    checked = self.upscale_probe_cache.get(key)
+                if checked is None:
+                    checked = probe_video(source)
+                if _sha256(source) != info["vfr_source_sha256"]:
+                    raise ValueError("超分输入校验失败")
+                if checked.get("frame_rate_mode") != "vfr" or any(checked[field] != info[field] for field in ("frames", "width", "height", "fps")):
+                    raise ValueError("VFR 超分输入视频参数不一致")
+                if info["vfr_request_timing"] != segment_timing(checked, start, end):
+                    raise ValueError("VFR 超分帧时间戳协议不匹配")
+                with self.lock:
+                    self.upscale_probe_cache = {key: checked}
+                info = checked
+                if event.is_set():
+                    raise RuntimeError("任务已取消")
             with tempfile.TemporaryDirectory(prefix="smartstitch-upscale-worker-") as directory:
                 local = Path(directory) / "segment.mp4"
                 process_segment(source, local, info, start, end, self.data_directory, event,
@@ -517,7 +549,12 @@ class ClusterWorker:
                                 model_name=model_name)
                 if event.is_set():
                     raise RuntimeError("任务已取消")
-                verified = probe_video(local)
+                if info.get("frame_rate_mode") == "vfr":
+                    from .vfr import verify_vfr_video
+                    verify_vfr_video(local, info, start, end)
+                    verified = {**info, "frames": end-start, "has_audio": False}
+                else:
+                    verified = probe_video(local)
                 if (verified["frames"] != end-start or verified["width"] != info["width"]
                         or verified["height"] != info["height"] or verified["fps"] != info["fps"]
                         or verified["has_audio"]):

@@ -1,3 +1,4 @@
+const RenderEta = require("../frontend/render-eta.js");
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -12,7 +13,7 @@ const get = id => {
 const timers = new Map();
 let timerId = 0;
 const nas = [];
-const context = { AbortController, normalizePathInput: s => s, escapeHtml: s => s,
+const context = { RenderEta, AbortController, normalizePathInput: s => s, escapeHtml: s => s,
   setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
   clearTimeout: id => timers.delete(id), setInterval: () => 0, clearInterval() {},
   toast() {}, videoUpscaleJobId: null, loadJobs: async () => {}, switchView: async () => {}, openUpscaleJob() {},

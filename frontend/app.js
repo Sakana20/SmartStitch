@@ -31,6 +31,7 @@ const state = {
   sliceJobs: [],
   activeJob: null,
   eventSource: null,
+  queueEventSource: null,
   sliceEventSource: null,
   configMode: "simple",
   configDraft: null,
@@ -707,11 +708,22 @@ async function switchView(view) {
   if (view === "assets" && previousView !== "assets") await openAssetWeightEditor();
   if (view === "jobs") {
     loadJobs();
+    if (!state.queueEventSource) {
+      state.queueEventSource = new EventSource('/api/v1/jobs/events');
+      state.queueEventSource.addEventListener('jobs_update', event => {
+        state.jobs = JSON.parse(event.data);
+        renderJobs();
+      });
+    }
     if (!state.workerAttemptTimer) state.workerAttemptTimer = setInterval(loadWorkerAttempts, 3000);
     if (!state.upscaleJobTimer) state.upscaleJobTimer = setInterval(loadUpscaleJobs, 1000);
   } else if (state.workerAttemptTimer) {
     clearInterval(state.workerAttemptTimer);
     state.workerAttemptTimer = null;
+  }
+  if (view !== "jobs" && state.queueEventSource) {
+    state.queueEventSource.close();
+    state.queueEventSource = null;
   }
   if (view !== "jobs" && state.upscaleJobTimer) {
     clearInterval(state.upscaleJobTimer);
@@ -1005,7 +1017,7 @@ function mountClusterControlTool(container) {
           for (const id of selectedNodeIds) if (!connectedIds.has(id)) selectedNodeIds.delete(id);
           renderTopology();
           panel.querySelector("[data-cluster-jobs]").innerHTML = data.jobs.length ? data.jobs.map(job => `
-            <div class="cluster-job-row"><div><strong>${escapeHtml(job.config_name)}</strong><small>${escapeHtml(statusInfo(job.status)[0])}${job.scheduled_at ? ` · 预约 ${escapeHtml(formatDate(job.scheduled_at))}` : ""} · 成功 ${job.success_count}/${job.count} · 失败 ${job.failure_count} · ${escapeHtml(job.created_at)}</small></div><div class="actions"><button class="text-btn" type="button" data-cluster-detail="${escapeHtml(job.id)}">查看任务</button>${["scheduled", "queued", "running"].includes(job.status) ? `<button class="text-btn" type="button" data-cluster-cancel="${escapeHtml(job.id)}">取消</button>` : `<button class="text-btn" type="button" data-cluster-delete="${escapeHtml(job.id)}">删除记录</button>`}</div></div>`).join("") : "<p>暂无集群任务。</p>";
+            <div class="cluster-job-row"><div><strong>${escapeHtml(job.config_name)}</strong><small>${escapeHtml(statusInfo(job.status)[0])}${job.scheduled_at ? ` · 预约 ${escapeHtml(formatDate(job.scheduled_at))}` : ""} · 成功 ${job.success_count}/${job.count} · 失败 ${job.failure_count} · ${escapeHtml(job.created_at)}</small><small>${RenderEta.html(job)}</small></div><div class="actions"><button class="text-btn" type="button" data-cluster-detail="${escapeHtml(job.id)}">查看任务</button>${["scheduled", "queued", "running"].includes(job.status) ? `<button class="text-btn" type="button" data-cluster-cancel="${escapeHtml(job.id)}">取消</button>` : `<button class="text-btn" type="button" data-cluster-delete="${escapeHtml(job.id)}">删除记录</button>`}</div></div>`).join("") : "<p>暂无集群任务。</p>";
         } catch (cause) { if (!disposed) showError(cause); }
         finally { updating = false; }
       };
@@ -1605,11 +1617,11 @@ function mountVideoUpscaleTool(container, executionMode = "local") {
     const running = !terminal.has(job.status);
     startButton.disabled = running || !preview || !canRun();
     resultBox.innerHTML = `<section class="prores-result"><strong>${job.status === "completed" ? "超分完成" : ["failed", "partial_failed"].includes(job.status) ? "超分失败" : job.status === "cancelled" ? "已取消" : "正在超分"} · ${job.processed_frames}/${job.total_frames} 帧</strong>
-      <progress value="${job.processed_frames}" max="${job.total_frames}"></progress>
+      <progress value="${job.processed_frames}" max="${job.total_frames}"></progress><p>${RenderEta.html(job, "video_upscale")}</p>
       <p>阶段：${escapeHtml(job.phase === "prechecking" ? `视频预检（${job.prechecked_files || 0}/${job.total_files}）` : ({ waiting_start: "等待预约时间", waiting_workers: "等待工作机上线" }[job.phase] || job.phase || "等待中"))}</p>
       ${job.kind === "batch" ? `<p>${job.mode === "cluster" ? "NAS" : "本机"}批次：完成 ${job.completed_files}/${job.total_files} 条，失败 ${job.failed_files} 条</p><p>输出目录：${escapeHtml(job.output_directory)}</p>${job.items.map(item => `<p>${escapeHtml(item.name)} · ${escapeHtml(item.status)}${item.error ? ` · ${escapeHtml(item.error)}` : ""}</p>`).join("")}` : ""}
       ${job.model ? `<p>模型：${escapeHtml(job.model)} · 原生 ${escapeHtml(String(job.scale || 2))} 倍后回缩</p>` : ""}
-      ${job.width && job.height && job.fps ? `<p>输出规格：${escapeHtml(String(job.width))}×${escapeHtml(String(job.height))} · ${escapeHtml(String(job.fps))} fps（取自源视频）</p>` : ""}
+      ${job.width && job.height && job.fps ? `<p>输出规格：${escapeHtml(String(job.width))}×${escapeHtml(String(job.height))} · ${job.frame_rate_mode === "vfr" ? "可变帧率，保留原帧时间戳" : `${escapeHtml(String(job.fps))} fps（取自源视频）`}</p>` : ""}
       ${job.output_path ? `<p>输出：${escapeHtml(job.output_path)}</p>` : ""}
       ${job.error ? `<p class="field-validation">${escapeHtml(job.error)}</p>` : ""}
       ${running ? '<button id="upscaleCancel" class="button secondary small" type="button">取消任务</button>' : ""}
@@ -1768,7 +1780,7 @@ function mountProResAlphaTool(container) {
     const status = job.status === "completed" ? "转换完成" : job.status === "partial_failed" ? "部分转换失败" : job.status === "failed" ? "转换失败" : job.status === "interrupted" ? "任务已中断" : "正在转换";
     resultBox.innerHTML = `<section class="prores-result">
       <strong>${status} · ${job.completed}/${job.total}</strong>
-      <progress value="${job.completed}" max="${job.total}"></progress>
+      <progress value="${job.completed + (job.current_progress || 0)}" max="${job.total}"></progress><p>${RenderEta.html(job, "prores_alpha")}</p>
       <p>成功 ${job.succeeded} 条 · 失败 ${job.failed} 条${job.current_file ? ` · 当前：${escapeHtml(job.current_file)}` : ""}</p>
       ${job.error ? `<p class="field-validation">${escapeHtml(job.error)}</p>` : ""}
       <ul>${job.files.map(file => `<li><span>${escapeHtml(file.source)} → ${escapeHtml(file.output_directory)}/${escapeHtml(file.output)}</span><small>${file.status === "completed" ? "成功" : file.status === "failed" ? `失败：${escapeHtml(file.error || "未知错误")}` : file.status === "running" ? "处理中" : "等待中"}</small></li>`).join("")}</ul>
@@ -3862,7 +3874,7 @@ function renderSliceQueue() {
     const terminalClass = terminalStates.has(job.status) ? " is-terminal" : "";
     return `<button class="slice-queue-row${terminalClass}" type="button" data-slice-job-id="${job.id}">
       <span class="slice-queue-source"><strong title="${escapeHtml(sourceName)}">${escapeHtml(sourceName)}</strong><small>#${escapeHtml(job.short_id)} · ${formatDate(job.created_at)}</small></span>
-      <span class="slice-queue-progress"><span class="mini-progress"><i style="width:${progress}%"></i></span><small>${finished}/${job.output_unit_count} 已处理 · ${progress.toFixed(0)}%</small></span>
+      <span class="slice-queue-progress"><span class="mini-progress"><i style="width:${progress}%"></i></span><small>${finished}/${job.output_unit_count} 已处理 · ${progress.toFixed(0)}%</small><small>${RenderEta.html(job, "timeline_slice")}</small></span>
       <span class="status ${cls}">${label}</span><b>›</b>
     </button>`;
   }).join("");
@@ -4603,6 +4615,7 @@ function renderPortraitJobDetail(job, landscape = false) {
   const capabilityReasons = { not_apple_silicon: "当前平台不支持 Apple Silicon 硬编", capability_check_unavailable: "硬编能力检测不可用" };
   $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">${title} #${escapeHtml(job.id.slice(0, 8))}</p><h2>${job.mode === "cluster" ? "集群" : ""}${title}批次</h2><span class="status ${cls}">${escapeHtml(label)}</span><p>源目录：${escapeHtml(job.source_directory)}</p><p>输出目录：${escapeHtml(job.output_directory)}</p></div>
     <div class="big-progress"><div><span>总体进度</span><b>${progress.toFixed(1)}%</b></div><div class="bar"><i style="width:${progress}%"></i></div></div>
+    <p class="render-eta-detail">${RenderEta.html(job, landscape ? "portrait_to_landscape" : "landscape_to_portrait")}</p>
     ${job.scheduled_at ? `<p>预约开始：${escapeHtml(formatDate(job.scheduled_at))}</p>` : ""}
     <div class="slice-job-stats"><span>文件 <b>${job.total}</b></span><span>成功 <b>${job.succeeded}</b></span><span>失败 <b>${job.failed}</b></span><span>取消 <b>${cancelledCount}</b></span></div>
     <div class="slice-encoder-summary"><span>输出规格</span><b>${escapeHtml(job.output_width || (landscape ? 1280 : 720))}×${escapeHtml(job.output_height || (landscape ? 720 : 1280))} · ${landscape ? "16:9" : "9:16"}</b><span>保留源帧率与声音</span></div>
@@ -4706,7 +4719,7 @@ function renderWorkerAttempts() {
       ? `帧 ${attempt.start_frame}–${attempt.end_frame}` : `条目 ${attempt.item_index ?? "?"}`;
     return `<details class="worker-attempt-record" data-attempt-id="${escapeHtml(attempt.attempt_id)}" ${expanded.has(attempt.attempt_id) ? "open" : ""}>
       <summary><div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(attempt.output_name || detail)} · ${escapeHtml(formatDate(attempt.created_at || attempt.updated_at))} · #${escapeHtml(attempt.attempt_id.slice(0, 8))}</small></div><span class="status ${cls}">${escapeHtml(label)}</span></summary>
-      <div class="worker-attempt-detail"><p>本机执行进度：${progress.toFixed(1)}%</p><div class="mini-progress"><i style="width:${progress}%"></i></div>
+      <div class="worker-attempt-detail"><p>本机执行进度：${progress.toFixed(1)}%</p><p>${RenderEta.html(attempt, "worker")}</p><div class="mini-progress"><i style="width:${progress}%"></i></div>
         <p>主控批次：${escapeHtml(attempt.batch_id || "未知")} · ${escapeHtml(detail)}</p>
         ${attempt.error ? `<p class="error-text">${escapeHtml(attempt.error)}</p>` : ""}
         ${attempt.status === "succeeded" ? "<p>本机执行已完成，成片由主控归档。</p>" : ""}
@@ -4735,7 +4748,7 @@ function renderJobs() {
       const [label, cls] = statusInfo(job.status);
       const activeProgress = job.mode === "cluster" ? (job.items || []).filter(item => item.status === "running").reduce((sum, item) => sum + (item.progress || 0), 0) : (job.current_progress || 0);
       const pct = job.total ? Math.min(100, (job.completed + activeProgress) / job.total * 100) : 0;
-      return `<div class="job-row" data-job-id="${escapeHtml(job.id)}" data-job-type="${landscape ? "landscape" : "portrait"}"><div><strong>${job.mode === "cluster" ? "集群" : ""}${title}批次</strong><small>${job.mode === "cluster" ? "集群" : "本机"}${title} · ${formatDate(job.created_at)}${job.scheduled_at ? ` · 预约 ${escapeHtml(formatDate(job.scheduled_at))}` : ""} · #${escapeHtml(job.id.slice(0, 8))}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${job.completed}/${job.total} 已处理</small></div><span class="status ${cls}">${escapeHtml(label)}</span><span class="job-count">成功 ${job.succeeded} · 失败 ${job.failed}</span><b>›</b></div>`;
+      return `<div class="job-row" data-job-id="${escapeHtml(job.id)}" data-job-type="${landscape ? "landscape" : "portrait"}"><div><strong>${job.mode === "cluster" ? "集群" : ""}${title}批次</strong><small>${job.mode === "cluster" ? "集群" : "本机"}${title} · ${formatDate(job.created_at)}${job.scheduled_at ? ` · 预约 ${escapeHtml(formatDate(job.scheduled_at))}` : ""} · #${escapeHtml(job.id.slice(0, 8))}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${job.completed}/${job.total} 已处理</small><small>${RenderEta.html(job, landscape ? "portrait_to_landscape" : "landscape_to_portrait")}</small></div><span class="status ${cls}">${escapeHtml(label)}</span><span class="job-count">成功 ${job.succeeded} · 失败 ${job.failed}</span><b>›</b></div>`;
     }
     const isSlice = job.job_type === "timeline_slice";
     const isUpscale = job.job_type === "video_upscale";
@@ -4743,13 +4756,13 @@ function renderJobs() {
     const [label, cls] = isSlice ? sliceJobStatusInfo(job) : isUpscale && job.status === "running" ? [prechecking ? "视频预检" : "超分中", "running"] : statusInfo(job.status);
     const done = prechecking ? Number(job.prechecked_files || 0) : isUpscale ? Number(job.processed_frames || 0) : Number(job.success_count || 0) + Number(job.failure_count || 0) + Number(job.cancelled_count || 0);
     const total = prechecking ? Number(job.total_files || 0) : isUpscale ? Number(job.total_frames || 0) : isSlice ? job.output_unit_count : job.count;
-    const pct = isSlice ? Number(job.progress || 0) * 100 : (total ? Math.max(0, Math.min(100, done / total * 100)) : 0);
+    const pct = prechecking ? (total ? done / total * 100 : 0) : RenderEta.progress(job) * 100;
     const sourceName = job.source?.name || job.source?.path?.split(/[\\/]/).pop();
     const title = isUpscale ? job.kind === "batch" ? `${job.mode === "cluster" ? "NAS" : "本机"}超分批次` : String(job.source || "").split(/[\\/]/).pop() : isSlice ? sourceName : job.config_name;
     const typeLabel = isUpscale ? `${job.mode === "cluster" ? "集群" : "本机"}超分 · ${job.model}` : isSlice ? "切片入库" : (job.job_type === "batch_dedup" ? "批量去重" : job.job_type === "folder_concat" ? "文件夹拼接" : job.job_type === "cluster" ? "集群渲染" : "成片渲染");
     const counts = isUpscale ? job.kind === "batch" ? `完成 ${job.completed_files || 0} · 失败 ${job.failed_files || 0}` : `${job.status === "completed" ? "已生成" : "处理中"}` : `成功 ${job.success_count || 0} · 失败 ${job.failure_count || 0}`;
     const created = typeof job.created_at === "number" ? job.created_at * 1000 : job.created_at;
-    return `<div class="job-row" data-job-id="${escapeHtml(job.id)}" data-job-type="${isUpscale ? "upscale" : isSlice ? "slice" : "render"}"><div><strong>${escapeHtml(title || "未命名任务")}</strong><small>${escapeHtml(typeLabel)} · ${formatDate(created)}${job.scheduled_at ? ` · 预约 ${escapeHtml(formatDate(job.scheduled_at))}` : ""} · #${escapeHtml(isUpscale ? job.id.slice(0, 8) : job.short_id)}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${done}/${total} ${prechecking ? "条已预检" : isUpscale ? "帧" : "已处理"}</small></div><span class="status ${cls}">${label}</span><span class="job-count">${escapeHtml(counts)}</span><b>›</b></div>`;
+    return `<div class="job-row" data-job-id="${escapeHtml(job.id)}" data-job-type="${isUpscale ? "upscale" : isSlice ? "slice" : "render"}"><div><strong>${escapeHtml(title || "未命名任务")}</strong><small>${escapeHtml(typeLabel)} · ${formatDate(created)}${job.scheduled_at ? ` · 预约 ${escapeHtml(formatDate(job.scheduled_at))}` : ""} · #${escapeHtml(isUpscale ? job.id.slice(0, 8) : job.short_id)}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${done}/${total} ${prechecking ? "条已预检" : isUpscale ? "帧" : "已处理"}</small><small>${RenderEta.html(job)}</small></div><span class="status ${cls}">${label}</span><span class="job-count">${escapeHtml(counts)}</span><b>›</b></div>`;
   }).join("");
   $$(".job-row").forEach(row => row.addEventListener("click", () => {
     if (row.dataset.jobType === "slice") openSliceJob(row.dataset.jobId);
@@ -4778,22 +4791,40 @@ function renderUpscaleJobDetail(job) {
   const [label, cls] = job.status === "running" ? [prechecking ? "视频预检" : "超分中", "running"] : statusInfo(job.status);
   const processed = Number(job.processed_frames || 0);
   const total = Number(job.total_frames || 0);
-  const progress = prechecking ? (job.total_files ? (job.prechecked_files || 0) / job.total_files * 100 : 0) : total ? Math.max(0, Math.min(100, processed / total * 100)) : 0;
+  const progress = prechecking ? Math.max(0, Math.min(100, job.total_files ? (job.prechecked_files || 0) / job.total_files * 100 : 0)) : total ? Math.max(0, Math.min(100, processed / total * 100)) : 0;
   const running = !["completed", "partial_failed", "failed", "cancelled", "interrupted"].includes(job.status);
-  const title = job.kind === "batch" ? `${job.mode === "cluster" ? "NAS" : "本机"}超分批次` : String(job.source || "").split(/[\\/]/).pop();
-  const items = job.kind === "batch" ? job.items || [] : [];
-  $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">VIDEO UPSCALE #${escapeHtml(job.id.slice(0, 8))}</p><h2>${escapeHtml(title)}</h2><span class="status ${cls}">${escapeHtml(label)}</span><p>${escapeHtml(job.output_directory || job.output_path || "")}</p></div>
+  const batch = job.kind === "batch";
+  const title = batch ? `${job.mode === "cluster" ? "NAS" : "本机"}超分批次` : String(job.source || "").split(/[\\/]/).pop();
+  const items = batch ? job.items || [] : [];
+  const fileCount = batch ? Number(job.total_files ?? items.length) : 1;
+  const completedCount = batch ? Number(job.completed_files ?? items.filter(item => item.status === "completed").length) : Number(job.status === "completed");
+  const failedCount = batch ? Number(job.failed_files ?? items.filter(item => item.status === "failed").length) : Number(job.status === "failed");
+  const cancelledCount = batch ? items.filter(item => item.status === "cancelled").length : Number(job.status === "cancelled");
+  const skippedCount = items.filter(item => item.status === "skipped").length;
+  const phaseLabels = { waiting_start: "等待预约时间", waiting_workers: "等待工作机上线", queued: "等待处理", staging: "准备素材", prechecking: "视频预检", upscaling: "超分处理", processing: "逐文件处理", joining: "合并视频", audio: "合并音频", completed: "已完成", finished: "已结束" };
+  const phase = prechecking ? `视频预检（${job.prechecked_files || 0}/${fileCount}）` : phaseLabels[job.phase] || job.phase || "等待中";
+  const summary = (name, value, detail = "") => `<div class="slice-encoder-summary"><span>${escapeHtml(name)}</span><b>${escapeHtml(value)}</b>${detail ? `<span>${escapeHtml(detail)}</span>` : ""}</div>`;
+  const source = job.source_directory || job.source || "";
+  const output = job.output_directory || job.output_path || "";
+  const hasDimensions = job.width && job.height;
+  const frameRate = job.frame_rate_mode === "vfr" ? "可变帧率，保留原帧时间戳" : job.fps ? `${job.fps} fps（源视频规格）` : "保留源帧率与声音";
+  $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">视频超分 #${escapeHtml(job.id.slice(0, 8))}</p><h2>${escapeHtml(title)}</h2><span class="status ${cls}">${escapeHtml(label)}</span>${source ? `<p>${batch ? "源目录" : "源文件"}：${escapeHtml(source)}</p>` : ""}${output ? `<p>${batch ? "输出目录" : "输出文件"}：${escapeHtml(output)}</p>` : ""}</div>
     <div class="big-progress"><div><span>${prechecking ? "视频预检进度" : "总体进度"}</span><b>${progress.toFixed(1)}%</b></div><div class="bar"><i style="width:${progress}%"></i></div></div>
-    ${job.scheduled_at ? `<p>预约开始：${escapeHtml(formatDate(job.scheduled_at))}</p>` : ""}
-    <p>模型：${escapeHtml(job.model)} · ${job.mode === "cluster" ? "渲染集群" : "本机"} · 阶段：${escapeHtml(job.phase === "prechecking" ? `视频预检（${job.prechecked_files || 0}/${job.total_files}）` : ({ waiting_start: "等待预约时间", waiting_workers: "等待工作机上线" }[job.phase] || job.phase || "等待中"))}</p>
-    <p>${prechecking ? `已检查 ${job.prechecked_files || 0}/${job.total_files} 条视频，帧数检查完成后汇总` : `已处理 ${processed}/${total} 帧`}${job.kind === "batch" ? ` · 完成 ${job.completed_files}/${job.total_files} 条 · 失败 ${job.failed_files} 条` : ""}</p>
-    ${job.width && job.height && job.fps ? `<p>输出规格：${escapeHtml(job.width)}×${escapeHtml(job.height)} · ${escapeHtml(job.fps)} fps（源视频规格）</p>` : ""}
-    ${job.error ? `<p class="error-text">${escapeHtml(job.error)}</p>` : ""}
-    ${running ? '<button id="cancelUpscaleJobBtn" class="button secondary" style="width:100%">取消超分任务</button>' : ""}
-    ${!running ? '<button id="deleteUpscaleJobBtn" class="text-btn danger-text" type="button">删除超分任务记录</button>' : ""}
+    <p class="render-eta-detail">${RenderEta.html(job, "video_upscale")}</p>
+    <div class="slice-job-stats"><span>文件 <b>${fileCount}</b></span><span>成功 <b>${completedCount}</b></span><span>失败 <b>${failedCount}</b></span><span>取消 <b>${cancelledCount}</b></span></div>
+    ${summary("模型", job.model || "待确定", `${job.mode === "cluster" ? "渲染集群" : "本机"}${job.scale ? ` · 原生 ${job.scale} 倍超分后回缩源尺寸` : ""}`)}
+    ${summary("处理阶段", phase)}
+    ${summary("帧数进度", `已处理 ${processed}/${total} 帧`, prechecking ? `已检查 ${job.prechecked_files || 0}/${fileCount} 条视频，帧数检查完成后汇总` : batch ? `完成 ${completedCount}/${fileCount} 条 · 失败 ${failedCount} 条` : "")}
+    ${summary("输出规格", hasDimensions ? `${job.width}×${job.height}` : "按各源视频尺寸输出", frameRate)}
+    ${job.scheduled_at ? summary("预约开始", formatDate(job.scheduled_at)) : ""}
+    ${skippedCount ? summary("检查结果", `跳过 ${skippedCount} 条`) : ""}
+    ${job.error ? `<div class="warning-box">${escapeHtml(job.error)}</div>` : ""}
+    ${running ? '<button id="cancelUpscaleJobBtn" class="button secondary" style="width:100%">取消超分任务</button>' : '<div class="record-delete-zone"><button id="deleteUpscaleJobBtn" class="text-btn danger-text" type="button">删除超分任务记录</button></div>'}
     ${items.length ? `<div class="item-list">${items.map((item, index) => {
       const [itemLabel, itemClass] = statusInfo(item.status);
-      return `<div class="item-row"><b>${String(index + 1).padStart(2, "0")}</b><div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.output_path || "")}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${item.frames ? Math.min(100, (item.processed_frames || 0) / item.frames * 100) : 0}%"></i></div></div><span class="status ${itemClass}">${escapeHtml(itemLabel)}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
+      const itemProgress = item.status === "completed" ? 100 : item.frames ? Math.max(0, Math.min(100, (item.processed_frames || 0) / item.frames * 100)) : 0;
+      const specifications = [item.width && item.height ? `${item.width}×${item.height}` : "", item.frame_rate_mode === "vfr" ? "可变帧率，保留原帧时间戳" : item.fps ? `${item.fps} fps` : "", item.frames ? `已处理 ${item.processed_frames || 0}/${item.frames} 帧` : ""].filter(Boolean).join(" · ");
+      return `<div class="item-row"><b>${String(index + 1).padStart(2, "0")}</b><div class="portrait-item-description"><strong>${escapeHtml(item.name)}</strong>${item.output_path ? `<small class="item-selections">${escapeHtml(item.output_path)}</small>` : ""}${specifications ? `<small class="item-selections">${escapeHtml(specifications)}</small>` : ""}<div class="mini-progress" style="margin-top:7px"><i style="width:${itemProgress}%"></i></div></div><span class="status ${itemClass}">${escapeHtml(itemLabel)}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
     }).join("")}</div>` : ""}`;
   $("#cancelUpscaleJobBtn")?.addEventListener("click", async event => {
     event.currentTarget.disabled = true;
@@ -4827,7 +4858,11 @@ async function openJob(jobId) {
   if (!terminalStates.has(state.activeJob.status)) {
     state.eventSource = new EventSource(`/api/v1/jobs/${jobId}/events`);
     state.eventSource.addEventListener("job_update", event => {
-      const job = JSON.parse(event.data); update(job); loadJobs();
+      const job = JSON.parse(event.data); update(job);
+      const { items, ...summary } = job;
+      summary.progress = RenderEta.progress(job);
+      state.jobs = state.jobs.map(entry => entry.id === job.id ? summary : entry);
+      renderJobs();
       if (terminalStates.has(job.status)) {
         state.eventSource.close();
         if (job.feishu_base_sync?.enabled) loadJobFeishuSync(job);
@@ -4896,9 +4931,10 @@ async function retryJobFeishuSync(job) {
 }
 
 function renderJobDetail(job) {
-  const [label, cls] = statusInfo(job.status); const done = job.success_count + job.failure_count; const totalProgress = job.items.reduce((sum, item) => sum + item.progress, 0) / job.count * 100;
+  const [label, cls] = statusInfo(job.status); const done = job.success_count + job.failure_count; const totalProgress = RenderEta.progress(job) * 100;
   $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">BATCH #${job.short_id}</p><h2>${escapeHtml(job.config_name)}</h2><span class="status ${cls}">${label}</span><p>${escapeHtml(job.output_directory)}</p></div>
     <div class="big-progress"><div><span>总体进度</span><b>${totalProgress.toFixed(1)}%</b></div><div class="bar"><i style="width:${totalProgress}%"></i></div></div>
+    <p class="render-eta-detail">${RenderEta.html(job, job.job_type || "render")}</p>
     ${job.job_type === "folder_concat" ? "" : `<div class="seed-card"><span>随机种子</span><strong>${job.seed}</strong></div>`}
     ${renderFeishuSyncPanel(job)}
     ${job.scheduled_at ? `<p class="cluster-control-hint">预约开始：${escapeHtml(formatDate(job.scheduled_at))}</p>` : ""}
@@ -4961,6 +4997,7 @@ function renderSliceJobDetail(job) {
   const fallbackCount = Number(job.encoding?.fallback_count || 0);
   $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">SLICE #${escapeHtml(job.short_id)}</p><h2>${escapeHtml(sourceName)}</h2><span class="status ${cls}">${label}</span><p>${escapeHtml(job.source?.path || "")}</p></div>
     <div class="big-progress"><div><span>总体进度</span><b>${progress.toFixed(1)}%</b></div><div class="bar"><i style="width:${progress}%"></i></div></div>
+    <p class="render-eta-detail">${RenderEta.html(job, "timeline_slice")}</p>
     <div class="slice-job-stats"><span>输出 <b>${job.output_unit_count}</b></span><span>成功 <b>${job.success_count}</b></span><span>失败 <b>${job.failure_count}</b></span><span>取消 <b>${job.cancelled_count || 0}</b></span></div>
     <div class="slice-encoder-summary"><span>视频编码</span><b>${escapeHtml(encoderSummary)}</b>${fallbackCount ? `<small>${fallbackCount} 个条目已自动回退到 libx264</small>` : ""}</div>
     ${job.manifest_sync_error ? `<div class="warning-box">切片清单同步失败：${escapeHtml(job.manifest_sync_error)}</div>` : ""}

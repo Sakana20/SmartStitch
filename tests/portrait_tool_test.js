@@ -1,3 +1,4 @@
+const RenderEta = require("../frontend/render-eta.js");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
@@ -102,7 +103,7 @@ async function main(landscape = false, mode = "local") {
 
   let rowClick;
   const list = { innerHTML: "" };
-  const renderContext = { state: { jobs: [], sliceJobs: [], upscaleJobs: [], [landscape ? "landscapeJobs" : "portraitJobs"]: [{
+  const renderContext = { RenderEta, state: { jobs: [], sliceJobs: [], upscaleJobs: [], [landscape ? "landscapeJobs" : "portraitJobs"]: [{
     id: "job-1", status: "running", created_at: "2026-09-28", total: 2,
     completed: 1, current_progress: .5, succeeded: 1, failed: 0,
   }] }, $: selector => selector === "#jobsList" ? list : {},
@@ -119,7 +120,7 @@ async function main(landscape = false, mode = "local") {
   assert.equal(opened, "job-1");
   const detail = { innerHTML: "" };
   const detailSource = app.slice(app.indexOf("function renderPortraitJobDetail(job, landscape = false)"), app.indexOf("\nasync function loadJobs()"));
-  const detailContext = { landscape, $: selector => selector === "#jobDetail" ? detail : null,
+  const detailContext = { RenderEta, landscape, $: selector => selector === "#jobDetail" ? detail : null,
     statusInfo: () => ["已完成", "success"], escapeHtml: value => String(value ?? "") };
   vm.createContext(detailContext);
   vm.runInContext(detailSource, detailContext);

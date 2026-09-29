@@ -43,8 +43,11 @@ class ClusterUpscaleManager:
                      and node["video_upscale"].get("models", {}).get(model_name, {}).get("available")
                      and node["video_upscale"]["models"][model_name].get("model_sha256") == config["sha256"]
                      and node["video_upscale"].get("protocol") == 2]
+        if info.get("frame_rate_mode") == "vfr":
+            available = [node for node in available if node["video_upscale"].get("vfr_protocol") == 1]
         if not available:
-            raise ValueError(f"没有安装相同 {model_name} 模型的在线工作机")
+            raise ValueError(f"没有安装相同 {model_name} 模型的在线工作机" +
+                             ("（VFR 任务需支持时间戳协议的新版工作机）" if info.get("frame_rate_mode") == "vfr" else ""))
         root = self.cluster.config_store.directory.resolve()
         if not root.is_dir():
             raise ValueError("共享 SmartStitch 目录不可用")
@@ -65,9 +68,13 @@ class ClusterUpscaleManager:
                          "attempts": 0, "attempt_id": None, "node_id": None, "processed_frames": 0,
                          "stage_relative": None, "error": None}
                         for start in range(0, info["frames"], 48)]
+            if info.get("frame_rate_mode") == "vfr" and len(segments) > 1 and segments[-1]["end"] - segments[-1]["start"] == 1:
+                final_end = segments.pop()["end"]
+                segments[-1]["end"] = final_end
             job = {"id": job_id, "mode": "cluster", "status": "queued", "phase": "staging",
                    "model": model_name, "scale": config["scale"],
                    "width": info["width"], "height": info["height"], "fps": info["fps"],
+                   "frame_rate_mode": info.get("frame_rate_mode", "cfr"),
                    "source": info["source"], "output_path": str(target), "info": info,
                    "processed_frames": 0, "total_frames": info["frames"], "segments": segments,
                    "stage_relative": f".video-upscale/{job_id}", "source_sha256": None,
@@ -106,6 +113,8 @@ class ClusterUpscaleManager:
         result = copy.deepcopy(job)
         result.pop("source_sha256", None)
         result.pop("stage_relative", None)
+        if isinstance(result.get("info"), dict):
+            result["info"].pop("timing", None)
         return result
 
     def get(self, job_id: str) -> dict[str, Any]:
@@ -202,7 +211,12 @@ class ClusterUpscaleManager:
                         result = response["result"]
                         if not path.is_file() or path.stat().st_size != result["size_bytes"] or _file_sha256(path) != result["sha256"]:
                             raise RuntimeError("超分片段校验失败")
-                        checked = probe_video(path)
+                        if job["info"].get("frame_rate_mode") == "vfr":
+                            from .vfr import verify_vfr_video
+                            verify_vfr_video(path, job["info"], segment["start"], segment["end"])
+                            checked = {**job["info"], "frames": segment["end"]-segment["start"], "has_audio": False}
+                        else:
+                            checked = probe_video(path)
                         if (checked["frames"] != segment["end"]-segment["start"] or checked["has_audio"]
                                 or checked["fps"] != job["info"]["fps"] or checked["width"] != job["info"]["width"]
                                 or checked["height"] != job["info"]["height"]):
@@ -224,6 +238,8 @@ class ClusterUpscaleManager:
                 node = next((row for row in self.cluster.nodes if statuses.get(row["node_id"], {}).get("online")
                              and statuses[row["node_id"]].get("video_upscale", {}).get("models", {}).get(job["model"], {}).get("available")
                              and statuses[row["node_id"]]["video_upscale"]["models"][job["model"]].get("model_sha256") == model_config(job["model"])["sha256"]
+                             and (job["info"].get("frame_rate_mode") != "vfr"
+                                  or statuses[row["node_id"]]["video_upscale"].get("vfr_protocol") == 1)
                              and statuses[row["node_id"]].get("active", 1) < 1), None)
                 if node is None:
                     break
@@ -239,6 +255,9 @@ class ClusterUpscaleManager:
                            "frames": job["info"]["frames"], "width": job["info"]["width"],
                            "height": job["info"]["height"], "fps": job["info"]["fps"],
                            "model": job["model"], "model_sha256": model_config(job["model"])["sha256"]}
+                if job["info"].get("frame_rate_mode") == "vfr":
+                    from .vfr import segment_timing
+                    payload["timing"] = segment_timing(job["info"], segment["start"], segment["end"])
                 self._save(job)
                 try:
                     _request(f"{node['url']}/upscale-attempts", node["token"], method="POST", payload=payload)
@@ -260,6 +279,11 @@ class ClusterUpscaleManager:
         manifest = directory / "concat.txt"
         segments = [directory / Path(row["stage_relative"]).name for row in job["segments"]]
         manifest.write_text("".join(f"file '{path.name}'\n" for path in segments), encoding="utf-8")
+        info = job["info"]
+        if info.get("frame_rate_mode") == "vfr":
+            from .vfr import segment_duration
+            manifest.write_text("".join(f"file '{path.name}'\nduration {float(segment_duration(info, row['start'], row['end'])):.12f}\n"
+                                       for path, row in zip(segments, job["segments"], strict=True)), encoding="utf-8")
         silent = directory / "joined.mp4"
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
@@ -269,7 +293,12 @@ class ClusterUpscaleManager:
         if result.returncode:
             raise RuntimeError((result.stderr or "片段拼接失败")[-1000:])
         info = job["info"]
-        checked = probe_video(silent)
+        if info.get("frame_rate_mode") == "vfr":
+            from .vfr import verify_vfr_video
+            verify_vfr_video(silent, info, 0, info["frames"])
+            checked = info.copy()
+        else:
+            checked = probe_video(silent)
         if (checked["frames"] != info["frames"] or checked["width"] != info["width"]
                 or checked["height"] != info["height"] or checked["fps"] != info["fps"]):
             raise RuntimeError("拼接结果帧数或尺寸错误")
@@ -281,7 +310,11 @@ class ClusterUpscaleManager:
             mux_audio(silent, Path(job["source"]), temporary, info)
             if cancel.is_set():
                 raise RuntimeError("任务已取消")
-            verified = probe_video(temporary)
+            if info.get("frame_rate_mode") == "vfr":
+                verify_vfr_video(temporary, info, 0, info["frames"], audio=info["has_audio"], final=True)
+                verified = info.copy()
+            else:
+                verified = probe_video(temporary)
             if (verified["frames"] != info["frames"] or verified["has_audio"] != info["has_audio"]
                     or verified["width"] != info["width"] or verified["height"] != info["height"]
                     or verified["fps"] != info["fps"]):
@@ -433,6 +466,7 @@ class ClusterUpscaleBatchManager:
                     info = future.result()
                     if info is not None:
                         item.update(source=info["source"], frames=info["frames"], width=info["width"],
+                                    frame_rate_mode=info.get("frame_rate_mode", "cfr"),
                                     height=info["height"], fps=info["fps"], size_bytes=info["size_bytes"],
                                     modified_ns=info["modified_ns"], probe_info=info)
                 except Exception as exc:

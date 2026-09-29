@@ -10,8 +10,12 @@ so that binary is distributed under GPL-2.0-or-later. x264 is GPL-2.0.
 
 The DMG includes the applicable license texts, the exact source archives used to build
 the binaries, and the build scripts under `Open Source Licenses`. SmartStitch invokes
-`ffmpeg` and `ffprobe` as separate subprocesses; it does not link their libraries into
-the Python application.
+`ffmpeg` and `ffprobe` as separate subprocesses for its standard media pipeline.
+The VFR-only upscaler additionally uses PyAV (BSD-3-Clause) and its bundled FFmpeg
+libraries in process to encode individual frame timestamps. PyAV package metadata,
+license files and dynamic libraries are included in the application bundle; these
+libraries include libx264 and must be accounted for when preparing release sources
+and licenses in addition to the separately built command-line binaries.
 
 The video upscaler uses the official CoreML conversion of Real-ESRGAN x2plus from
 [hanxiao/real-esrgan-coreml](https://github.com/hanxiao/real-esrgan-coreml). The
