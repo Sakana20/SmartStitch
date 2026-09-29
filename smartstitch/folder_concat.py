@@ -43,6 +43,8 @@ def inspect_folders(request: FolderConcatRequest) -> dict:
         "count_a": len(videos_a),
         "count_b": len(videos_b),
         "pair_count": pair_count,
+        "files_a": [path.name for path in videos_a],
+        "files_b": [path.name for path in videos_b],
         "unpaired_a": len(videos_a) - pair_count,
         "unpaired_b": len(videos_b) - pair_count,
         "pairs": [
@@ -50,7 +52,6 @@ def inspect_folders(request: FolderConcatRequest) -> dict:
             for a, b in zip(videos_a, videos_b)
         ],
     }
-
     result["naming"] = request.naming.model_dump(mode="json") if request.naming else None
     config = folder_concat_config(result, directory_a.parent)
     used_names: set[str] = set()
@@ -91,9 +92,9 @@ def folder_concat_config(preview: dict, output_root: Path) -> AppConfig:
         "timeline": ["pool_1", "pool_2"],
         "sources": {
             "pool_1": {"label": "A 文件夹", "mode": "required",
-                   "directory": preview["directory_a"], "extensions": sorted(VIDEO_SUFFIXES)},
+                       "directory": preview["directory_a"], "extensions": sorted(VIDEO_SUFFIXES)},
             "pool_2": {"label": "B 文件夹", "mode": "required",
-                   "directory": preview["directory_b"], "extensions": sorted(VIDEO_SUFFIXES)},
+                       "directory": preview["directory_b"], "extensions": sorted(VIDEO_SUFFIXES)},
         },
         "benefit_overlays": {"mode": "disabled", "file": ""},
         "output": {"directory": str(output_root), "video_codec": "h264_videotoolbox",

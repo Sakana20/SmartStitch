@@ -457,10 +457,10 @@ assert.match(
   /id="builderSequenceStart"[^>]*min="1"[^>]*max="999999"[\s\S]*naming\.sequence_start = value/,
   "05 命名设置必须允许用户填写成片序号起点",
 );
-assert.ok(["function renderBuilderEditor(config)", 'id="builderPool"', 'id="builderSample"', "data-builder-token", "data-builder-block", 'id="builderNewText"'].every(value => app.includes(value)), "积木编辑器必须提供选库、选片段、排序和可编辑文字块");
+assert.ok(["function renderBuilderEditor(config, context = state)", 'id="builderPool"', 'id="builderSample"', "data-builder-token", "data-builder-block", 'id="builderNewText"'].every(value => app.includes(value)), "积木编辑器必须提供选库、选片段、排序和可编辑文字块");
 assert.match(app, /<select id="builderSample"/, "文件名应使用可打开的下拉选择框");
 assert.doesNotMatch(app, /<datalist id="builderSampleList"/, "文件名不应使用仅靠输入触发的建议列表");
-assert.ok(["function bindBuilderControls()", "data-builder-text", "dragstart", "naming-builder-preview"].every(value => app.includes(value)), "积木编辑器必须能编辑、拖动并进行实际命名预览");
+assert.ok(["function bindBuilderControls(options = {})", "data-builder-text", "dragstart", "naming-builder-preview"].every(value => app.includes(value)), "积木编辑器必须能编辑、拖动并进行实际命名预览");
 assert.doesNotMatch(app, /data-builder-role|BUILDER_ROLE_OPTIONS|飞书字段/, "文件名积木编辑器不应展示飞书字段映射");
 assert.doesNotMatch(app, /data-builder-date-format|日期显示/, "文件名积木编辑器不应展示日期格式选择器");
 const builderTokenHelpers = app.match(/function builderTokens\(filename\) \{[\s\S]*?\n\}\n\nfunction builderPicker/)?.[0].replace(/\n\nfunction builderPicker$/, "");

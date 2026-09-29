@@ -1429,10 +1429,19 @@ function closeToolboxTool(restoreFocus = true) {
   if (restoreFocus && activeId) $("#toolboxGrid").querySelector(`[data-tool-id="${activeId}"]`)?.focus();
 }
 
+function renderFolderConcatNamingPreview(preview) {
+  const pair = preview.pairs[0];
+  if (!pair) return "没有可用于验证的配对素材";
+  const parts = (pair.naming?.block_values || []).map(block => block.value).join(" | ");
+  return `<strong>${escapeHtml(pair.output_name)}</strong><small>块取值：${escapeHtml(parts)}</small><small>对应素材：A 文件夹：${escapeHtml(pair.a_name)}；B 文件夹：${escapeHtml(pair.b_name)}</small>`;
+}
+
 function mountFolderConcatTool(container) {
   let preview = null;
   let disposed = false;
   let scanRevision = 0;
+  let sampleRevision = 0;
+  let sampleTimer = null;
   const namingContext = {
     configDraft: { timeline: ["pool_1", "pool_2"], sources: {
       pool_1: { label: "A 文件夹", mode: "required" },
@@ -1456,7 +1465,7 @@ function mountFolderConcatTool(container) {
     <p class="toolbox-intro">仅读取各文件夹第一层的 MP4、MOV、M4V、MKV、WebM 视频。按文件名排序后逐条配对，先 A 后 B；多出的视频不处理。每组生成一条 MP4，保存到新的批次目录，源视频保留。</p>
     <section class="simple-config-card simple-naming-card">
       <header><div><h3>成片命名</h3><p>从 A、B 文件名选片段，添加文字、日期和序号。</p></div><label class="simple-header-switch"><span>积木命名</span><input id="folderConcatNamingEnabled" class="switch-input" type="checkbox"></label></header>
-      <div class="simple-card-body"><button id="folderConcatImportNaming" type="button" class="button secondary small">导入当前项目的积木规则</button><small>素材库 1 对应 A，素材库 2 对应 B。先预览配对以加载文件名；此处编辑仅用于本次拼接。</small><div id="folderConcatNamingEditor"></div></div>
+      <div class="simple-card-body simple-naming-card-body"><small>选择 A、B 文件夹后，自动读取里面的视频文件名。选择片段组成命名规则，仅用于本次拼接。</small><small id="folderConcatNamingStatus" aria-live="polite">请选择 A、B 文件夹以加载文件名。</small><div id="folderConcatNamingEditor"></div></div>
     </section>
     <div class="actions"><button id="folderConcatPreview" class="button secondary" type="button">预览配对</button><button id="folderConcatStart" class="button primary" type="button">开始拼接</button></div>
     <div id="folderConcatResult" aria-live="polite"></div>
@@ -1469,36 +1478,70 @@ function mountFolderConcatTool(container) {
     output_directory: normalizePathInput(input("folderConcatOutput").value) || null,
     naming: naming.enabled ? structuredClone(naming) : null,
   });
-  const invalidate = () => { preview = null; resultBox.replaceChildren(); };
+  const invalidate = () => { scanRevision += 1; preview = null; resultBox.replaceChildren(); };
   const renderNaming = () => {
     const root = input("folderConcatNamingEditor");
     root.innerHTML = naming.enabled ? renderBuilderEditor(namingContext.configDraft, namingContext) : "";
     if (naming.enabled) bindBuilderControls({ context: namingContext, root,
       rerender: renderNaming, onChange: invalidate,
-      preview: async () => { input("folderConcatPreview").click(); },
+      preview: async event => {
+        const payload = values();
+        if (!requireFolders(payload)) return;
+        const button = event.currentTarget;
+        const result = root.querySelector("#builderPreviewResult");
+        const revision = ++scanRevision;
+        clearTimeout(sampleTimer);
+        sampleRevision += 1;
+        button.disabled = true;
+        result.textContent = "正在读取素材并生成实际文件名…";
+        try {
+          const namedPreview = await api("/tools/folder-concat/preview", {
+            method: "POST", body: JSON.stringify(payload),
+          });
+          if (disposed || revision !== scanRevision) return;
+          result.innerHTML = renderFolderConcatNamingPreview(namedPreview);
+        } catch (error) {
+          if (disposed || revision !== scanRevision) return;
+          result.textContent = `无法生成：${error.message}`;
+        } finally { button.disabled = false; }
+      },
     });
   };
+  const applySamples = files => {
+    namingContext.scan = { assets: {
+      pool_1: (files.files_a || files.pairs.map(pair => pair.a_name)).map(name => ({ name })),
+      pool_2: (files.files_b || files.pairs.map(pair => pair.b_name)).map(name => ({ name })),
+    } };
+    input("folderConcatNamingStatus").textContent = `已读取 A ${files.count_a} 个、B ${files.count_b} 个视频文件名，可选择片段配置命名。`;
+    renderNaming();
+  };
   const clearSamples = () => {
-    scanRevision += 1;
+    const revision = ++sampleRevision;
+    clearTimeout(sampleTimer);
     namingContext.scan = { assets: {} };
     namingContext.namingPicker = null;
     invalidate(); renderNaming();
+    const payload = values();
+    if (!payload.directory_a || !payload.directory_b) {
+      input("folderConcatNamingStatus").textContent = "请选择 A、B 文件夹以加载文件名。";
+      return;
+    }
+    input("folderConcatNamingStatus").textContent = "正在读取 A、B 文件夹里的视频文件名…";
+    sampleTimer = setTimeout(async () => {
+      try {
+        const files = await api("/tools/folder-concat/preview", {
+          method: "POST", body: JSON.stringify({ ...payload, naming: null }),
+        });
+        if (disposed || revision !== sampleRevision) return;
+        applySamples(files);
+      } catch (error) {
+        if (disposed || revision !== sampleRevision) return;
+        input("folderConcatNamingStatus").textContent = `读取失败：${error.message}`;
+      }
+    }, 300);
   };
   input("folderConcatNamingEnabled").addEventListener("change", event => {
     naming.enabled = naming.builder.enabled = event.target.checked;
-    invalidate(); renderNaming();
-  });
-  input("folderConcatImportNaming").addEventListener("click", () => {
-    const imported = state.config?.output?.naming;
-    if (!imported?.builder?.enabled || !imported.builder.blocks.length) {
-      toast("当前项目没有已配置的积木命名规则", true); return;
-    }
-    if (imported.builder.blocks.some(block => block.type === "source" && !["pool_1", "pool_2"].includes(block.category))) {
-      toast("当前规则引用了素材库 1、2 以外的素材库，请在此处重新配置 A、B 命名片段", true); return;
-    }
-    Object.assign(naming, structuredClone(imported), { enabled: true });
-    input("folderConcatNamingEnabled").checked = true;
-    namingContext.namingPicker = null;
     invalidate(); renderNaming();
   });
   const requireFolders = payload => {
@@ -1514,28 +1557,31 @@ function mountFolderConcatTool(container) {
       const result = await api("/system/directory-picker", { method: "POST" });
       if (!result.cancelled) {
         input(button.dataset.pickFolder).value = result.path;
-        clearSamples();
+        if (button.dataset.pickFolder === "folderConcatOutput") invalidate();
+        else clearSamples();
       }
     } catch (error) { toast(error.message, true); }
     finally { button.disabled = false; }
   }));
-  container.querySelectorAll("[data-path-input]").forEach(field => field.addEventListener("input", clearSamples));
+  [input("folderConcatA"), input("folderConcatB")].forEach(field => field.addEventListener("input", clearSamples));
+  input("folderConcatOutput").addEventListener("input", invalidate);
   input("folderConcatPreview").addEventListener("click", async event => {
     const payload = values();
     if (!requireFolders(payload)) return;
     const button = event.currentTarget;
     button.disabled = true;
+    clearTimeout(sampleTimer);
+    sampleRevision += 1;
     try {
       const revision = ++scanRevision;
       const files = await api("/tools/folder-concat/preview", { method: "POST", body: JSON.stringify({ ...payload, naming: null }) });
       if (disposed || revision !== scanRevision) return;
-      namingContext.scan = { assets: {
-        pool_1: files.pairs.map(pair => ({ name: pair.a_name })),
-        pool_2: files.pairs.map(pair => ({ name: pair.b_name })),
-      } };
-      renderNaming();
-      preview = payload.naming ? await api("/tools/folder-concat/preview", { method: "POST", body: JSON.stringify(payload) }) : files;
+      applySamples(files);
+      const namedPreview = payload.naming ? await api("/tools/folder-concat/preview", { method: "POST", body: JSON.stringify(payload) }) : files;
       if (disposed || revision !== scanRevision) return;
+      preview = namedPreview;
+      const namingResult = container.querySelector("#builderPreviewResult");
+      if (namingResult) namingResult.innerHTML = renderFolderConcatNamingPreview(preview);
       resultBox.innerHTML = `<section class="prores-result">
         <strong>可拼接 ${preview.pair_count} 组 · A ${preview.count_a} 条 · B ${preview.count_b} 条</strong>
         ${preview.unpaired_a || preview.unpaired_b ? `<p>A 多出 ${preview.unpaired_a} 条，B 多出 ${preview.unpaired_b} 条；这些视频不会参与本次任务。</p>` : ""}
@@ -1557,7 +1603,7 @@ function mountFolderConcatTool(container) {
     } catch (error) { toast(error.message, true); }
     finally { button.disabled = false; }
   });
-  return () => { disposed = true; scanRevision += 1; };
+  return () => { disposed = true; scanRevision += 1; sampleRevision += 1; clearTimeout(sampleTimer); };
 }
 
 function mountVideoUpscaleTool(container, executionMode = "local") {
@@ -6202,7 +6248,7 @@ function bindBuilderControls(options = {}) {
     stale();
   });
   $("#builderPreview")?.addEventListener("click", async event => {
-    if (options.preview) { await options.preview(); return; }
+    if (options.preview) { await options.preview(event); return; }
     const button = event.currentTarget;
     const result = $("#builderPreviewResult");
     button.disabled = true;
