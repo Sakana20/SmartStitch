@@ -5,6 +5,7 @@ import os
 import re
 import urllib.parse
 from enum import StrEnum
+from datetime import datetime, timezone
 from pathlib import Path
 from string import Formatter
 from typing import Any, Literal
@@ -1062,6 +1063,24 @@ class PreviewRequest(BaseModel):
 class JobCreateRequest(PreviewRequest):
     concurrency: int | None = Field(default=None, ge=1, le=16)
     auto_start: bool = True
+
+
+class ScheduledStartRequest(BaseModel):
+    scheduled_at: datetime | None = None
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def validate_schedule(cls, value: datetime | None) -> datetime | None:
+        if value is not None:
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("预约时间必须包含时区")
+            if value <= datetime.now(timezone.utc):
+                raise ValueError("预约开始时间必须晚于当前时间")
+        return value
+
+
+class ClusterJobCreateRequest(JobCreateRequest, ScheduledStartRequest):
+    pass
 
 
 class BatchDedupRequest(BaseModel):

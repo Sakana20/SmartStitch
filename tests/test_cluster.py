@@ -116,3 +116,30 @@ def test_cluster_renders_one_item_using_worker_local_database(tmp_path, monkeypa
         worker_app.state.cluster_master.shutdown()
         master_app.state.instance_lock.release()
         worker_app.state.instance_lock.release()
+
+
+def test_worker_status_probes_run_concurrently_and_keep_node_order(tmp_path, monkeypatch):
+    import threading
+
+    (tmp_path / 'config').mkdir()
+    app = create_app(tmp_path)
+    master = app.state.cluster_master
+    master.nodes = [{'node_id': str(i), 'name': f'worker{i}', 'url': f'http://127.0.0.1:{9800+i}', 'token': ''}
+                    for i in range(3)]
+    barrier = threading.Barrier(3)
+
+    def request(url, token, **kwargs):
+        barrier.wait(timeout=2)
+        index = str(int(url.split(':')[-1].split('/')[0]) - 9800)
+        if index == '1':
+            raise OSError('offline')
+        return {'node_id': index, 'name': 'worker' + index, 'active': 0, 'capacity': 1}
+
+    monkeypatch.setattr(cluster, '_request', request)
+    try:
+        rows = master.node_statuses()
+        assert [row['node_id'] for row in rows] == ['0', '1', '2']
+        assert [row['online'] for row in rows] == [True, False, True]
+        assert rows[1]['error'] == 'offline'
+    finally:
+        app.state.instance_lock.release()

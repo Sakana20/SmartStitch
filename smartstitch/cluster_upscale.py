@@ -10,8 +10,10 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from .scheduling import wait_for_start
 from .cluster import LOST_SECONDS, POLL_SECONDS, _file_sha256, _request
 from .video_upscale import SUFFIXES, model_config, mux_audio, probe_video
 
@@ -33,8 +35,9 @@ class ClusterUpscaleManager:
                  "video_upscale": row.get("video_upscale", {})}
                 for row in self.cluster.node_statuses()]
 
-    def create(self, source: str, output_directory: str | None = None, model_name: str = "x2plus") -> dict[str, Any]:
-        info = probe_video(Path(source))
+    def create(self, source: str, output_directory: str | None = None, model_name: str = "x2plus",
+               *, probed_info: dict[str, Any] | None = None) -> dict[str, Any]:
+        info = probed_info if probed_info is not None else probe_video(Path(source))
         config = model_config(model_name)
         available = [node for node in self.nodes() if node["online"]
                      and node["video_upscale"].get("models", {}).get(model_name, {}).get("available")
@@ -351,47 +354,37 @@ class ClusterUpscaleBatchManager:
         return source.resolve(), output.resolve()
 
     def preview(self, model_name: str = "x2plus") -> dict[str, Any]:
+        """List filenames and matching outputs without opening video content."""
         model_config(model_name)
         source, output = self._folders()
+        with os.scandir(source) as entries:
+            files = sorted(
+                ((entry.name, entry.is_symlink()) for entry in entries
+                 if not entry.name.startswith(".")
+                 and Path(entry.name).suffix.lower() in SUFFIXES and entry.is_file()),
+                key=lambda entry: entry[0].casefold(),
+            )
+        with os.scandir(output) as entries:
+            outputs = {entry.name for entry in entries if entry.is_file()}
         items = []
-        for path in sorted(source.iterdir(), key=lambda item: item.name.casefold()):
-            if path.name.startswith(".") or path.suffix.lower() not in SUFFIXES or not path.is_file():
-                continue
-            if not path.resolve().is_relative_to(source):
+        for name, is_link in files:
+            path = source / name
+            if is_link and not path.resolve().is_relative_to(source):
                 raise ValueError(f"原素材中包含指向目录外的视频：{path.name}")
             stem = path.stem + ("_SR2x_原尺寸" if model_name == "x2plus" else f"_SR_{model_name}_原尺寸")
             target = output / f"{stem}.mp4"
-            if target.exists():
-                items.append({"name": path.name, "source": str(path), "status": "skipped",
-                              "output_path": str(target), "frames": 0})
-                continue
-            try:
-                info = probe_video(path)
-            except (ValueError, OSError, subprocess.SubprocessError) as exc:
-                items.append({"name": path.name, "source": str(path), "status": "invalid",
-                              "error": str(exc), "frames": 0})
-                continue
-            items.append({"name": path.name, "source": info["source"], "status": "pending",
-                          "output_path": str(target), "frames": info["frames"],
-                          "width": info["width"], "height": info["height"], "fps": info["fps"],
-                          "size_bytes": info["size_bytes"], "modified_ns": info["modified_ns"]})
+            items.append({"name": path.name, "source": str(path),
+                          "status": "skipped" if target.name in outputs else "pending",
+                          "output_path": str(target), "frames": 0})
         return {"source_directory": str(source), "output_directory": str(output), "model": model_name,
                 "pending_count": sum(item["status"] == "pending" for item in items),
                 "skipped_count": sum(item["status"] == "skipped" for item in items),
-                "invalid_count": sum(item["status"] == "invalid" for item in items), "items": items}
+                "invalid_count": 0, "scanned_only": True, "items": items}
 
-    def create(self, model_name: str = "x2plus") -> dict[str, Any]:
+    def create(self, model_name: str = "x2plus", *, scheduled_at=None) -> dict[str, Any]:
         preview = self.preview(model_name)
-        if preview["invalid_count"]:
-            raise ValueError("原素材中有无法处理的视频，请查看预检结果并移出或修复")
         if not preview["pending_count"]:
             raise ValueError("原素材中没有待处理视频")
-        expected_sha = model_config(model_name)["sha256"]
-        if not any(node["online"] and node["video_upscale"].get("protocol") == 2
-                   and node["video_upscale"].get("models", {}).get(model_name, {}).get("available")
-                   and node["video_upscale"]["models"][model_name].get("model_sha256") == expected_sha
-                   for node in self.single.nodes()):
-            raise ValueError(f"没有安装相同 {model_name} 模型的在线工作机")
         with self.lock:
             if self.stopping or any(thread.is_alive() for thread in self.threads.values()):
                 raise ValueError("已有集群超分批次运行")
@@ -400,30 +393,114 @@ class ClusterUpscaleBatchManager:
                      for item in preview["items"] if item["status"] == "pending"]
             job = {"id": job_id, "mode": "cluster", "kind": "batch", "model": model_name,
                    "scale": model_config(model_name)["scale"],
-                   "status": "queued", "phase": "queued", "source": preview["source_directory"],
+                   "status": "scheduled" if scheduled_at else "queued",
+                   "phase": "waiting_start" if scheduled_at else "queued",
+                   "scheduled_at": scheduled_at.isoformat() if scheduled_at else None,
+                   "source": preview["source_directory"],
                    "output_directory": preview["output_directory"], "items": items,
-                   "processed_frames": 0, "total_frames": sum(item["frames"] for item in items),
+                   "processed_frames": 0, "total_frames": 0, "prechecked_files": 0,
                    "total_files": len(items), "completed_files": 0, "failed_files": 0,
                    "created_at": time.time(), "finished_at": None, "error": None}
             self.database.save("upscale_batches", job)
             self._launch(job_id)
             return copy.deepcopy(job)
 
+    def _precheck(self, job: dict[str, Any], cancel: threading.Event) -> None:
+        """Probe media only after a batch has been accepted into the queue."""
+        job.update(status="running", phase="prechecking")
+        self._save(job)
+        source_directory = Path(job["source"]).resolve()
+
+        def inspect(item: dict[str, Any]) -> dict[str, Any] | None:
+            if cancel.is_set() or self.stopping:
+                return None
+            path = Path(item["source"])
+            if not path.resolve().is_relative_to(source_directory):
+                raise ValueError("源视频指向原素材目录以外")
+            return probe_video(path)
+
+        pending = [item for item in job["items"]
+                   if item["status"] not in {"failed", "completed"} and "size_bytes" not in item]
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="upscale-precheck") as pool:
+            futures = {pool.submit(inspect, item): item for item in pending}
+            for future in as_completed(futures):
+                item = futures[future]
+                if cancel.is_set() or self.stopping:
+                    for queued in futures:
+                        queued.cancel()
+                    break
+                try:
+                    info = future.result()
+                    if info is not None:
+                        item.update(source=info["source"], frames=info["frames"], width=info["width"],
+                                    height=info["height"], fps=info["fps"], size_bytes=info["size_bytes"],
+                                    modified_ns=info["modified_ns"], probe_info=info)
+                except Exception as exc:
+                    item.update(status="failed", error=f"视频预检失败：{exc}", processed_frames=0)
+                self._save(job)
+
     def _launch(self, job_id: str) -> None:
-        event = threading.Event()
-        self.events[job_id] = event
-        thread = threading.Thread(target=self._run, args=(job_id, event), daemon=True,
-                                  name=f"cluster-upscale-batch-{job_id[:8]}")
-        self.threads[job_id] = thread
-        thread.start()
+        with self.lock:
+            if self.stopping or (job_id in self.threads and self.threads[job_id].is_alive()):
+                return
+            event = threading.Event()
+            self.events[job_id] = event
+            thread = threading.Thread(target=self._await_start, args=(job_id, event), daemon=True,
+                                      name=f"cluster-upscale-batch-{job_id[:8]}")
+            self.threads[job_id] = thread
+            thread.start()
+
+    def _await_start(self, job_id: str, cancel: threading.Event) -> None:
+        handed_off = False
+        try:
+            job = self.get(job_id)
+            ready = wait_for_start(job.get("scheduled_at"), cancel, lambda: self.stopping)
+            if self.stopping:
+                return
+            if not ready:
+                job.update(status="cancelled", phase="finished", finished_at=time.time())
+                for item in job["items"]:
+                    if item["status"] in {"pending", "running"}:
+                        item.update(status="cancelled", processed_frames=0)
+                self._save(job)
+                return
+            if job.get("scheduled_at"):
+                expected = model_config(job["model"])["sha256"]
+                job.update(status="queued", phase="waiting_workers")
+                self._save(job)
+                while not self.stopping and not cancel.is_set():
+                    if any(node["online"] and node["video_upscale"].get("protocol") == 2
+                           and node["video_upscale"].get("models", {}).get(job["model"], {}).get("available")
+                           and node["video_upscale"]["models"][job["model"]].get("model_sha256") == expected
+                           for node in self.single.nodes()):
+                        break
+                    cancel.wait(1.0)
+                if self.stopping:
+                    job.update(status="interrupted", finished_at=None)
+                    self._save(job)
+                    return
+            handed_off = True
+            self._run(job_id, cancel)
+        except Exception as exc:
+            job = self.get(job_id)
+            job.update(status="interrupted" if self.stopping else "failed", phase="finished",
+                       error=str(exc), finished_at=None if self.stopping else time.time())
+            self._save(job)
+        finally:
+            if not handed_off:
+                with self.lock:
+                    self.events.pop(job_id, None)
+                    self.threads.pop(job_id, None)
 
     def resume_interrupted(self) -> None:
         with self.lock:
             for job in self.database.list("upscale_batches"):
-                if job["status"] == "interrupted":
+                if job["status"] in {"scheduled", "interrupted"}:
                     self._launch(job["id"])
 
     def _save(self, job: dict[str, Any]) -> None:
+        job["total_frames"] = sum(item.get("frames", 0) for item in job["items"])
+        job["prechecked_files"] = sum(bool(item.get("frames")) or item["status"] == "failed" for item in job["items"])
         job["processed_frames"] = sum(item["frames"] if item["status"] == "completed"
                                        else item.get("processed_frames", 0) for item in job["items"])
         job["completed_files"] = sum(item["status"] == "completed" for item in job["items"])
@@ -450,7 +527,7 @@ class ClusterUpscaleBatchManager:
     def delete(self, job_id: str) -> None:
         with self.lock:
             job = self.get(job_id)
-            if job_id in self.events or job["status"] in {"queued", "running", "cancelling"}:
+            if job_id in self.events or job["status"] in {"scheduled", "queued", "running", "cancelling"}:
                 raise ValueError("运行中的集群超分批次不能删除")
             for item in job["items"]:
                 if item.get("job_id"):
@@ -461,18 +538,25 @@ class ClusterUpscaleBatchManager:
         job = self.database.get("upscale_batches", job_id)
         assert job is not None
         try:
+            self._precheck(job, cancel)
             job.update(status="running", phase="processing")
             self._save(job)
             for item in job["items"]:
                 if cancel.is_set() or self.stopping:
                     break
+                if item["status"] == "failed":
+                    continue
                 if item["status"] == "completed":
                     if Path(item["output_path"]).is_file():
                         continue
                     item.update(status="pending", job_id=None, processed_frames=0)
                 source = Path(item["source"])
-                if not source.is_file() or source.stat().st_size != item["size_bytes"] or source.stat().st_mtime_ns != item["modified_ns"]:
-                    item.update(status="failed", error="源视频在预检后发生变化", processed_frames=0)
+                try:
+                    stat = source.stat()
+                    if not source.is_file() or stat.st_size != item["size_bytes"] or stat.st_mtime_ns != item["modified_ns"]:
+                        raise ValueError("源视频在预检后发生变化")
+                except (OSError, ValueError) as exc:
+                    item.update(status="failed", error=str(exc), processed_frames=0)
                     self._save(job)
                     continue
                 if item["job_id"]:
@@ -487,7 +571,13 @@ class ClusterUpscaleBatchManager:
                         cancel.wait(0.2)
                     if cancel.is_set() or self.stopping:
                         break
-                    child = self.single.create(item["source"], job["output_directory"], job["model"])
+                    try:
+                        child = self.single.create(item["source"], job["output_directory"], job["model"],
+                                                   probed_info=item.get("probe_info"))
+                    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                        item.update(status="failed", error=str(exc), processed_frames=0)
+                        self._save(job)
+                        continue
                     item.update(job_id=child["id"], status="running", processed_frames=0, error=None)
                     self._save(job)
                 while child["status"] not in {"completed", "failed", "cancelled"} and not cancel.is_set() and not self.stopping:

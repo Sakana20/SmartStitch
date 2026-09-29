@@ -23,6 +23,8 @@ const state = {
   preview: null,
   jobs: [],
   upscaleJobs: [],
+  portraitJobs: [],
+  landscapeJobs: [],
   upscaleJobTimer: null,
   workerAttempts: [],
   workerAttemptTimer: null,
@@ -126,7 +128,9 @@ const toolboxTools = [
   { id: "cluster-control", title: "SmartStitch 集群控制", description: "连接在线工作机，统一派发和查看批量渲染、NAS 视频超分。", cover: "/assets/tools/cluster-control.svg", order: 0, adminOnly: true, mount: mountClusterControlTool },
   { id: "user-management", title: "用户管理", description: "添加、暂停和管理登录账号。", cover: "/assets/tools/user-management.svg", order: 2, adminOnly: true, mount: mountUserManagementTool },
   { id: "jianying-prores-4444", title: "ProRes 4444 处理", description: "将黑底视频批量转换为带透明通道的 ProRes 4444 MOV。", cover: "/assets/tools/jianying-prores-4444.svg", order: 5, mount: mountProResAlphaTool },
-  { id: "video-upscale", title: "超分", description: "2 倍超分后按源视频的宽高和帧率输出，使用本机处理视频文件夹。", cover: "/assets/tools/video-upscale.svg?v=2", order: 6, mount: mountVideoUpscaleTool },
+  { id: "video-upscale", title: "超分", description: "2 倍超分后按源视频的宽高和帧率输出，使用本机处理视频文件夹。", cover: "/assets/tools/video-upscale.svg?v=20260928-detail-no-text", order: 6, mount: mountVideoUpscaleTool },
+  { id: "landscape-to-portrait", title: "横改竖", description: "批量转为竖屏，清晰原画面叠加模糊背景。", cover: "/assets/tools/landscape-to-portrait.svg?v=4", order: 7, mount: mountPortraitTool },
+  { id: "portrait-to-landscape", title: "竖改横", description: "批量转为横屏，清晰原画面叠加模糊背景。", cover: "/assets/tools/portrait-to-landscape.svg?v=2", order: 8, mount: mountLandscapeTool },
   { id: "folder-concat", title: "文件夹拼接", description: "选择两个文件夹，批量拼接视频。", cover: "/assets/tools/folder-concat.svg", order: 10, mount: mountFolderConcatTool },
   { id: "batch-dedup", title: "批量去重", description: "选择文件夹，逐条应用现有视觉去重效果。", cover: "/assets/tools/batch-dedup.svg", order: 20, mount: mountBatchDedupTool },
 ];
@@ -530,10 +534,10 @@ async function withTemporaryConfigLease(callback, { requireCurrentHash = true } 
 
 function statusInfo(status) {
   const map = {
-    draft: ["草稿", "neutral"], queued: ["排队中", "running"], running: ["生成中", "running"],
+    draft: ["草稿", "neutral"], scheduled: ["等待预约", "neutral"], queued: ["排队中", "running"], running: ["生成中", "running"],
     completed: ["已完成", "success"], partial_failed: ["部分失败", "danger"], failed: ["失败", "danger"],
     cancelling: ["取消中", "running"], cancelled: ["已取消", "neutral"], interrupted: ["已中断", "danger"],
-    pending: ["等待", "neutral"], succeeded: ["成功", "success"],
+    pending: ["等待", "neutral"], skipped: ["已跳过", "neutral"], invalid: ["不可处理", "danger"], succeeded: ["成功", "success"],
   };
   return map[status] || [status, "neutral"];
 }
@@ -758,6 +762,68 @@ function renderToolbox() {
   });
 }
 
+let clusterStartPromptCleanup = null;
+
+function requestClusterStart(title) {
+  clusterStartPromptCleanup?.();
+  return new Promise(resolve => {
+    const previousFocus = document.activeElement;
+    const modal = document.createElement("div");
+    modal.className = "modal open";
+    modal.innerHTML = `<div class="modal-backdrop" data-schedule-cancel></div>
+      <form class="modal-card compact-modal-card" role="dialog" aria-modal="true" aria-labelledby="clusterStartTitle">
+        <div class="modal-heading"><h2 id="clusterStartTitle">${escapeHtml(title)}</h2><button class="drawer-close" type="button" data-schedule-cancel aria-label="取消">×</button></div>
+        <p>这项任务需要预约开始吗？</p>
+        <label class="field"><span>开始方式</span><select name="start_mode"><option value="now">立即开始</option><option value="scheduled">预约开始</option></select></label>
+        <label class="field" data-schedule-time hidden><span>预约开始时间（本机时间）</span><input name="scheduled_at" type="datetime-local"></label>
+        <p>预约期间主控需保持运行，macOS 会自动防止睡眠。重启后恢复预约，错过时间会补启动。</p>
+        <small class="field-validation" data-schedule-error role="alert"></small>
+        <div class="actions right"><button type="button" class="button secondary" data-schedule-cancel>取消</button><button class="button primary" type="submit">立即开始</button></div>
+      </form>`;
+    const form = modal.querySelector("form");
+    const mode = form.querySelector('[name="start_mode"]');
+    const time = form.querySelector('[name="scheduled_at"]');
+    const error = form.querySelector("[data-schedule-error]");
+    const finish = value => {
+      modal.remove();
+      document.removeEventListener("keydown", onKey);
+      if (clusterStartPromptCleanup === dismiss) clusterStartPromptCleanup = null;
+      previousFocus?.focus();
+      resolve(value);
+    };
+    const dismiss = () => finish(undefined);
+    const onKey = event => { if (event.key === "Escape") { event.preventDefault(); dismiss(); } };
+    clusterStartPromptCleanup = dismiss;
+    modal.querySelectorAll("[data-schedule-cancel]").forEach(button => button.addEventListener("click", dismiss));
+    mode.addEventListener("change", () => {
+      const scheduled = mode.value === "scheduled";
+      form.querySelector("[data-schedule-time]").hidden = !scheduled;
+      time.required = scheduled;
+      form.querySelector('[type="submit"]').textContent = scheduled ? "创建预约任务" : "立即开始";
+      error.textContent = "";
+      if (scheduled && !time.value) {
+        const next = new Date(); next.setHours(20, 0, 0, 0);
+        if (next.getTime() <= Date.now()) next.setDate(next.getDate() + 1);
+        time.value = new Date(next.getTime() - next.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+      }
+      if (scheduled) time.focus();
+    });
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      if (mode.value === "now") return finish(null);
+      const start = new Date(time.value);
+      if (!Number.isFinite(start.getTime()) || start.getTime() <= Date.now()) {
+        error.textContent = "请选择晚于当前时间的预约时间";
+        return;
+      }
+      finish(start.toISOString());
+    });
+    document.body.append(modal);
+    document.addEventListener("keydown", onKey);
+    mode.focus();
+  });
+}
+
 function mountClusterControlTool(container) {
   let disposed = false;
   let timer = null;
@@ -774,6 +840,7 @@ function mountClusterControlTool(container) {
   const selectedNodeIds = new Set();
   let cleanupMarquee = null;
   let cleanupUpscale = null;
+  const cleanupConversions = [];
   const form = document.createElement("div");
   form.className = "cluster-gate";
   form.innerHTML = `<p>正在加载集群控制…</p><small class="cluster-gate-error hidden" role="alert"></small>`;
@@ -782,7 +849,7 @@ function mountClusterControlTool(container) {
   const start = async () => {
     error.classList.add("hidden");
     try {
-      const status = await api("/tools/cluster-control/status");
+      const status = await api("/tools/cluster-control/status?probe_nodes=false");
       if (disposed) return;
       const panel = document.createElement("div");
       panel.className = "cluster-control-tool";
@@ -816,18 +883,24 @@ function mountClusterControlTool(container) {
             <label class="field"><span>成片数量</span><input name="count" type="number" min="1" max="1000" value="10" required></label>
             <label class="field"><span>随机种子（可选）</span><input name="seed" type="number" placeholder="自动生成"></label>
             <button class="button primary" type="submit">开始集群渲染</button>
-          </form><p class="cluster-control-hint">成片输出需设在 NAS 共享的 SmartStitch 目录内。至少连接一台在线工作机。</p>
+          </form><p class="cluster-control-hint">预约任务到点自动派发；主控需保持运行，macOS 会自动防止睡眠。重启后会恢复预约，错过时间会补启动。</p><p class="cluster-control-hint">成片输出需设在 NAS 共享的 SmartStitch 目录内。至少连接一台在线工作机。</p>
         </section>
+        <section class="cluster-control-card"><h3>集群横改竖</h3><div data-cluster-portrait></div></section>
+        <section class="cluster-control-card"><h3>集群竖改横</h3><div data-cluster-landscape></div></section>
         <section class="cluster-control-card"><h3>集群超分</h3><div data-cluster-upscale></div></section>
         <section class="cluster-control-card"><h3>集群任务</h3><div data-cluster-jobs></div></section>
         <p class="cluster-control-error hidden" data-cluster-error role="alert"></p>
       `;
       form.replaceWith(panel);
       cleanupUpscale = mountVideoUpscaleTool(panel.querySelector("[data-cluster-upscale]"), "cluster");
+      cleanupConversions.push(mountPortraitTool(panel.querySelector("[data-cluster-portrait]"), false, "cluster", status.config_root));
+      cleanupConversions.push(mountPortraitTool(panel.querySelector("[data-cluster-landscape]"), true, "cluster", status.config_root));
       const configSelect = panel.querySelector('[name="config_id"]');
-      const configs = await api("/configs");
-      configSelect.innerHTML = configs.filter(config => config.valid).map(config => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name)}</option>`).join("");
-      if (state.configId && configs.some(config => config.id === state.configId && config.valid)) configSelect.value = state.configId;
+      api("/configs").then(configs => {
+        if (disposed) return;
+        configSelect.innerHTML = configs.filter(config => config.valid).map(config => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name)}</option>`).join("");
+        if (state.configId && configs.some(config => config.id === state.configId && config.valid)) configSelect.value = state.configId;
+      }).catch(cause => { if (!disposed) showError(cause); });
       const clusterApi = (path, options = {}) => api(`/tools/cluster-control${path}`, options);
       const showError = cause => {
         const box = panel.querySelector("[data-cluster-error]");
@@ -879,7 +952,7 @@ function mountClusterControlTool(container) {
             <button class="cluster-topology-choice" type="button" data-cluster-node-choice aria-pressed="${selectedNodeIds.has(node.node_id)}" aria-label="选择 ${escapeHtml(nodeLabel(node))}">
               <span class="cluster-topology-icon" aria-hidden="true"></span>
               <strong>${escapeHtml(nodeLabel(node))}</strong><small>${escapeHtml(node.url)}</small>
-              <span class="cluster-topology-state">${node.online ? `已连接 · ${node.active}/${node.capacity} 正在渲染` : "已连接 · 离线"}</span>
+              <span class="cluster-topology-state">${node.online ? `已连接 · ${node.active}/${node.capacity} 正在渲染` : node.probing ? "已连接 · 正在检测…" : "已连接 · 离线"}</span>
             </button>
             <button class="cluster-topology-remove" type="button" data-cluster-remove="${escapeHtml(node.node_id)}" aria-label="移除 ${escapeHtml(nodeLabel(node))}">移除</button>
           </div>`);
@@ -909,17 +982,18 @@ function mountClusterControlTool(container) {
           button.textContent = "搜索局域网";
         }
       };
-      const refresh = async () => {
+      const refresh = async (initialData = null) => {
         if (disposed || updating) return;
         updating = true;
         try {
-          const data = await clusterApi("/status");
+          const data = initialData || await clusterApi("/status");
           if (disposed) return;
           clusterStatus = data;
           const worker = data.worker;
           const workerHost = worker.name.endsWith(".local") ? worker.name : `${worker.name}.local`;
           panel.querySelector("[data-cluster-worker]").innerHTML = `
             <p>${worker.enabled ? `<span class="cluster-live">已上线</span> · 端口 ${worker.port} · 正在渲染 ${worker.active}/${worker.capacity}` : "当前未作为工作机上线"}</p>
+            ${data.sleep_protection?.supported ? `<p>${data.sleep_protection.active ? "防睡眠已启用，可锁屏或熄屏" : data.sleep_protection.error ? `防睡眠启动失败：${escapeHtml(data.sleep_protection.error)}` : "防睡眠待命：渲染、预约等待或工作机上线时自动启用"}</p>` : ""}
             ${worker.startup_error ? `<p class="cluster-control-error">自动上线失败：${escapeHtml(worker.startup_error)}</p>` : ""}
             ${worker.enabled ? `<p>${worker.display_name ? `${escapeHtml(worker.display_name)} · ` : ""}节点：${escapeHtml(worker.name)}</p><p>供主控连接的地址：<code>http://${escapeHtml(workerHost)}:${worker.port}</code></p>` : ""}
             <p>令牌保护：${worker.token_required ? "已开启" : "已关闭（局域网内可直接连接）"}</p>
@@ -931,7 +1005,7 @@ function mountClusterControlTool(container) {
           for (const id of selectedNodeIds) if (!connectedIds.has(id)) selectedNodeIds.delete(id);
           renderTopology();
           panel.querySelector("[data-cluster-jobs]").innerHTML = data.jobs.length ? data.jobs.map(job => `
-            <div class="cluster-job-row"><div><strong>${escapeHtml(job.config_name)}</strong><small>${escapeHtml(job.status)} · 成功 ${job.success_count}/${job.count} · 失败 ${job.failure_count} · ${escapeHtml(job.created_at)}</small></div><div class="actions"><button class="text-btn" type="button" data-cluster-detail="${escapeHtml(job.id)}">查看任务</button>${["queued", "running"].includes(job.status) ? `<button class="text-btn" type="button" data-cluster-cancel="${escapeHtml(job.id)}">取消</button>` : `<button class="text-btn" type="button" data-cluster-delete="${escapeHtml(job.id)}">删除记录</button>`}</div></div>`).join("") : "<p>暂无集群任务。</p>";
+            <div class="cluster-job-row"><div><strong>${escapeHtml(job.config_name)}</strong><small>${escapeHtml(statusInfo(job.status)[0])}${job.scheduled_at ? ` · 预约 ${escapeHtml(formatDate(job.scheduled_at))}` : ""} · 成功 ${job.success_count}/${job.count} · 失败 ${job.failure_count} · ${escapeHtml(job.created_at)}</small></div><div class="actions"><button class="text-btn" type="button" data-cluster-detail="${escapeHtml(job.id)}">查看任务</button>${["scheduled", "queued", "running"].includes(job.status) ? `<button class="text-btn" type="button" data-cluster-cancel="${escapeHtml(job.id)}">取消</button>` : `<button class="text-btn" type="button" data-cluster-delete="${escapeHtml(job.id)}">删除记录</button>`}</div></div>`).join("") : "<p>暂无集群任务。</p>";
         } catch (cause) { if (!disposed) showError(cause); }
         finally { updating = false; }
       };
@@ -1152,17 +1226,22 @@ function mountClusterControlTool(container) {
         const submit = event.currentTarget.querySelector('button[type="submit"]');
         submit.disabled = true;
         try {
+          const scheduledAt = await requestClusterStart("集群渲染");
+          if (scheduledAt === undefined || disposed) return;
           const job = await clusterApi("/jobs", { method: "POST", body: JSON.stringify({
             config_id: fields.get("config_id"), count: Number(fields.get("count")),
             seed: fields.get("seed") ? Number(fields.get("seed")) : null, auto_start: true,
+            scheduled_at: scheduledAt,
           }) });
-          toast(`已创建 ${job.count} 条集群渲染任务`);
+          toast(job.scheduled_at ? `已预约 ${job.count} 条集群渲染任务，${formatDate(job.scheduled_at)} 开始` : `已创建 ${job.count} 条集群渲染任务`);
           await refresh();
         } catch (cause) { showError(cause); }
         finally { submit.disabled = false; }
       });
-      await refresh();
-      searchWorkers().catch(showError);
+      await refresh(status);
+      if (disposed) return;
+      refresh();
+      searchWorkers().catch(cause => { if (!disposed) showError(cause); });
       timer = setInterval(refresh, 3000);
     } catch (cause) {
       if (disposed) return;
@@ -1176,6 +1255,7 @@ function mountClusterControlTool(container) {
     if (timer) clearInterval(timer);
     cleanupMarquee?.();
     cleanupUpscale?.();
+    cleanupConversions.forEach(cleanup => cleanup());
   };
 }
 
@@ -1287,6 +1367,7 @@ function openToolboxTool(id) {
 }
 
 function closeToolboxTool(restoreFocus = true) {
+  clusterStartPromptCleanup?.();
   if (typeof toolboxCleanup === "function") toolboxCleanup();
   toolboxCleanup = null;
   const activeId = $("#toolboxDetailContent").dataset.toolId;
@@ -1385,6 +1466,9 @@ function mountVideoUpscaleTool(container, executionMode = "local") {
   let preview = null;
   let job = null;
   let model = null;
+  let nasRequest = null;
+  let nasController = null;
+  let nasModel = null;
   container.innerHTML = `<div class="prores-tool">
     <label id="upscaleSourceRow" class="field"><span>源视频文件夹</span><div class="directory-picker-row">
       <input id="upscaleSource" type="text" data-path-input placeholder="选择包含视频的文件夹；只处理第一层">
@@ -1421,28 +1505,59 @@ function mountVideoUpscaleTool(container, executionMode = "local") {
   const outputPath = () => normalizePathInput(output.value) || null;
   const selectedModel = () => modelSelect.value;
   const modelReadyOnNode = node => node.online && node.video_upscale?.models?.[selectedModel()]?.available;
-  const canRun = () => executionMode === "cluster" ? clusterNodes.some(modelReadyOnNode) && preview?.pending_count > 0 && !preview?.invalid_count : Boolean(model?.available && model.model === selectedModel() && preview?.pending_count > 0 && !preview?.invalid_count);
+  const canRun = () => executionMode === "cluster" ? preview?.pending_count > 0 && !preview?.invalid_count : Boolean(model?.available && model.model === selectedModel() && preview?.pending_count > 0 && !preview?.invalid_count);
   const refreshNodes = async () => {
     if (executionMode !== "cluster") { nodesBox.hidden = true; return; }
     nodesBox.hidden = false;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
     try {
-      clusterNodes = await api("/tools/video-upscale/nodes");
+      const nodes = await api("/tools/video-upscale/nodes", { signal: controller.signal });
+      if (disposed) return;
+      clusterNodes = nodes;
       const readyCount = clusterNodes.filter(modelReadyOnNode).length;
       nodesBox.innerHTML = clusterNodes.length ? `${escapeHtml(selectedModel())} 可用工作机：${readyCount} 台${readyCount === 1 ? "；单台工作机没有并行提速" : ""}<br>${clusterNodes.map(node => `${escapeHtml(node.name || node.node_id)}：${node.online ? modelReadyOnNode(node) ? "所选模型就绪" : "所选模型未安装" : "离线"}`).join("<br>")}` : "尚未添加工作机，请先到集群控制页连接。";
-    } catch (error) { nodesBox.textContent = error.message; clusterNodes = []; }
+    } catch (error) { if (!disposed) { nodesBox.textContent = controller.signal.aborted ? "工作机状态请求超时，请重试" : error.message; clusterNodes = []; } }
+    finally { clearTimeout(timeout); }
+    if (disposed) return;
     startButton.disabled = !preview || !canRun() || Boolean(job && !terminal.has(job.status));
   };
-  const refreshNas = async () => {
-    if (executionMode !== "cluster") return;
-    nasBox.textContent = "正在扫描 NAS 原素材…";
-    try {
-      const result = await api(`/tools/video-upscale/nas?model=${encodeURIComponent(selectedModel())}`);
-      if (disposed || executionMode !== "cluster" || result.model !== selectedModel()) return;
-      preview = result;
-      nasBox.innerHTML = `<strong>NAS 集群批次</strong><br>原素材：${escapeHtml(result.source_directory)}<br>已处理：${escapeHtml(result.output_directory)}<br>待处理 ${result.pending_count} 条 · 已有结果 ${result.skipped_count} 条 · 不可处理 ${result.invalid_count} 条`;
-      previewBox.innerHTML = result.items.length ? `<section class="prores-result">${result.items.slice(0, 30).map(item => `<p>${escapeHtml(item.name)} · ${item.status === "pending" ? `${item.width}×${item.height} · ${escapeHtml(item.fps)} fps · ${item.frames} 帧` : item.status === "skipped" ? "已有同模型结果，跳过" : `不可处理：${escapeHtml(item.error || "未知原因")}`}</p>`).join("")}${result.items.length > 30 ? `<p>另有 ${result.items.length - 30} 条</p>` : ""}</section>` : "<p>原素材文件夹中没有视频。</p>";
-      startButton.disabled = !canRun() || Boolean(job && !terminal.has(job.status));
-    } catch (error) { preview = null; nasBox.textContent = error.message; previewBox.replaceChildren(); startButton.disabled = true; }
+  const refreshNas = () => {
+    if (executionMode !== "cluster" || disposed) return Promise.resolve();
+    const requestedModel = selectedModel();
+    if (nasRequest && nasModel === requestedModel) return nasRequest;
+    nasController?.abort();
+    const controller = new AbortController();
+    nasController = controller; nasModel = requestedModel;
+    const current = () => !disposed && nasController === controller && selectedModel() === requestedModel;
+    preview = null; previewBox.replaceChildren(); startButton.disabled = true;
+    previewButton.disabled = true;
+    previewButton.textContent = "正在扫描 NAS…";
+    nasBox.textContent = "正在扫描 NAS 原素材；视频较多时需要稍等…";
+    const timeout = setTimeout(() => controller.abort(), 60000);
+    nasRequest = (async () => {
+      try {
+        const result = await api(`/tools/video-upscale/nas?model=${encodeURIComponent(requestedModel)}`, { signal: controller.signal });
+        if (!current() || result.model !== requestedModel) return;
+        preview = result;
+        nasBox.innerHTML = `<strong>NAS 集群批次</strong><br>原素材：${escapeHtml(result.source_directory)}<br>已处理：${escapeHtml(result.output_directory)}<br>待处理 ${result.pending_count} 条 · 已有结果 ${result.skipped_count} 条<br>加入队列后检查视频参数和帧数。`;
+        previewBox.innerHTML = result.items.length ? `<section class="prores-result">${result.items.slice(0, 30).map(item => `<p>${escapeHtml(item.name)} · ${item.status === "pending" ? "待处理 · 加入队列后预检" : item.status === "skipped" ? "已有同模型结果，跳过" : `不可处理：${escapeHtml(item.error || "未知原因")}`}</p>`).join("")}${result.items.length > 30 ? `<p>另有 ${result.items.length - 30} 条</p>` : ""}</section>` : "<p>原素材文件夹中没有视频。</p>";
+        startButton.disabled = !canRun() || Boolean(job && !terminal.has(job.status));
+      } catch (error) {
+        if (!current()) return;
+        preview = null;
+        nasBox.textContent = controller.signal.aborted ? "NAS 文件列表读取超过 60 秒，请检查 NAS 连接后重试。" : error.message;
+        previewBox.replaceChildren(); startButton.disabled = true;
+      } finally {
+        clearTimeout(timeout);
+        if (!disposed && nasController === controller) {
+          nasRequest = null; nasController = null; nasModel = null;
+          previewButton.disabled = false;
+          previewButton.textContent = "刷新 NAS 视频";
+        }
+      }
+    })();
+    return nasRequest;
   };
   const updateMode = () => {
     const clusterMode = executionMode === "cluster";
@@ -1491,7 +1606,7 @@ function mountVideoUpscaleTool(container, executionMode = "local") {
     startButton.disabled = running || !preview || !canRun();
     resultBox.innerHTML = `<section class="prores-result"><strong>${job.status === "completed" ? "超分完成" : ["failed", "partial_failed"].includes(job.status) ? "超分失败" : job.status === "cancelled" ? "已取消" : "正在超分"} · ${job.processed_frames}/${job.total_frames} 帧</strong>
       <progress value="${job.processed_frames}" max="${job.total_frames}"></progress>
-      <p>阶段：${escapeHtml(job.phase || "等待中")}</p>
+      <p>阶段：${escapeHtml(job.phase === "prechecking" ? `视频预检（${job.prechecked_files || 0}/${job.total_files}）` : ({ waiting_start: "等待预约时间", waiting_workers: "等待工作机上线" }[job.phase] || job.phase || "等待中"))}</p>
       ${job.kind === "batch" ? `<p>${job.mode === "cluster" ? "NAS" : "本机"}批次：完成 ${job.completed_files}/${job.total_files} 条，失败 ${job.failed_files} 条</p><p>输出目录：${escapeHtml(job.output_directory)}</p>${job.items.map(item => `<p>${escapeHtml(item.name)} · ${escapeHtml(item.status)}${item.error ? ` · ${escapeHtml(item.error)}` : ""}</p>`).join("")}` : ""}
       ${job.model ? `<p>模型：${escapeHtml(job.model)} · 原生 ${escapeHtml(String(job.scale || 2))} 倍后回缩</p>` : ""}
       ${job.width && job.height && job.fps ? `<p>输出规格：${escapeHtml(String(job.width))}×${escapeHtml(String(job.height))} · ${escapeHtml(String(job.fps))} fps（取自源视频）</p>` : ""}
@@ -1533,7 +1648,7 @@ function mountVideoUpscaleTool(container, executionMode = "local") {
     finally { button.disabled = false; }
   });
   previewButton.addEventListener("click", async event => {
-    if (executionMode === "cluster") { event.currentTarget.disabled = true; try { await refreshNas(); await refreshNodes(); } finally { event.currentTarget.disabled = false; } return; }
+    if (executionMode === "cluster") { await Promise.all([refreshNas(), refreshNodes()]); return; }
     if (!sourcePath()) return toast("请先选择源视频文件夹", true);
     const button = event.currentTarget; button.disabled = true;
     try {
@@ -1551,10 +1666,17 @@ function mountVideoUpscaleTool(container, executionMode = "local") {
       if (!preview || preview.model !== selectedModel() || !preview.pending_count || preview.invalid_count) return toast("请刷新 NAS 视频", true);
     } else if (!preview || preview.model !== selectedModel() || !preview.pending_count || preview.invalid_count) return toast("请重新预检文件夹", true);
     startButton.disabled = true;
+    const requestedModel = selectedModel();
     try {
-      job = await api("/tools/video-upscale", { method: "POST", body: JSON.stringify({ source: executionMode === "cluster" ? null : sourcePath(), output_directory: executionMode === "cluster" ? null : outputPath(), mode: executionMode, model: selectedModel() }) });
+      const scheduledAt = executionMode === "cluster" ? await requestClusterStart("集群超分") : null;
+      if (scheduledAt === undefined || disposed || requestedModel !== selectedModel()) {
+        if (!disposed) startButton.disabled = !canRun();
+        return;
+      }
+      if (executionMode === "cluster" && !scheduledAt && !clusterNodes.some(modelReadyOnNode)) throw new Error("没有安装所选模型的在线工作机，可选择预约开始");
+      job = await api("/tools/video-upscale", { method: "POST", body: JSON.stringify({ source: executionMode === "cluster" ? null : sourcePath(), output_directory: executionMode === "cluster" ? null : outputPath(), mode: executionMode, model: selectedModel(), scheduled_at: scheduledAt }) });
       videoUpscaleJobId = job.id;
-      toast("超分任务已加入任务队列");
+      toast(job.scheduled_at ? `超分任务已预约 ${formatDate(job.scheduled_at)} 开始` : "超分任务已加入任务队列");
       await loadJobs();
       await switchView("jobs");
       openUpscaleJob(job.id);
@@ -1565,7 +1687,7 @@ function mountVideoUpscaleTool(container, executionMode = "local") {
     job = latest; videoUpscaleJobId = latest.id; renderJob();
     if (!terminal.has(job.status)) scheduleRefresh();
   }).catch(() => {});
-  return () => { disposed = true; clearInterval(timer); };
+  return () => { disposed = true; clearInterval(timer); nasController?.abort(); };
 }
 
 function mountProResAlphaTool(container) {
@@ -4351,10 +4473,168 @@ async function startJob() {
   finally { button.disabled = false; button.querySelector("span").textContent = "开始生成"; }
 }
 
+function mountLandscapeTool(container) {
+  return mountPortraitTool(container, true);
+}
+
+function mountPortraitTool(container, landscape = false, mode = "local", nasRoot = "/Volumes/home/Smartstitch") {
+  const title = landscape ? "竖改横" : "横改竖";
+  const targetOrientation = landscape ? "横屏" : "竖屏";
+  const sourceOrientation = landscape ? "竖屏" : "横屏";
+  const endpoint = landscape ? "portrait-to-landscape" : "landscape-to-portrait";
+  const lowSize = landscape ? "1280×720" : "720×1280";
+  const highSize = landscape ? "1920×1080" : "1080×1920";
+  let preview = null;
+  let selectedResolution = "720p";
+  let revision = 0;
+  let disposed = false;
+  container.innerHTML = `<div class="prores-tool">
+    <p class="toolbox-intro">输出 ${landscape ? "16:9" : "9:16"} ${targetOrientation}，可选 720p 或 1080p，清晰原画面等比居中，${landscape ? "左右" : "上下"}填充同帧模糊背景，保留声音。</p>
+    <div class="field"><span id="portraitResolutionLabel-${endpoint}-${mode}">输出分辨率</span><div class="portrait-resolution-options" role="group" aria-labelledby="portraitResolutionLabel-${endpoint}-${mode}"><button id="portrait720" class="button primary" type="button" aria-pressed="true">720p · ${lowSize}</button><button id="portrait1080" class="button secondary" type="button" aria-pressed="false">1080p · ${highSize}</button></div></div>
+    ${mode === "cluster" ? `<p class="cluster-control-hint">自动使用所有支持转换的在线工作机；每台同时处理一条视频，直接读取 NAS 原素材。进度可在任务记录查看。</p>` : ""}
+    ${mode === "cluster" ? `<p class="cluster-control-hint" data-conversion-nas>NAS 原素材：${escapeHtml(nasRoot)}/${title}/原素材<br>NAS 已处理：${escapeHtml(nasRoot)}/${title}/已处理</p>` : `    <label class="field"><span>源视频文件夹</span><div class="directory-picker-row"><input id="portraitSource" type="text" data-path-input placeholder="选择或粘贴文件夹路径"><button id="portraitChooseSource" class="button secondary small" type="button">选择文件夹</button></div></label>
+    <label class="field"><span>输出文件夹（可选）</span><div class="directory-picker-row"><input id="portraitOutput" type="text" data-path-input placeholder="默认：源文件夹 / ${title}"><button id="portraitChooseOutput" class="button secondary small" type="button">选择文件夹</button></div></label>`}
+
+    <p class="cluster-control-hint">只读取第一层 MP4 / MOV / M4V / MKV ${sourceOrientation}视频，保留原文件；跳过${targetOrientation}、正方形和名称以“_${title}”或其数字后缀结尾的结果文件。已有结果另加序号保存。</p>
+    <div class="actions"><button id="portraitRead" class="button secondary" type="button">读取视频</button><button id="portraitStart" class="button primary" type="button" disabled>开始${title}</button></div>
+    <div id="portraitPreview" aria-live="polite"></div></div>`;
+  const source = mode === "local" ? container.querySelector("#portraitSource") : null;
+  const output = mode === "local" ? container.querySelector("#portraitOutput") : null;
+  const resolutionButtons = [[container.querySelector("#portrait720"), "720p"], [container.querySelector("#portrait1080"), "1080p"]];
+  const read = container.querySelector("#portraitRead");
+  const start = container.querySelector("#portraitStart");
+  const result = container.querySelector("#portraitPreview");
+  const invalidate = () => { revision++; preview = null; start.disabled = true; result.innerHTML = ""; };
+  source?.addEventListener("input", invalidate);
+  output?.addEventListener("input", invalidate);
+  for (const [button, value] of resolutionButtons) {
+    button.addEventListener("click", () => {
+      if (selectedResolution === value) return;
+      selectedResolution = value;
+      for (const [option, resolution] of resolutionButtons) {
+        const selected = resolution === selectedResolution;
+        option.setAttribute("aria-pressed", String(selected));
+        option.classList.toggle("primary", selected);
+        option.classList.toggle("secondary", !selected);
+      }
+      invalidate();
+    });
+  }
+  for (const [buttonId, input] of (mode === "local" ? [["#portraitChooseSource", source], ["#portraitChooseOutput", output]] : [])) {
+    container.querySelector(buttonId).addEventListener("click", async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const selection = await api("/system/directory-picker", { method: "POST" });
+        if (!disposed && selection.path) { input.value = selection.path; invalidate(); }
+      } catch (error) { if (!disposed) toast(error.message, true); }
+      finally { button.disabled = false; }
+    });
+  }
+  read.addEventListener("click", async () => {
+    invalidate();
+    const requestRevision = revision;
+    read.disabled = true;
+    read.textContent = "正在读取文件列表…";
+    try {
+      const response = await api(`/tools/${endpoint}/preview`, { method: "POST", body: JSON.stringify({ mode, ...(mode === "local" ? { source_directory: source.value.trim(), output_directory: output.value.trim() || null } : {}), resolution: selectedResolution }) });
+      if (disposed || revision !== requestRevision) return;
+      preview = response;
+      start.disabled = !preview.pending_count;
+      result.innerHTML = `<section class="prores-result"><strong>待处理 ${preview.pending_count} 条</strong><p>输出规格：${escapeHtml(preview.output_width)}×${escapeHtml(preview.output_height)}</p><p>输出目录：${escapeHtml(preview.output_directory)}</p><p>开始后逐个检查视频信息，${targetOrientation}或不可处理的视频会自动跳过。</p>${preview.items.map(item => `<p><strong>${escapeHtml(item.name)}</strong></p>`).join("") || "<p>文件夹内没有支持的视频。</p>"}</section>`;
+    } catch (error) { if (!disposed && revision === requestRevision) toast(error.message, true); }
+    finally { read.disabled = false; read.textContent = "读取视频"; }
+  });
+  start.addEventListener("click", async () => {
+    if (!preview) return;
+    start.disabled = true;
+    read.disabled = true;
+    const previewId = preview.id;
+    const requestRevision = revision;
+    try {
+      const scheduledAt = mode === "cluster" ? await requestClusterStart(`集群${title}`) : null;
+      if (scheduledAt === undefined || disposed || revision !== requestRevision) {
+        if (!disposed) start.disabled = !preview?.pending_count;
+        return;
+      }
+      const job = await api(`/tools/${endpoint}`, { method: "POST", body: JSON.stringify({ preview_id: previewId, mode, scheduled_at: scheduledAt }) });
+      if (disposed) return;
+      invalidate();
+      await loadJobs();
+      switchView("jobs");
+      await openPortraitJob(job.id, landscape);
+      toast(job.scheduled_at ? `${title}任务已预约 ${formatDate(job.scheduled_at)} 开始` : `${title}任务已开始`);
+    } catch (error) { if (!disposed) { invalidate(); toast(`${error.message}，请重新读取视频`, true); } }
+    finally { read.disabled = false; }
+  });
+  return () => { disposed = true; revision++; };
+}
+
+async function openLandscapeJob(jobId) {
+  return openPortraitJob(jobId, true);
+}
+
+async function openPortraitJob(jobId, landscape = false) {
+  const endpoint = landscape ? "portrait-to-landscape" : "landscape-to-portrait";
+  $("#jobDrawer").classList.add("open");
+  $("#jobDrawer").setAttribute("aria-hidden", "false");
+  if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+  if (state.feishuSyncTimer) clearTimeout(state.feishuSyncTimer);
+  state.feishuSyncTimer = null;
+  try {
+    const job = await api(`/tools/${endpoint}/${encodeURIComponent(jobId)}`);
+    state.activeJob = { ...job, job_type: landscape ? "portrait_to_landscape" : "landscape_to_portrait" };
+    renderPortraitJobDetail(job, landscape);
+  } catch (error) { toast(error.message, true); }
+}
+
+function renderPortraitJobDetail(job, landscape = false) {
+  const title = landscape ? "竖改横" : "横改竖";
+  const endpoint = landscape ? "portrait-to-landscape" : "landscape-to-portrait";
+  const [label, cls] = statusInfo(job.status);
+  const running = !["completed", "partial_failed", "failed", "cancelled", "interrupted"].includes(job.status);
+  const activeProgress = job.mode === "cluster" ? job.items.filter(item => item.status === "running").reduce((sum, item) => sum + (item.progress || 0), 0) : (job.current_progress || 0);
+  const progress = job.total ? Math.min(100, (job.completed + activeProgress) / job.total * 100) : 0;
+  const cancelledCount = job.items.filter(item => item.status === "cancelled").length;
+  const encoderLabel = encoder => encoder === "h264_videotoolbox" ? "VideoToolbox" : encoder || "待确定";
+  const actualEncoders = (job.encoding?.actual_video_encoders || []).map(encoderLabel);
+  const encoderSummary = actualEncoders.length ? actualEncoders.join(" + ") : job.encoding?.planned_video_encoder ? `${encoderLabel(job.encoding.planned_video_encoder)}（计划）` : "libx264";
+  const fallbackCount = Number(job.encoding?.fallback_count || 0);
+  const capabilityReasons = { not_apple_silicon: "当前平台不支持 Apple Silicon 硬编", capability_check_unavailable: "硬编能力检测不可用" };
+  $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">${title} #${escapeHtml(job.id.slice(0, 8))}</p><h2>${job.mode === "cluster" ? "集群" : ""}${title}批次</h2><span class="status ${cls}">${escapeHtml(label)}</span><p>源目录：${escapeHtml(job.source_directory)}</p><p>输出目录：${escapeHtml(job.output_directory)}</p></div>
+    <div class="big-progress"><div><span>总体进度</span><b>${progress.toFixed(1)}%</b></div><div class="bar"><i style="width:${progress}%"></i></div></div>
+    ${job.scheduled_at ? `<p>预约开始：${escapeHtml(formatDate(job.scheduled_at))}</p>` : ""}
+    <div class="slice-job-stats"><span>文件 <b>${job.total}</b></span><span>成功 <b>${job.succeeded}</b></span><span>失败 <b>${job.failed}</b></span><span>取消 <b>${cancelledCount}</b></span></div>
+    <div class="slice-encoder-summary"><span>输出规格</span><b>${escapeHtml(job.output_width || (landscape ? 1280 : 720))}×${escapeHtml(job.output_height || (landscape ? 720 : 1280))} · ${landscape ? "16:9" : "9:16"}</b><span>保留源帧率与声音</span></div>
+    <div class="slice-encoder-summary"><span>视频编码</span><b>${escapeHtml(encoderSummary)}</b>${fallbackCount ? `<small>${fallbackCount} 个条目已自动回退到 libx264</small>` : ""}</div>
+    ${job.encoding?.capability_error ? `<div class="slice-encoder-summary"><span>使用软编</span><span>${escapeHtml(capabilityReasons[job.encoding.capability_error] || job.encoding.capability_error)}</span></div>` : ""}
+    ${job.skipped_count || job.invalid_count ? `<div class="slice-encoder-summary"><span>检查结果</span><b>跳过 ${job.skipped_count || 0} · 不可处理 ${job.invalid_count || 0}</b></div>` : ""}
+    ${job.current_file ? `<div class="slice-encoder-summary"><span>当前文件</span><b>${escapeHtml(job.current_file)}</b><span>${job.current_phase === "inspecting" ? "正在检查视频…" : `${(100 * (job.current_progress || 0)).toFixed(1)}%`}</span></div>` : ""}
+    ${job.error ? `<div class="warning-box">${escapeHtml(job.error)}</div>` : ""}
+    ${running ? '<button id="cancelPortraitJob" class="button secondary" type="button" style="width:100%">取消剩余任务</button>' : `<div class="record-delete-zone"><button id="deletePortraitJob" class="text-btn danger-text" type="button">删除${title}任务记录</button></div>`}
+    <div class="item-list">${job.items.map((item, index) => {
+      const [itemLabel, itemClass] = statusInfo(item.status);
+      const itemProgress = item.status === "completed" ? 100 : item.status === "running" ? Math.max(0, Math.min(100, (job.mode === "cluster" ? (item.progress || 0) : (job.current_progress || 0)) * 100)) : 0;
+      const description = item.status === "completed" ? item.output_path : item.width && item.height ? `${item.width}×${item.height} · ${item.fps} fps` : "";
+      const itemEncoder = item.actual_video_encoder ? encoderLabel(item.actual_video_encoder) : item.planned_video_encoder ? `${encoderLabel(item.planned_video_encoder)}（计划）` : "libx264";
+      return `<div class="item-row"><b>${String(index + 1).padStart(2, "0")}</b><div class="portrait-item-description"><strong>${escapeHtml(item.name)}</strong><small class="item-selections">${description ? `${escapeHtml(description)} · ` : ""}${escapeHtml(itemEncoder)}${item.node_id ? ` · 工作机 ${escapeHtml(item.node_id.slice(0, 8))} · 尝试 ${item.attempts || 1}` : ""}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${itemProgress}%"></i></div></div><span class="status ${itemClass}">${escapeHtml(itemLabel)}</span>${item.encoder_fallback_reason ? `<div class="error-text">硬编回退原因：${escapeHtml(item.encoder_fallback_reason)}</div>` : ""}${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
+    }).join("")}</div>`;
+  $("#cancelPortraitJob")?.addEventListener("click", async event => {
+    event.currentTarget.disabled = true;
+    try { await api(`/tools/${endpoint}/${encodeURIComponent(job.id)}/cancel`, { method: "POST" }); await loadUpscaleJobs(); }
+    catch (error) { toast(error.message, true); }
+  });
+  $("#deletePortraitJob")?.addEventListener("click", async event => {
+    event.currentTarget.disabled = true;
+    try { await api(`/tools/${endpoint}/${encodeURIComponent(job.id)}`, { method: "DELETE" }); closeDrawer(); await loadJobs(); toast("任务记录已删除，视频已保留"); }
+    catch (error) { toast(error.message, true); }
+  });
+}
+
 async function loadJobs() {
   try {
-    [state.jobs, state.workerAttempts, state.upscaleJobs] = await Promise.all([
-      api("/jobs"), api("/tools/cluster-worker/attempts"), api("/tools/video-upscale/jobs"),
+    [state.jobs, state.workerAttempts, state.upscaleJobs, state.portraitJobs, state.landscapeJobs] = await Promise.all([
+      api("/jobs"), api("/tools/cluster-worker/attempts"), api("/tools/video-upscale/jobs"), api("/tools/landscape-to-portrait/jobs"), api("/tools/portrait-to-landscape/jobs"),
     ]);
     renderJobs();
     renderWorkerAttempts();
@@ -4365,11 +4645,29 @@ async function loadUpscaleJobs() {
   if (!$("#jobsView")?.classList.contains("active")) return;
   try {
     state.upscaleJobs = await api("/tools/video-upscale/jobs");
+    state.portraitJobs = await api("/tools/landscape-to-portrait/jobs");
+    state.landscapeJobs = await api("/tools/portrait-to-landscape/jobs");
     renderJobs();
     if (state.activeJob?.job_type === "video_upscale") {
       const job = await api(`/tools/video-upscale/${encodeURIComponent(state.activeJob.id)}`);
       state.activeJob = { ...job, job_type: "video_upscale" };
       renderUpscaleJobDetail(job);
+    }
+    if (state.activeJob?.job_type === "landscape_to_portrait") {
+      const activeId = state.activeJob.id;
+      const job = await api(`/tools/landscape-to-portrait/${encodeURIComponent(activeId)}`);
+      if (state.activeJob?.id === activeId && state.activeJob?.job_type === "landscape_to_portrait") {
+        state.activeJob = { ...job, job_type: "landscape_to_portrait" };
+        renderPortraitJobDetail(job);
+      }
+    }
+    if (state.activeJob?.job_type === "portrait_to_landscape") {
+      const activeId = state.activeJob.id;
+      const job = await api(`/tools/portrait-to-landscape/${encodeURIComponent(activeId)}`);
+      if (state.activeJob?.id === activeId && state.activeJob?.job_type === "portrait_to_landscape") {
+        state.activeJob = { ...job, job_type: "portrait_to_landscape" };
+        renderPortraitJobDetail(job, true);
+      }
     }
   } catch (error) {
     if (error.status === 401) {
@@ -4422,6 +4720,8 @@ function renderJobs() {
     ...state.jobs.map(job => ({ ...job, job_type: job.job_type || "render" })),
     ...state.sliceJobs,
     ...state.upscaleJobs.map(job => ({ ...job, job_type: "video_upscale" })),
+    ...(state.portraitJobs || []).map(job => ({ ...job, job_type: "landscape_to_portrait" })),
+    ...(state.landscapeJobs || []).map(job => ({ ...job, job_type: "portrait_to_landscape" })),
   ].sort((left, right) => new Date(typeof right.created_at === "number" ? right.created_at * 1000 : right.created_at).getTime()
     - new Date(typeof left.created_at === "number" ? left.created_at * 1000 : left.created_at).getTime());
   $("#deleteAllJobsBtn").disabled = state.jobs.length === 0;
@@ -4429,22 +4729,33 @@ function renderJobs() {
   if (!state.jobs.length) hideDeleteAllJobsConfirm();
   if (!combinedJobs.length) { list.innerHTML = `<div class="empty-state"><h3>本机没有创建批次</h3><p>这台电脑接收的集群工作任务显示在下方。</p></div>`; return; }
   list.innerHTML = combinedJobs.map(job => {
+    if (["landscape_to_portrait", "portrait_to_landscape"].includes(job.job_type)) {
+      const landscape = job.job_type === "portrait_to_landscape";
+      const title = landscape ? "竖改横" : "横改竖";
+      const [label, cls] = statusInfo(job.status);
+      const activeProgress = job.mode === "cluster" ? (job.items || []).filter(item => item.status === "running").reduce((sum, item) => sum + (item.progress || 0), 0) : (job.current_progress || 0);
+      const pct = job.total ? Math.min(100, (job.completed + activeProgress) / job.total * 100) : 0;
+      return `<div class="job-row" data-job-id="${escapeHtml(job.id)}" data-job-type="${landscape ? "landscape" : "portrait"}"><div><strong>${job.mode === "cluster" ? "集群" : ""}${title}批次</strong><small>${job.mode === "cluster" ? "集群" : "本机"}${title} · ${formatDate(job.created_at)}${job.scheduled_at ? ` · 预约 ${escapeHtml(formatDate(job.scheduled_at))}` : ""} · #${escapeHtml(job.id.slice(0, 8))}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${job.completed}/${job.total} 已处理</small></div><span class="status ${cls}">${escapeHtml(label)}</span><span class="job-count">成功 ${job.succeeded} · 失败 ${job.failed}</span><b>›</b></div>`;
+    }
     const isSlice = job.job_type === "timeline_slice";
     const isUpscale = job.job_type === "video_upscale";
-    const [label, cls] = isSlice ? sliceJobStatusInfo(job) : isUpscale && job.status === "running" ? ["超分中", "running"] : statusInfo(job.status);
-    const done = isUpscale ? Number(job.processed_frames || 0) : Number(job.success_count || 0) + Number(job.failure_count || 0) + Number(job.cancelled_count || 0);
-    const total = isUpscale ? Number(job.total_frames || 0) : isSlice ? job.output_unit_count : job.count;
+    const prechecking = isUpscale && job.phase === "prechecking";
+    const [label, cls] = isSlice ? sliceJobStatusInfo(job) : isUpscale && job.status === "running" ? [prechecking ? "视频预检" : "超分中", "running"] : statusInfo(job.status);
+    const done = prechecking ? Number(job.prechecked_files || 0) : isUpscale ? Number(job.processed_frames || 0) : Number(job.success_count || 0) + Number(job.failure_count || 0) + Number(job.cancelled_count || 0);
+    const total = prechecking ? Number(job.total_files || 0) : isUpscale ? Number(job.total_frames || 0) : isSlice ? job.output_unit_count : job.count;
     const pct = isSlice ? Number(job.progress || 0) * 100 : (total ? Math.max(0, Math.min(100, done / total * 100)) : 0);
     const sourceName = job.source?.name || job.source?.path?.split(/[\\/]/).pop();
     const title = isUpscale ? job.kind === "batch" ? `${job.mode === "cluster" ? "NAS" : "本机"}超分批次` : String(job.source || "").split(/[\\/]/).pop() : isSlice ? sourceName : job.config_name;
     const typeLabel = isUpscale ? `${job.mode === "cluster" ? "集群" : "本机"}超分 · ${job.model}` : isSlice ? "切片入库" : (job.job_type === "batch_dedup" ? "批量去重" : job.job_type === "folder_concat" ? "文件夹拼接" : job.job_type === "cluster" ? "集群渲染" : "成片渲染");
     const counts = isUpscale ? job.kind === "batch" ? `完成 ${job.completed_files || 0} · 失败 ${job.failed_files || 0}` : `${job.status === "completed" ? "已生成" : "处理中"}` : `成功 ${job.success_count || 0} · 失败 ${job.failure_count || 0}`;
     const created = typeof job.created_at === "number" ? job.created_at * 1000 : job.created_at;
-    return `<div class="job-row" data-job-id="${escapeHtml(job.id)}" data-job-type="${isUpscale ? "upscale" : isSlice ? "slice" : "render"}"><div><strong>${escapeHtml(title || "未命名任务")}</strong><small>${escapeHtml(typeLabel)} · ${formatDate(created)} · #${escapeHtml(isUpscale ? job.id.slice(0, 8) : job.short_id)}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${done}/${total} ${isUpscale ? "帧" : "已处理"}</small></div><span class="status ${cls}">${label}</span><span class="job-count">${escapeHtml(counts)}</span><b>›</b></div>`;
+    return `<div class="job-row" data-job-id="${escapeHtml(job.id)}" data-job-type="${isUpscale ? "upscale" : isSlice ? "slice" : "render"}"><div><strong>${escapeHtml(title || "未命名任务")}</strong><small>${escapeHtml(typeLabel)} · ${formatDate(created)}${job.scheduled_at ? ` · 预约 ${escapeHtml(formatDate(job.scheduled_at))}` : ""} · #${escapeHtml(isUpscale ? job.id.slice(0, 8) : job.short_id)}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${done}/${total} ${prechecking ? "条已预检" : isUpscale ? "帧" : "已处理"}</small></div><span class="status ${cls}">${label}</span><span class="job-count">${escapeHtml(counts)}</span><b>›</b></div>`;
   }).join("");
   $$(".job-row").forEach(row => row.addEventListener("click", () => {
     if (row.dataset.jobType === "slice") openSliceJob(row.dataset.jobId);
     else if (row.dataset.jobType === "upscale") openUpscaleJob(row.dataset.jobId);
+    else if (row.dataset.jobType === "portrait") openPortraitJob(row.dataset.jobId);
+    else if (row.dataset.jobType === "landscape") openLandscapeJob(row.dataset.jobId);
     else openJob(row.dataset.jobId);
   }));
 }
@@ -4463,17 +4774,19 @@ async function openUpscaleJob(jobId) {
 }
 
 function renderUpscaleJobDetail(job) {
-  const [label, cls] = job.status === "running" ? ["超分中", "running"] : statusInfo(job.status);
+  const prechecking = job.phase === "prechecking";
+  const [label, cls] = job.status === "running" ? [prechecking ? "视频预检" : "超分中", "running"] : statusInfo(job.status);
   const processed = Number(job.processed_frames || 0);
   const total = Number(job.total_frames || 0);
-  const progress = total ? Math.max(0, Math.min(100, processed / total * 100)) : 0;
+  const progress = prechecking ? (job.total_files ? (job.prechecked_files || 0) / job.total_files * 100 : 0) : total ? Math.max(0, Math.min(100, processed / total * 100)) : 0;
   const running = !["completed", "partial_failed", "failed", "cancelled", "interrupted"].includes(job.status);
   const title = job.kind === "batch" ? `${job.mode === "cluster" ? "NAS" : "本机"}超分批次` : String(job.source || "").split(/[\\/]/).pop();
   const items = job.kind === "batch" ? job.items || [] : [];
   $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">VIDEO UPSCALE #${escapeHtml(job.id.slice(0, 8))}</p><h2>${escapeHtml(title)}</h2><span class="status ${cls}">${escapeHtml(label)}</span><p>${escapeHtml(job.output_directory || job.output_path || "")}</p></div>
-    <div class="big-progress"><div><span>总体进度</span><b>${progress.toFixed(1)}%</b></div><div class="bar"><i style="width:${progress}%"></i></div></div>
-    <p>模型：${escapeHtml(job.model)} · ${job.mode === "cluster" ? "渲染集群" : "本机"} · 阶段：${escapeHtml(job.phase || "等待中")}</p>
-    <p>已处理 ${processed}/${total} 帧${job.kind === "batch" ? ` · 完成 ${job.completed_files}/${job.total_files} 条 · 失败 ${job.failed_files} 条` : ""}</p>
+    <div class="big-progress"><div><span>${prechecking ? "视频预检进度" : "总体进度"}</span><b>${progress.toFixed(1)}%</b></div><div class="bar"><i style="width:${progress}%"></i></div></div>
+    ${job.scheduled_at ? `<p>预约开始：${escapeHtml(formatDate(job.scheduled_at))}</p>` : ""}
+    <p>模型：${escapeHtml(job.model)} · ${job.mode === "cluster" ? "渲染集群" : "本机"} · 阶段：${escapeHtml(job.phase === "prechecking" ? `视频预检（${job.prechecked_files || 0}/${job.total_files}）` : ({ waiting_start: "等待预约时间", waiting_workers: "等待工作机上线" }[job.phase] || job.phase || "等待中"))}</p>
+    <p>${prechecking ? `已检查 ${job.prechecked_files || 0}/${job.total_files} 条视频，帧数检查完成后汇总` : `已处理 ${processed}/${total} 帧`}${job.kind === "batch" ? ` · 完成 ${job.completed_files}/${job.total_files} 条 · 失败 ${job.failed_files} 条` : ""}</p>
     ${job.width && job.height && job.fps ? `<p>输出规格：${escapeHtml(job.width)}×${escapeHtml(job.height)} · ${escapeHtml(job.fps)} fps（源视频规格）</p>` : ""}
     ${job.error ? `<p class="error-text">${escapeHtml(job.error)}</p>` : ""}
     ${running ? '<button id="cancelUpscaleJobBtn" class="button secondary" style="width:100%">取消超分任务</button>' : ""}
@@ -4588,6 +4901,7 @@ function renderJobDetail(job) {
     <div class="big-progress"><div><span>总体进度</span><b>${totalProgress.toFixed(1)}%</b></div><div class="bar"><i style="width:${totalProgress}%"></i></div></div>
     ${job.job_type === "folder_concat" ? "" : `<div class="seed-card"><span>随机种子</span><strong>${job.seed}</strong></div>`}
     ${renderFeishuSyncPanel(job)}
+    ${job.scheduled_at ? `<p class="cluster-control-hint">预约开始：${escapeHtml(formatDate(job.scheduled_at))}</p>` : ""}
     ${job.job_type === "cluster" ? `<p class="cluster-control-hint">请在工具台的“SmartStitch 集群控制”中取消或删除集群任务。</p>` : !terminalStates.has(job.status) ? `<button id="cancelJobBtn" class="button secondary" style="width:100%">取消剩余任务</button>` : ""}
     ${terminalStates.has(job.status) && job.job_type !== "cluster" ? `<div class="record-delete-zone">
       <button id="showDeleteJobBtn" class="text-btn danger-text" type="button">删除任务记录</button>
@@ -4658,7 +4972,7 @@ function renderSliceJobDetail(job) {
       const parts = (item.parts || []).map(part => `#${part.segment_index} ${Number(part.start_seconds).toFixed(2)}–${Number(part.end_seconds).toFixed(2)}s`).join(" · ");
       const itemProgress = Number(item.progress || 0) * 100;
       const itemEncoder = encoderLabel(item.actual_video_encoder || item.planned_video_encoder);
-      return `<div class="item-row"><b>${String(item.unit_index).padStart(2, "0")}</b><div><strong>${escapeHtml(categoryLabelForTimeline(item.category))}</strong><small class="item-selections">${escapeHtml(parts)} · ${phaseNames[item.phase] || item.phase} · ${escapeHtml(itemEncoder)}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${itemProgress}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
+      return `<div class="item-row"><b>${String(item.unit_index).padStart(2, "0")}</b><div><strong>${escapeHtml(categoryLabelForTimeline(item.category))}</strong><small class="item-selections">${escapeHtml(parts)} · ${phaseNames[item.phase] || item.phase} · ${escapeHtml(itemEncoder)}${item.node_id ? ` · 工作机 ${escapeHtml(item.node_id.slice(0, 8))} · 尝试 ${item.attempts || 1}` : ""}</small><div class="mini-progress" style="margin-top:7px"><i style="width:${itemProgress}%"></i></div></div><span class="status ${itemCls}">${itemLabel}</span>${item.error ? `<div class="error-text">${escapeHtml(item.error)}</div>` : ""}</div>`;
     }).join("")}</div>`;
   $("#cancelSliceJobBtn")?.addEventListener("click", () => cancelSliceJob(job.id));
   $("#retrySliceJobBtn")?.addEventListener("click", () => retrySliceJob(job));

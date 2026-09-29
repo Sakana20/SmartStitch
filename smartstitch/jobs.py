@@ -455,7 +455,7 @@ class JobManager:
             active_ids = [
                 str(job["id"])
                 for job in self.database.list()
-                if job.get("status") not in TERMINAL_STATES | {"draft"}
+                if job.get("job_type") != "cluster" and job.get("status") not in TERMINAL_STATES | {"draft"}
             ]
         for job_id in active_ids:
             try:

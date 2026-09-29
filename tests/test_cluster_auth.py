@@ -79,3 +79,25 @@ def test_worker_starts_on_each_app_launch_and_token_protection_is_optional(tmp_p
                 assert changed.json() == {"token_required": True}
                 assert client.post("/api/v1/tools/cluster-control/worker/stop").json() == {"enabled": False}
     assert starts == [True, False]
+
+
+def test_cluster_bootstrap_skips_worker_probes_and_hides_tokens(tmp_path, monkeypatch):
+    (tmp_path / 'config').mkdir()
+    client = authenticated_client(tmp_path)
+    master = client.app.state.cluster_master
+    master.nodes = [{'node_id': 'slow', 'name': 'slow-worker', 'url': 'http://127.0.0.1:8767', 'token': 'secret-token'}]
+
+    def forbidden():
+        raise AssertionError('页面初始化不应等待工作机探测')
+
+    monkeypatch.setattr(master, 'node_statuses', forbidden)
+    try:
+        response = client.get('/api/v1/tools/cluster-control/status?probe_nodes=false')
+        assert response.status_code == 200
+        data = response.json()
+        assert data['nodes'][0]['node_id'] == 'slow'
+        assert data['nodes'][0]['probing'] is True
+        assert 'secret-token' not in response.text
+        assert 'token' not in data['nodes'][0]
+    finally:
+        client.app.state.instance_lock.release()

@@ -18,6 +18,13 @@ from typing import Any, Callable
 from .library import LibraryError, LibraryService
 from .models import TimelineSliceRequest
 from .timeline import TimelineAnalyzer, TimelineError
+from .video_encoding import (
+    SOFTWARE_VIDEO_ENCODER,
+    VIDEOTOOLBOX_VIDEO_ENCODER,
+    VIDEOTOOLBOX_QUALITY,
+    preferred_encoder_plan,
+    video_encoder_arguments,
+)
 
 
 class SliceError(ValueError):
@@ -40,9 +47,6 @@ class SliceProcessError(SliceError):
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
 BACKGROUND_SLICE_NICE = 5
-SOFTWARE_VIDEO_ENCODER = "libx264"
-VIDEOTOOLBOX_VIDEO_ENCODER = "h264_videotoolbox"
-VIDEOTOOLBOX_QUALITY = 65
 
 
 def _lower_background_process_priority(process: subprocess.Popen[str]) -> None:
@@ -96,41 +100,7 @@ class TimelineSlicer:
             if self._background_encoder_plan_cache is not None:
                 return dict(self._background_encoder_plan_cache)
 
-            plan: dict[str, Any] = {
-                "policy": "videotoolbox_preferred",
-                "planned_video_encoder": SOFTWARE_VIDEO_ENCODER,
-                "hardware_encoder": VIDEOTOOLBOX_VIDEO_ENCODER,
-                "hardware_acceleration_available": False,
-                "capability_error": None,
-            }
-            machine = platform.machine().lower()
-            if sys.platform != "darwin" or machine not in {"arm64", "aarch64"}:
-                plan["capability_error"] = "not_apple_silicon"
-            elif self.runner is not subprocess.run:
-                plan["capability_error"] = "capability_check_unavailable"
-            else:
-                try:
-                    result = self.runner(
-                        ["ffmpeg", "-hide_banner", "-encoders"],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        timeout=10,
-                    )
-                except (OSError, subprocess.SubprocessError) as exc:
-                    plan["capability_error"] = str(exc)
-                else:
-                    output = f"{result.stdout}\n{result.stderr}"
-                    if result.returncode == 0 and re.search(
-                        rf"\b{VIDEOTOOLBOX_VIDEO_ENCODER}\b", output
-                    ):
-                        plan["planned_video_encoder"] = VIDEOTOOLBOX_VIDEO_ENCODER
-                        plan["hardware_acceleration_available"] = True
-                    else:
-                        plan["capability_error"] = (
-                            result.stderr.strip()
-                            or f"FFmpeg 未提供 {VIDEOTOOLBOX_VIDEO_ENCODER}"
-                        )
+            plan = preferred_encoder_plan(self.runner)
             self._background_encoder_plan_cache = dict(plan)
             return plan
 
@@ -847,27 +817,7 @@ class TimelineSlicer:
 
     @staticmethod
     def _video_encoder_arguments(encoder: str) -> list[str]:
-        if encoder == VIDEOTOOLBOX_VIDEO_ENCODER:
-            return [
-                "-c:v",
-                VIDEOTOOLBOX_VIDEO_ENCODER,
-                "-q:v",
-                str(VIDEOTOOLBOX_QUALITY),
-                "-profile:v",
-                "high",
-                "-pix_fmt",
-                "yuv420p",
-            ]
-        return [
-            "-c:v",
-            SOFTWARE_VIDEO_ENCODER,
-            "-preset",
-            "fast",
-            "-crf",
-            "18",
-            "-pix_fmt",
-            "yuv420p",
-        ]
+        return video_encoder_arguments(encoder)
 
     def _run_ffmpeg(
         self,

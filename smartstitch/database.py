@@ -16,9 +16,9 @@ def _now() -> str:
 class SQLiteStore:
     """Shared SQLite access and write coordination for all task tables."""
 
-    ALLOWED_TABLES = {"jobs", "slice_jobs", "output_sync_jobs", "upscale_jobs", "upscale_batches", "upscale_local_jobs"}
+    ALLOWED_TABLES = {"jobs", "slice_jobs", "output_sync_jobs", "upscale_jobs", "upscale_batches", "upscale_local_jobs", "portrait_jobs", "landscape_jobs"}
     MAX_RECORDS_PER_TABLE = 100
-    ACTIVE_STATUSES = {"queued", "running", "cancelling"}
+    ACTIVE_STATUSES = {"scheduled", "queued", "running", "cancelling"}
 
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)

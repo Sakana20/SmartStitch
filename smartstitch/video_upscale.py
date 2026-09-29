@@ -141,11 +141,11 @@ def probe_video(source: Path) -> dict[str, Any]:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
         raise ValueError("找不到 FFprobe")
-    command = [ffprobe, "-v", "error", "-count_frames", "-show_entries",
+    command = [ffprobe, "-v", "error", "-show_entries",
                "format=duration:stream=index,codec_type,codec_name,width,height,pix_fmt,"
                "r_frame_rate,avg_frame_rate,nb_read_frames,nb_frames,color_transfer:"
                "stream_side_data=rotation", "-of", "json", str(source)]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
+    result = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
     if result.returncode:
         raise ValueError((result.stderr or "无法读取视频")[-800:])
     payload = json.loads(result.stdout)
@@ -166,7 +166,21 @@ def probe_video(source: Path) -> dict[str, Any]:
     fps = Fraction(video.get("avg_frame_rate", "0/1"))
     if fps <= 0 or fps != Fraction(video.get("r_frame_rate", "0/1")):
         raise ValueError("首版只支持恒定帧率视频")
-    frames = int(video.get("nb_read_frames") or video.get("nb_frames") or 0)
+    # MP4/MOV normally record an exact frame count. Avoid decoding the whole
+    # NAS video just to refresh the preview; count frames only when absent.
+    recorded_frames = video.get("nb_frames")
+    frames = int(recorded_frames) if str(recorded_frames).isdigit() else 0
+    if frames <= 0:
+        counted = subprocess.run(
+            [*command[:3], "-count_frames", *command[3:]],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        if counted.returncode:
+            raise ValueError((counted.stderr or "无法读取视频帧数")[-800:])
+        streams = json.loads(counted.stdout).get("streams", [])
+        counted_video = next((stream for stream in streams if stream.get("codec_type") == "video"), {})
+        count = counted_video.get("nb_read_frames")
+        frames = int(count) if str(count).isdigit() else 0
     if frames <= 0:
         raise ValueError("无法确定视频帧数")
     return {"source": str(source), "width": width, "height": height,

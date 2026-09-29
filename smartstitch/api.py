@@ -12,6 +12,7 @@ import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
@@ -70,6 +71,8 @@ from .models import (
     GlobalVisualEffectLibraryUpdateRequest,
     GlobalVisualBorderUpdateRequest,
     JobCreateRequest,
+    ClusterJobCreateRequest,
+    ScheduledStartRequest,
     LibraryPreflightRequest,
     LoudnessPreviewRequest,
     PreviewRequest,
@@ -90,7 +93,10 @@ from .models import (
 from .planner import PlanError, build_plan
 from .naming import NamingError, builder_source_blocks, source_block_value
 from .probe_cache import MediaProbeCache
+from .power import SleepInhibitor
 from .prores_alpha import ProResAlphaManager
+from .landscape_to_portrait import LandscapeToPortraitManager
+from .portrait_to_landscape import PortraitToLandscapeManager
 from .video_upscale import VideoUpscaleManager
 from .cluster_upscale import ClusterUpscaleBatchManager, ClusterUpscaleManager
 from .runtime import (
@@ -128,7 +134,20 @@ class ProResAlphaRequest(BaseModel):
     destinations: dict[str, str] | None = None
 
 
-class VideoUpscaleRequest(BaseModel):
+class PortraitPreviewRequest(BaseModel):
+    mode: Literal["local", "cluster"] = "local"
+    source_directory: str = ""
+    output_directory: str | None = None
+    resolution: str = "720p"
+
+
+class PortraitCreateRequest(ScheduledStartRequest):
+    preview_id: str
+    mode: Literal["local", "cluster"] = "local"
+    node_ids: list[str] | None = None
+
+
+class VideoUpscaleRequest(ScheduledStartRequest):
     source: str | None = None
     output_directory: str | None = None
     mode: str = "local"
@@ -276,13 +295,40 @@ def create_app(
         timeline_slicer = TimelineSlicer(timeline_analyzer, library_service)
         slice_job_manager = SliceJobManager(timeline_slicer, database_store)
         prores_alpha_manager = ProResAlphaManager(visual_border_library)
+        portrait_manager = LandscapeToPortraitManager(database_store)
+        landscape_manager = PortraitToLandscapeManager(database_store)
         video_upscale_manager = VideoUpscaleManager(resolved_data_directory, database_store)
         accounts = AccountStore(config_store.directory)
         cluster_worker = ClusterWorker(resolved_data_directory, config_store, database_store, user_profiles)
         cluster_worker.local_upscale_manager = video_upscale_manager
         cluster_master = ClusterMaster(cluster_worker, job_manager, config_store, resolved_data_directory)
+        portrait_manager.cluster = cluster_master
+        landscape_manager.cluster = cluster_master
+        cluster_worker.local_conversion_managers = [portrait_manager, landscape_manager]
         cluster_upscale_manager = ClusterUpscaleManager(cluster_master, database_store)
         cluster_upscale_batch_manager = ClusterUpscaleBatchManager(cluster_upscale_manager, database_store)
+        def sleep_protection_reasons() -> list[str]:
+            reasons = []
+            with cluster_worker.lock:
+                if (cluster_worker.server and cluster_worker.server.started
+                        and not cluster_worker.server.should_exit
+                        and cluster_worker.server_thread and cluster_worker.server_thread.is_alive()):
+                    reasons.append("工作机已上线")
+                elif any(thread.is_alive() for thread in cluster_worker.threads.values()):
+                    reasons.append("工作机正在执行任务")
+            for name, manager in (
+                ("渲染或预约任务", job_manager), ("切片任务", slice_job_manager),
+                ("透明视频转换", prores_alpha_manager),
+                ("横改竖任务", portrait_manager), ("竖改横任务", landscape_manager),
+                ("本机超分任务", video_upscale_manager),
+                ("集群超分任务", cluster_upscale_manager),
+                ("集群超分批次或预约", cluster_upscale_batch_manager),
+            ):
+                if manager.active_count():
+                    reasons.append(name)
+            return reasons
+
+        sleep_inhibitor = SleepInhibitor(sleep_protection_reasons)
         release_checker = NASUpdateChecker(
             None if resolved_config_directory == local_config_directory
             else resolved_config_directory,
@@ -300,14 +346,22 @@ def create_app(
                 cluster_master.resume_interrupted()
                 cluster_upscale_manager.resume_interrupted()
                 cluster_upscale_batch_manager.resume_interrupted()
+                portrait_manager.resume_scheduled()
+                landscape_manager.resume_scheduled()
+                sleep_inhibitor.start()
                 yield
             finally:
-                cluster_upscale_batch_manager.shutdown()
-                cluster_upscale_manager.shutdown()
-                cluster_master.shutdown()
-                prores_alpha_manager.shutdown()
-                video_upscale_manager.shutdown()
-                instance_lock.release()
+                try:
+                    cluster_upscale_batch_manager.shutdown()
+                    cluster_upscale_manager.shutdown()
+                    cluster_master.shutdown()
+                    prores_alpha_manager.shutdown()
+                    portrait_manager.shutdown()
+                    landscape_manager.shutdown()
+                    video_upscale_manager.shutdown()
+                finally:
+                    sleep_inhibitor.shutdown()
+                    instance_lock.release()
 
         app = FastAPI(title="SmartStitch", version=__version__, lifespan=lifespan)
     except Exception:
@@ -325,6 +379,8 @@ def create_app(
     app.state.visual_border_library = visual_border_library
     app.state.job_manager = job_manager
     app.state.prores_alpha_manager = prores_alpha_manager
+    app.state.portrait_manager = portrait_manager
+    app.state.landscape_manager = landscape_manager
     app.state.video_upscale_manager = video_upscale_manager
     app.state.feishu_settings = feishu_settings
     app.state.feishu_sync_manager = feishu_sync_manager
@@ -339,6 +395,7 @@ def create_app(
     app.state.cluster_master = cluster_master
     app.state.cluster_upscale_manager = cluster_upscale_manager
     app.state.cluster_upscale_batch_manager = cluster_upscale_batch_manager
+    app.state.sleep_inhibitor = sleep_inhibitor
     app.state.release_checker = release_checker
 
     def account_error(exc: AccountError) -> HTTPException:
@@ -483,6 +540,7 @@ def create_app(
             ),
             "shared_config": config_store.directory != local_config_directory,
             "config_path_mapped": config_store.has_path_alias,
+            "sleep_protection": sleep_inhibitor.status(),
         }
 
     def require_cluster(request: Request) -> None:
@@ -490,14 +548,15 @@ def create_app(
             raise HTTPException(403, "仅管理员可以访问")
 
     @app.get("/api/v1/tools/cluster-control/status")
-    def cluster_status(http_request: Request) -> dict[str, object]:
+    def cluster_status(http_request: Request, probe_nodes: bool = True) -> dict[str, object]:
         require_cluster(http_request)
         return {
             "available": True,
             "worker": cluster_worker.connection_info(),
-            "nodes": cluster_master.node_statuses(),
+            "nodes": cluster_master.node_statuses() if probe_nodes else cluster_master.registered_nodes(),
             "jobs": [job for job in job_manager.list_jobs() if job.get("job_type") == "cluster"],
             "config_root": str(config_store.directory),
+            "sleep_protection": sleep_inhibitor.status(),
         }
 
     @app.post("/api/v1/tools/cluster-control/worker/start")
@@ -540,7 +599,7 @@ def create_app(
         return {"removed": True}
 
     @app.post("/api/v1/tools/cluster-control/jobs")
-    def create_cluster_job(payload: JobCreateRequest, http_request: Request) -> dict[str, object]:
+    def create_cluster_job(payload: ClusterJobCreateRequest, http_request: Request) -> dict[str, object]:
         require_cluster(http_request)
         try:
             return cluster_master.create(payload)
@@ -1678,6 +1737,102 @@ def create_app(
         except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.post("/api/v1/tools/landscape-to-portrait/preview")
+    def preview_portrait(request: PortraitPreviewRequest, http_request: Request) -> dict:
+        if request.mode == "cluster":
+            require_cluster(http_request)
+        try:
+            return portrait_manager.preview(request.source_directory, request.output_directory, request.resolution, request.mode)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/landscape-to-portrait")
+    def create_portrait(request: PortraitCreateRequest, http_request: Request) -> dict:
+        if request.mode == "cluster":
+            require_cluster(http_request)
+        try:
+            if request.scheduled_at and request.mode != "cluster":
+                raise ValueError("预约开始仅支持集群任务")
+            return portrait_manager.create(request.preview_id, request.mode, request.node_ids, scheduled_at=request.scheduled_at)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/tools/landscape-to-portrait/jobs")
+    def list_portrait() -> list[dict]:
+        return portrait_manager.list()
+
+    @app.get("/api/v1/tools/landscape-to-portrait/{job_id}")
+    def get_portrait(job_id: str) -> dict:
+        try:
+            return portrait_manager.get(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "横改竖任务不存在") from exc
+
+    @app.post("/api/v1/tools/landscape-to-portrait/{job_id}/cancel")
+    def cancel_portrait(job_id: str) -> dict:
+        try:
+            return portrait_manager.cancel(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "横改竖任务不存在") from exc
+
+    @app.delete("/api/v1/tools/landscape-to-portrait/{job_id}")
+    def delete_portrait(job_id: str) -> dict:
+        try:
+            portrait_manager.delete(job_id)
+            return {"deleted": True}
+        except KeyError as exc:
+            raise HTTPException(404, "横改竖任务不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/v1/tools/portrait-to-landscape/preview")
+    def preview_landscape(request: PortraitPreviewRequest, http_request: Request) -> dict:
+        if request.mode == "cluster":
+            require_cluster(http_request)
+        try:
+            return landscape_manager.preview(request.source_directory, request.output_directory, request.resolution, request.mode)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/portrait-to-landscape")
+    def create_landscape(request: PortraitCreateRequest, http_request: Request) -> dict:
+        if request.mode == "cluster":
+            require_cluster(http_request)
+        try:
+            if request.scheduled_at and request.mode != "cluster":
+                raise ValueError("预约开始仅支持集群任务")
+            return landscape_manager.create(request.preview_id, request.mode, request.node_ids, scheduled_at=request.scheduled_at)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/tools/portrait-to-landscape/jobs")
+    def list_landscape() -> list[dict]:
+        return landscape_manager.list()
+
+    @app.get("/api/v1/tools/portrait-to-landscape/{job_id}")
+    def get_landscape(job_id: str) -> dict:
+        try:
+            return landscape_manager.get(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "竖改横任务不存在") from exc
+
+    @app.post("/api/v1/tools/portrait-to-landscape/{job_id}/cancel")
+    def cancel_landscape(job_id: str) -> dict:
+        try:
+            return landscape_manager.cancel(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "竖改横任务不存在") from exc
+
+    @app.delete("/api/v1/tools/portrait-to-landscape/{job_id}")
+    def delete_landscape(job_id: str) -> dict:
+        try:
+            landscape_manager.delete(job_id)
+            return {"deleted": True}
+        except KeyError as exc:
+            raise HTTPException(404, "竖改横任务不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.post("/api/v1/tools/prores-alpha")
     def create_prores_alpha(request: ProResAlphaRequest) -> dict[str, object]:
         try:
@@ -1751,7 +1906,9 @@ def create_app(
     def create_video_upscale(request: VideoUpscaleRequest) -> dict[str, object]:
         try:
             if request.mode == "cluster":
-                return cluster_upscale_batch_manager.create(request.model)
+                return cluster_upscale_batch_manager.create(request.model, scheduled_at=request.scheduled_at)
+            if request.scheduled_at:
+                raise ValueError("预约超分仅支持 NAS 集群批次")
             if not request.source:
                 raise ValueError("请选择源视频文件夹" if request.mode == "local" else "请选择源视频")
             if request.mode == "local":
@@ -1773,7 +1930,7 @@ def create_app(
                 + [job for job in database_store.list("upscale_jobs") if job["id"] not in child_ids])
         fields = ("id", "status", "phase", "kind", "mode", "model", "source", "output_path",
                   "output_directory", "processed_frames", "total_frames", "total_files",
-                  "completed_files", "failed_files", "created_at", "finished_at", "error")
+                  "completed_files", "failed_files", "prechecked_files", "scheduled_at", "created_at", "finished_at", "error")
         jobs.sort(key=lambda job: datetime.fromisoformat(job["created_at"]).timestamp()
                   if isinstance(job["created_at"], str) else job["created_at"], reverse=True)
         return [{key: job.get(key) for key in fields} for job in jobs[:limit]]

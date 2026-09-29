@@ -69,7 +69,7 @@ h1 em { color: var(--green); font-weight: 500; }
 .toolbox-card:not(:disabled):hover { transform: translateY(-3px); border-color: rgba(29,92,67,.35); box-shadow: 0 14px 32px rgba(37,48,41,.11); }
 .toolbox-card:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
 .toolbox-card:disabled { cursor: default; }
-.toolbox-card-image { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: var(--mint); }
+.toolbox-card-image { display: block; flex: none; width: 100%; height: auto; aspect-ratio: 4 / 3; object-fit: contain; object-position: center; background: var(--mint); }
 .toolbox-card-body { display: flex; flex: 1; flex-direction: column; gap: 7px; padding: 16px; }
 .toolbox-card-title { font-size: 15px; font-weight: 700; }
 .toolbox-card-description { color: var(--muted); font-size: 11px; line-height: 1.55; }
@@ -549,6 +549,9 @@ td .file-path { color: var(--muted); font-size: 9px; max-width: 260px; overflow:
 .update-card .actions { margin-top: 24px; }
 .library-create-card { width: min(650px, calc(100vw - 40px)); margin-top: 7vh; max-height: 86vh; overflow: auto; }
 .directory-picker-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.portrait-item-description { min-width: 0; }
+.portrait-resolution-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.portrait-item-description strong { display: block; overflow-wrap: anywhere; }
 .directory-picker-row .button { min-width: 92px; white-space: nowrap; }
 .library-path-preview { display: grid; gap: 7px; margin-top: 18px; padding: 14px 15px; border: 1px solid rgba(29,92,67,.16); border-radius: 12px; background: #edf4ef; }
 .library-path-preview span { color: var(--muted); font-size: 9px; font-weight: 750; letter-spacing: .08em; }

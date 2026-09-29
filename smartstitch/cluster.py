@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -164,6 +165,7 @@ class ClusterWorker:
         self.store = sqlite_store
         self.user_profiles = user_profiles
         self.local_upscale_manager: Any | None = None
+        self.local_conversion_managers: list[Any] = []
         self.settings_path = data_directory / "cluster-worker.json"
         self.settings = _load_json(self.settings_path, {"enabled": True, "token": uuid.uuid4().hex,
                                                          "token_required": False, "node_id": uuid.uuid4().hex})
@@ -219,12 +221,17 @@ class ClusterWorker:
             active = sum(thread.is_alive() for thread in self.threads.values())
             if self.local_upscale_manager is not None:
                 active += self.local_upscale_manager.active_count()
+            for manager in self.local_conversion_managers:
+                with manager.lock:
+                    if manager.active and manager.active.get("mode", "local") == "local":
+                        active += 1
             profile = self.user_profiles.get()["user"]
             return {
                 "node_id": self.settings["node_id"], "name": socket.gethostname(),
                 "display_name": profile["display_name"] if profile else "",
                 "version": __version__, "active": active, "capacity": 1,
                 "canonical_root": str(self.config_store.canonical_directory),
+                "conversion_protocol": 2,
                 "video_upscale": {**model_status(self.data_directory), "protocol": 2,
                                   "models": {name: model_status(self.data_directory, name) for name in MODEL_CONFIGS}},
             }
@@ -257,6 +264,15 @@ class ClusterWorker:
             try:
                 return self.submit(payload)
             except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+
+        @app.post("/conversion-attempts")
+        def create_conversion_attempt(payload: dict[str, Any], request: APIRequest) -> dict[str, Any]:
+            authorize(request)
+            from .cluster_conversion import submit_conversion
+            try:
+                return submit_conversion(self, payload)
+            except (ValueError, KeyError, OSError, TypeError) as exc:
                 raise HTTPException(422, str(exc)) from exc
 
         @app.post("/upscale-attempts")
@@ -379,7 +395,7 @@ class ClusterWorker:
             existing = self.get(attempt_id)
             if existing:
                 return {"attempt_id": attempt_id, "status": existing["status"]}
-            if any(thread.is_alive() for thread in self.threads.values()) or (self.local_upscale_manager and self.local_upscale_manager.active_count()):
+            if self.status()["active"]:
                 raise ValueError("工作机正在渲染，请稍后派发")
             canonical = Path(str(payload["canonical_root"]))
             if canonical != self.config_store.canonical_directory:
@@ -439,7 +455,7 @@ class ClusterWorker:
                 if existing.get("request_digest") != digest:
                     raise ValueError("执行标识已被不同的请求使用")
                 return {"attempt_id": attempt_id, "status": existing["status"]}
-            if any(thread.is_alive() for thread in self.threads.values()) or (self.local_upscale_manager and self.local_upscale_manager.active_count()):
+            if self.status()["active"]:
                 raise ValueError("工作机正在渲染，请稍后派发")
             if payload["canonical_root"] != str(self.config_store.canonical_directory):
                 raise ValueError("共享目录不匹配")
@@ -639,20 +655,32 @@ class ClusterMaster:
             self.nodes = [node for node in self.nodes if node["node_id"] != node_id]
             _safe_write(self.nodes_path, {"nodes": self.nodes}, secret=True)
 
+    def registered_nodes(self) -> list[dict[str, Any]]:
+        with self.lock:
+            return [{**{key: value for key, value in node.items() if key != "token"},
+                     "online": False, "probing": True} for node in self.nodes]
+
     def node_statuses(self) -> list[dict[str, Any]]:
-        result = []
-        for node in list(self.nodes):
+        with self.lock:
+            nodes = list(self.nodes)
+        if not nodes:
+            return []
+
+        def probe(node: dict[str, Any]) -> dict[str, Any]:
             try:
                 status = _request(f"{node['url']}/hello", node["token"])
-                result.append({**status, "url": node["url"], "online": True})
+                return {**status, "url": node["url"], "online": True}
             except Exception as exc:
-                result.append({"node_id": node["node_id"], "name": node["name"],
-                               "display_name": node.get("display_name", ""),
-                               "url": node["url"], "online": False, "error": str(exc)})
-        return result
+                return {"node_id": node["node_id"], "name": node["name"],
+                        "display_name": node.get("display_name", ""),
+                        "url": node["url"], "online": False, "error": str(exc)}
+
+        with ThreadPoolExecutor(max_workers=min(8, len(nodes))) as executor:
+            return list(executor.map(probe, nodes))
 
     def create(self, request: JobCreateRequest) -> dict[str, Any]:
-        if not any(node["online"] for node in self.node_statuses()):
+        scheduled_at = getattr(request, "scheduled_at", None)
+        if scheduled_at is None and not any(node["online"] for node in self.node_statuses()):
             raise ValueError("请先添加至少一台在线工作机")
         config = self.config_store.load(request.config_id)
         if request.output_directory:
@@ -681,28 +709,75 @@ class ClusterMaster:
             raise
         with self.jobs.lock:
             job["job_type"] = "cluster"
-            job["status"] = "running"
-            job["started_at"] = _now()
+            job["scheduled_at"] = scheduled_at.isoformat() if scheduled_at is not None else None
+            job["status"] = "scheduled" if scheduled_at is not None else "running"
+            job["started_at"] = None if scheduled_at is not None else _now()
             self.jobs.database.save(job)
         self._launch(job["id"])
         return self.jobs.get_job(job["id"])
 
     def _launch(self, job_id: str) -> None:
-        event = threading.Event()
-        self.cancel_events[job_id] = event
-        thread = threading.Thread(target=self._run, args=(job_id, event), daemon=True,
-                                  name=f"cluster-master-{job_id[:8]}")
-        self.threads[job_id] = thread
-        thread.start()
+        with self.lock:
+            if self.stopping or (job_id in self.threads and self.threads[job_id].is_alive()):
+                return
+            event = threading.Event()
+            self.cancel_events[job_id] = event
+            thread = threading.Thread(target=self._await_start, args=(job_id, event), daemon=True,
+                                      name=f"cluster-master-{job_id[:8]}")
+            self.threads[job_id] = thread
+            thread.start()
+
+    def _await_start(self, job_id: str, cancel: threading.Event) -> None:
+        handed_off = False
+        try:
+            while not self.stopping and not cancel.is_set():
+                with self.jobs.lock:
+                    job = self.jobs.get_job(job_id)
+                    if job["status"] == "scheduled":
+                        remaining = datetime.fromisoformat(job["scheduled_at"]).timestamp() - time.time()
+                        if remaining <= 0:
+                            job["status"] = "running"
+                            job["started_at"] = _now()
+                            self.jobs.database.save(job)
+                    elif job["status"] != "running":
+                        return
+                    else:
+                        remaining = 0
+                if remaining <= 0:
+                    # Shutdown must preserve a waiting reservation. Once started,
+                    # the existing dispatcher owns cancellation and recovery.
+                    if self.stopping:
+                        return
+                    handed_off = True
+                    self._run(job_id, cancel)
+                    return
+                cancel.wait(min(remaining, 1.0))
+        except KeyError:
+            # A cancelled reservation can be deleted while its timer exits.
+            return
+        except Exception as exc:
+            with self.jobs.lock:
+                job = self.jobs.get_job(job_id)
+                job.update(status="interrupted" if self.stopping else "failed", error=str(exc),
+                           finished_at=None if self.stopping else _now())
+                self.jobs.database.save(job)
+        finally:
+            if not handed_off:
+                with self.lock:
+                    self.threads.pop(job_id, None)
+                    self.cancel_events.pop(job_id, None)
 
     def resume_interrupted(self) -> None:
         for job in self.jobs.database.list():
-            if job.get("job_type") != "cluster" or job.get("status") != "interrupted":
+            if job.get("job_type") != "cluster":
                 continue
-            job["status"] = "running"
-            job["finished_at"] = None
-            self.jobs.database.save(job)
-            self._launch(job["id"])
+            if job.get("status") == "scheduled":
+                self._launch(job["id"])
+            elif job.get("status") == "interrupted":
+                job["status"] = "running"
+                job["finished_at"] = None
+                self.jobs.database.save(job)
+                self._launch(job["id"])
 
     def _send_assignment(self, job: dict[str, Any], item: dict[str, Any], node: dict[str, Any], attempt_id: str) -> None:
         batch_path = Path(job["output_directory"]).resolve()
@@ -835,11 +910,25 @@ class ClusterMaster:
             self.cancel_events.pop(job_id, None)
 
     def cancel(self, job_id: str) -> dict[str, Any]:
-        event = self.cancel_events.get(job_id)
-        if event is None:
-            raise ValueError("集群任务未运行")
-        event.set()
-        return self.jobs.get_job(job_id)
+        with self.jobs.lock:
+            job = self.jobs.get_job(job_id)
+            if job.get("job_type") != "cluster":
+                raise ValueError("此任务不是集群任务")
+            event = self.cancel_events.get(job_id)
+            if job["status"] == "scheduled":
+                job["status"] = "cancelled"
+                job["finished_at"] = _now()
+                for item in job["items"]:
+                    if item["status"] == "pending":
+                        item.update(status="cancelled", error="预约已取消")
+                self.jobs.database.save(job)
+                if event is not None:
+                    event.set()
+                return job
+            if event is None:
+                raise ValueError("集群任务未运行")
+            event.set()
+            return self.jobs.get_job(job_id)
 
     def shutdown(self, timeout: float = 5) -> None:
         self.stopping = True
