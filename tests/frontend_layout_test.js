@@ -16,7 +16,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260929-slice-eta-fix"/,
+  /href="\/styles\.css\?v=20260929-dedup-background"/,
   "前端交互或样式更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|render-eta\.js|app\.js)\?v=([^"]+)/g)]
@@ -327,7 +327,7 @@ assert.doesNotMatch(
 );
 assert.match(
   app,
-  /function visualEffectLayerCards\(config\)[\s\S]*data-effect-action="up"[\s\S]*data-effect-action="down"[\s\S]*data-effect-action="delete"/,
+  /function visualEffectLayerCards\(config, libraryState = \{\}\)[\s\S]*data-effect-action="up"[\s\S]*data-effect-action="down"[\s\S]*data-effect-action="delete"/,
   "特效图层必须支持上移、下移和删除",
 );
 assert.match(
@@ -402,7 +402,7 @@ assert.match(
 );
 assert.match(
   app,
-  /function visualEffectLayerCards\(config\)[\s\S]*data-open-effect-library[\s\S]*\/global-assets\/visual-effect-libraries\/\$\{libraryId\}\/open-directory/,
+  /function visualEffectLayerCards\(config, libraryState = \{\}\)[\s\S]*data-open-effect-library[\s\S]*\/global-assets\/visual-effect-libraries\/\$\{libraryId\}\/open-directory/,
   "每张特效库卡片必须直接提供与视频库一致的文件夹入口",
 );
 assert.doesNotMatch(

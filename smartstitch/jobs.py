@@ -18,8 +18,8 @@ import yaml
 
 from .config import ConfigStore
 from .database import SQLiteStore
-from .folder_concat import VIDEO_SUFFIXES, inspect_folders
-from .models import AppConfig, BatchDedupRequest, FolderConcatRequest, JobCreateRequest, SourceMode, VisualDedupConfig
+from .folder_concat import folder_concat_config, inspect_folders
+from .models import AppConfig, BatchDedupDirectorySettings, BatchDedupRequest, BatchDedupSyncConfig, FolderConcatRequest, JobCreateRequest, SourceMode, VisualDedupConfig
 from .planner import build_plan
 from .probe_cache import MediaProbeCache
 from .renderer import render_item
@@ -71,6 +71,8 @@ class JobManager:
         self.codec_settings = CodecSettingsStore(data_directory)
         self.jobs_directory = data_directory / "jobs"
         self.batch_dedup_settings_path = data_directory / "batch_dedup_settings.json"
+        self.batch_dedup_sync_settings_path = data_directory / "batch_dedup_sync_settings.json"
+        self.batch_dedup_directory_settings_path = data_directory / "batch_dedup_directory_settings.json"
         self.jobs_directory.mkdir(parents=True, exist_ok=True)
         shared_store = database_store or SQLiteStore(data_directory / "smartstitch.db")
         self.database = JobDatabase(shared_store)
@@ -97,9 +99,10 @@ class JobManager:
 
     def create_batch_dedup(self, request: BatchDedupRequest) -> dict[str, Any]:
         return self._create(
-            JobCreateRequest(config_id="batch-dedup", count=1),
+            JobCreateRequest(config_id="batch-dedup", count=1, output_directory=request.output_directory),
             dedup_source=request.source_directory,
             dedup_visual=request.visual_dedup,
+            dedup_sync=request.feishu_base_sync or self.get_batch_dedup_sync_settings(),
         )
 
     def create_folder_concat(self, request: FolderConcatRequest) -> dict[str, Any]:
@@ -147,17 +150,10 @@ class JobManager:
             encoding="utf-8",
         )
         items = []
-        used_names: set[str] = set()
         for index, pair in enumerate(preview["pairs"], start=1):
             a = assets_by_path["pool_1"][pair["a"]]
             b = assets_by_path["pool_2"][pair["b"]]
-            base = f"{Path(pair['a_name']).stem}_拼接"
-            output_name = f"{base}.mp4"
-            suffix = 2
-            while output_name.casefold() in used_names:
-                output_name = f"{base}_{suffix}.mp4"
-                suffix += 1
-            used_names.add(output_name.casefold())
+            output_name = pair["output_name"]
             items.append({
                 "index": index, "status": "pending", "progress": 0.0,
                 "output_name": output_name,
@@ -174,7 +170,7 @@ class JobManager:
                     "pool_2": b.model_dump(mode="json"),
                 },
                 "overlay": None, "visual_border": None,
-                "visual_effects": [], "naming": None,
+                "visual_effects": [], "naming": pair["naming"],
             })
         job = {
             "id": job_id, "job_type": "folder_concat",
@@ -207,21 +203,7 @@ class JobManager:
 
     @staticmethod
     def _folder_concat_config(preview: dict[str, Any], output_root: Path) -> AppConfig:
-        return AppConfig.model_validate({
-            "schema_version": 3, "workflow_type": "generic",
-            "id": "folder-concat", "name": "文件夹拼接",
-            "source_root": preview["directory_a"],
-            "timeline": ["pool_1", "pool_2"],
-            "sources": {
-                "pool_1": {"label": "A 文件夹", "mode": "required",
-                           "directory": preview["directory_a"], "extensions": sorted(VIDEO_SUFFIXES)},
-                "pool_2": {"label": "B 文件夹", "mode": "required",
-                           "directory": preview["directory_b"], "extensions": sorted(VIDEO_SUFFIXES)},
-            },
-            "benefit_overlays": {"mode": "disabled", "file": ""},
-            "output": {"directory": str(output_root), "video_codec": "h264_videotoolbox"},
-            "batch": {"minimum_free_space_gb": 0.5, "retry_count": 0},
-        })
+        return folder_concat_config(preview, output_root)
 
     def _apply_codec_settings(self, config: AppConfig) -> None:
         config.output.software_codec_enabled = self.codec_settings.get().software_codec_enabled
@@ -251,9 +233,48 @@ class JobManager:
                 temporary.unlink(missing_ok=True)
         return settings
 
+    def get_batch_dedup_directory_settings(self) -> BatchDedupDirectorySettings:
+        with self.lock:
+            if self.batch_dedup_directory_settings_path.exists():
+                return BatchDedupDirectorySettings.model_validate_json(
+                    self.batch_dedup_directory_settings_path.read_text(encoding="utf-8")
+                )
+        return BatchDedupDirectorySettings()
+
+    def save_batch_dedup_directory_settings(self, settings: BatchDedupDirectorySettings) -> BatchDedupDirectorySettings:
+        path = self.batch_dedup_directory_settings_path
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        with self.lock:
+            try:
+                temporary.write_text(settings.model_dump_json(indent=2), encoding="utf-8")
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return settings
+
+    def get_batch_dedup_sync_settings(self) -> BatchDedupSyncConfig:
+        with self.lock:
+            if self.batch_dedup_sync_settings_path.exists():
+                return BatchDedupSyncConfig.model_validate_json(
+                    self.batch_dedup_sync_settings_path.read_text(encoding="utf-8")
+                )
+        return BatchDedupSyncConfig()
+
+    def save_batch_dedup_sync_settings(self, settings: BatchDedupSyncConfig) -> BatchDedupSyncConfig:
+        path = self.batch_dedup_sync_settings_path
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        with self.lock:
+            try:
+                temporary.write_text(settings.model_dump_json(indent=2), encoding="utf-8")
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return settings
+
     def _create(
         self, request: JobCreateRequest, *, dedup_source: str | None = None,
         dedup_visual: VisualDedupConfig | None = None,
+        dedup_sync: BatchDedupSyncConfig | None = None,
     ) -> dict[str, Any]:
         if dedup_source is not None:
             source = Path(dedup_source).expanduser().resolve()
@@ -267,6 +288,10 @@ class JobManager:
             ):
                 raise ValueError("请至少启用一个透明度大于 0 的特效层")
             config = self._dedup_config(dedup_visual, source)
+            if request.output_directory:
+                config.output.directory = request.output_directory
+            if dedup_sync is not None:
+                config.output.feishu_base_sync = dedup_sync
         else:
             config = self.config_store.load(request.config_id)
             if not config.enabled:
@@ -318,6 +343,8 @@ class JobManager:
                 planned.output_name = output_name
             plan.distribution["pool_1"] = {asset.name: 1 for asset in dedup_assets}
             self.save_batch_dedup_settings(dedup_visual)
+            if dedup_sync is not None:
+                self.save_batch_dedup_sync_settings(dedup_sync)
         batch_directory = self._batch_directory(config, short_id)
         batch_directory.parent.mkdir(parents=True, exist_ok=True)
         free_gb = shutil.disk_usage(batch_directory.parent).free / (1024**3)

@@ -55,6 +55,9 @@ class FakeFeishuBaseClient:
     def ensure_sync_schema(self, _token, _table_id):
         self.fields.update(SMARTSTITCH_TEXT_FIELDS)
 
+    def ensure_batch_dedup_sync_schema(self, _token, _table_id):
+        self.fields.add("_smartstitch_key")
+
     def ensure_taobao_flash_sync_schema(self, _token, _table_id):
         return "素材审核状态" if "素材审核状态" in self.fields else "审核"
 
@@ -373,6 +376,63 @@ def test_settings_store_never_returns_secret_and_uses_private_permissions(tmp_pa
 
     store.update("cli_updated", "")
     assert store.credentials() == ("cli_updated", "secret-value")
+
+
+def test_batch_dedup_sync_uploads_only_outputs_and_retries_without_duplicates(tmp_path):
+    job = make_job()
+    job["job_type"] = "batch_dedup"
+    job["feishu_base_sync"]["field_schema"] = "batch_dedup"
+    fake = FakeFeishuBaseClient()
+    fake.fields = {"文本", "视频"}
+    manager = FeishuSyncManager(
+        SQLiteStore(tmp_path / "smartstitch.db"), FeishuSettingsStore(tmp_path),
+        lambda _job_id: job,
+    )
+    counts = manager._sync_records(fake, "bascDemo", "tbl123", job, job["feishu_base_sync"])
+    assert counts["inserted_count"] == 1
+    assert fake.uploaded == ["/output/demo-1.mp4"]
+    assert fake.records[0]["fields"] == {
+        "文本": "demo-1.mp4", "视频": [{"file_token": "file-token-1"}],
+        "_smartstitch_key": f"{job['id']}:1",
+    }
+    counts = manager._sync_records(fake, "bascDemo", "tbl123", job, job["feishu_base_sync"])
+    assert counts["inserted_count"] == 0
+    assert counts["updated_count"] == 1
+    assert len(fake.records) == 1
+    assert fake.uploaded == ["/output/demo-1.mp4"]
+    assert fake.fields == {"文本", "视频", "_smartstitch_key"}
+
+
+@pytest.mark.parametrize("fields,error", [
+    ([{"name": "文本", "type": "text"}], "缺少"),
+    ([{"name": "文本", "type": "text"}, {"name": "视频", "type": "text"}], "类型不正确"),
+])
+def test_batch_dedup_sync_checks_attachment_field_before_upload(monkeypatch, fields, error):
+    client = FeishuBaseClient("cli_demo", "secret")
+    monkeypatch.setattr(client, "list_fields", lambda *_args: fields)
+    with pytest.raises(FeishuError, match=error):
+        client.ensure_batch_dedup_sync_schema("base", "table")
+
+
+def test_batch_dedup_connection_checks_fields_without_writing(tmp_path, monkeypatch):
+    app = create_app(tmp_path)
+    remote = FeishuBaseClient("cli_demo", "secret-value")
+    monkeypatch.setattr(remote, "resolve_base_url", lambda _url: ("base", "tbl123"))
+    monkeypatch.setattr(remote, "list_tables", lambda *_args: [{"table_id": "tbl123", "name": "去重"}])
+    fields = [{"name": "文本", "type": "text"}, {"name": "视频", "type": "attachment"}]
+    monkeypatch.setattr(remote, "list_fields", lambda *_args: fields)
+    app.state.feishu_client_factory = lambda *_args: remote
+    client = authenticated_client(app)
+    payload = {
+        "base_url": "https://example.feishu.cn/base/base?table=tbl123",
+        "app_id": "cli_demo", "app_secret": "secret-value", "field_schema": "batch_dedup",
+    }
+    assert client.post("/api/v1/integrations/feishu/test", json=payload).status_code == 200
+    assert len(fields) == 2
+    fields[1]["type"] = "text"
+    response = client.post("/api/v1/integrations/feishu/test", json=payload)
+    assert response.status_code == 422
+    assert "类型不正确" in response.text
 
 
 def test_sync_manager_upserts_and_verifies_rows(tmp_path):

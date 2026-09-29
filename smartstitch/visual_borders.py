@@ -247,12 +247,13 @@ class VisualBorderLibrary:
         *,
         display_name: str,
         storage_path: Path,
+        content_hash: str | None = None,
     ) -> dict[str, Any]:
         size = path.stat().st_size
         if size <= 0 or size > MAX_VISUAL_BORDER_BYTES:
             raise VisualBorderLibraryError("视觉特效不能为空且不能超过 500 MB")
         probe = validate_visual_border_media(path)
-        digest = _sha256(path)
+        digest = content_hash or _sha256(path)
         extension = path.suffix.lower()
         return {
             "asset_id": f"visual-effect-{digest[:16]}",
@@ -349,7 +350,9 @@ class VisualBorderLibrary:
             directory = self.effect_directory / library_id
             directory.mkdir(parents=True, exist_ok=True)
             assets = library.setdefault("assets", [])
-            known_hashes = {str(item.get("content_hash", "")) for item in assets}
+            records_by_hash = {
+                str(item.get("content_hash", "")): item for item in assets
+            }
             known_paths = {
                 (self.root / Path(str(item.get("storage_path", "")))).resolve()
                 for item in assets
@@ -364,17 +367,31 @@ class VisualBorderLibrary:
                 ):
                     continue
                 try:
+                    size = path.stat().st_size
+                    if size <= 0 or size > MAX_VISUAL_BORDER_BYTES:
+                        continue
+                    digest = _sha256(path)
+                    existing = records_by_hash.get(digest)
+                    if existing is not None:
+                        old_path = self.root / str(existing.get("storage_path", ""))
+                        if not old_path.is_file():
+                            existing["storage_path"] = str(
+                                GLOBAL_EFFECT_DIRECTORY / library_id / path.name
+                            )
+                            existing["display_name"] = path.name
+                            known_paths.add(path.resolve())
+                            changed = True
+                        continue
                     record = self._effect_asset_record(
                         path,
                         display_name=path.name,
                         storage_path=GLOBAL_EFFECT_DIRECTORY / library_id / path.name,
+                        content_hash=digest,
                     )
                 except (OSError, ValueError):
                     continue
-                if record["content_hash"] in known_hashes:
-                    continue
                 assets.append(record)
-                known_hashes.add(str(record["content_hash"]))
+                records_by_hash[digest] = record
                 known_paths.add(path.resolve())
                 changed = True
         return changed
@@ -410,17 +427,11 @@ class VisualBorderLibrary:
                 continue
             record["storage_path"] = str(GLOBAL_BORDER_DIRECTORY / relative)
             changed = True
-        existing_assets = [
-            record for record in data["assets"] if self._storage_path(record).is_file()
-        ]
-        changed = len(existing_assets) != len(data["assets"]) or changed
-        data["assets"] = existing_assets
+        records_by_hash = {
+            str(record.get("content_hash", "")): record for record in data["assets"]
+        }
         registered_paths = {
             self._storage_path(record).resolve()
-            for record in data["assets"]
-        }
-        registered_hashes = {
-            str(record.get("content_hash", ""))
             for record in data["assets"]
         }
         for path in sorted(
@@ -438,13 +449,19 @@ class VisualBorderLibrary:
                 size = path.stat().st_size
                 if size <= 0 or size > MAX_VISUAL_BORDER_BYTES:
                     continue
-                probe = validate_visual_border_media(path)
                 digest = _sha256(path)
+                existing = records_by_hash.get(digest)
+                if existing is not None:
+                    if not self._storage_path(existing).is_file():
+                        existing["storage_path"] = str(GLOBAL_BORDER_DIRECTORY / path.name)
+                        existing["display_name"] = path.name
+                        registered_paths.add(path.resolve())
+                        changed = True
+                    continue
+                probe = validate_visual_border_media(path)
             except (OSError, ValueError):
                 # A file may still be copying, or may simply not be a valid transparent
                 # border. Leave it untouched so a later refresh can retry it.
-                continue
-            if digest in registered_hashes:
                 continue
             record = {
                 "asset_id": f"visual-border-{digest[:16]}",
@@ -463,8 +480,13 @@ class VisualBorderLibrary:
             }
             data["assets"].append(record)
             registered_paths.add(path.resolve())
-            registered_hashes.add(digest)
+            records_by_hash[digest] = record
             changed = True
+        existing_assets = [
+            record for record in data["assets"] if self._storage_path(record).is_file()
+        ]
+        changed = len(existing_assets) != len(data["assets"]) or changed
+        data["assets"] = existing_assets
         return changed
 
     def _snapshot(self, data: dict[str, Any]) -> dict[str, Any]:

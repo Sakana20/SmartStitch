@@ -3,12 +3,14 @@ from __future__ import annotations
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 import yaml
 
 from smartstitch.config import ConfigStore
 from smartstitch.jobs import JobManager
-from smartstitch.models import BatchDedupRequest, JobCreateRequest, VisualDedupConfig
+from smartstitch.models import BatchDedupRequest, BatchDedupSyncConfig, JobCreateRequest, VisualDedupConfig
 
 
 def generate_clip(path: Path, color: str) -> None:
@@ -24,13 +26,18 @@ def generate_clip(path: Path, color: str) -> None:
     )
 
 
-def test_batch_dedup_renders_each_video_once_and_keeps_sources(tmp_path):
+@pytest.mark.parametrize("sync_enabled", [False, True])
+def test_batch_dedup_renders_each_video_once_and_keeps_sources(tmp_path, sync_enabled):
     source = tmp_path / "待去重"
     generate_clip(source / "a.mp4", "red")
     generate_clip(source / "b.mp4", "blue")
     config_directory = tmp_path / "config"
     config_directory.mkdir()
     manager = JobManager(ConfigStore(config_directory), tmp_path / "data")
+    enqueued = []
+    manager.output_sync_manager = SimpleNamespace(enqueue_if_enabled=enqueued.append)
+    sync = BatchDedupSyncConfig(enabled=sync_enabled)
+    manager.save_batch_dedup_sync_settings(sync)
     visual = VisualDedupConfig.model_validate({
         "enabled": True,
         "effect_layers": [{
@@ -40,12 +47,13 @@ def test_batch_dedup_renders_each_video_once_and_keeps_sources(tmp_path):
         }],
     })
     job = manager.create_batch_dedup(BatchDedupRequest(
-        source_directory=str(source), visual_dedup=visual
+        source_directory=str(source), visual_dedup=visual,
+        output_directory=str(tmp_path / "指定输出" / "已处理") if sync_enabled else None,
     ))
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         job = manager.get_job(job["id"])
-        if job["status"] in {"completed", "partial_failed", "failed", "cancelled"}:
+        if job["status"] in {"completed", "partial_failed", "failed", "cancelled"} and enqueued:
             break
         time.sleep(0.05)
     assert job["status"] == "completed", [item["error"] for item in job["items"]]
@@ -54,9 +62,17 @@ def test_batch_dedup_renders_each_video_once_and_keeps_sources(tmp_path):
     assert [item["selections"]["pool_1"]["name"] for item in job["items"]] == ["a.mp4", "b.mp4"]
     assert {path.name for path in Path(job["output_directory"]).glob("*.mp4")} == {"a_去重.mp4", "b_去重.mp4"}
     assert {path.name for path in source.glob("*.mp4")} == {"a.mp4", "b.mp4"}
+    output_root = tmp_path / "指定输出" / "已处理" if sync_enabled else source.parent
+    assert Path(job["output_directory"]).is_relative_to(output_root)
     assert all(item["visual_effects"] for item in job["items"])
     assert job["visual_dedup"]["effect_layers"][0]["opacity_percent"] == 43
     assert manager.get_batch_dedup_settings().enabled is True
+    assert job["feishu_base_sync"] == sync.model_dump(mode="json")
+    assert enqueued[0]["feishu_base_sync"] == job["feishu_base_sync"]
+    snapshot = yaml.safe_load(Path(job["config_snapshot_path"]).read_text("utf-8"))
+    assert snapshot["output"]["feishu_base_sync"] == job["feishu_base_sync"]
+    assert "app_secret" not in snapshot["output"]["feishu_base_sync"]
+    assert Path(snapshot["output"]["directory"]) == output_root
 
 
 def test_job_manager_writes_outputs_and_manifests(tmp_path):

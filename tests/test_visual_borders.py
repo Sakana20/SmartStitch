@@ -120,6 +120,61 @@ def test_global_visual_border_library_removes_records_for_deleted_files(tmp_path
     assert refreshed["assets"] == []
 
 
+@pytest.mark.parametrize("library_id", ["effect_1", "effect_2"])
+def test_renamed_visual_asset_relinks_without_revalidation_or_repeated_hashing(
+    tmp_path, monkeypatch, library_id,
+):
+    from smartstitch import visual_borders
+
+    root = tmp_path / "config"
+    library = VisualBorderLibrary(root)
+    if library_id == "effect_2":
+        created = library.create_effect_library("烟花", expected_revision=0)
+        directory = library.effect_directory / created["library"]["library_id"]
+    else:
+        directory = Path(library.list()["directory"])
+    original = directory / "原名称.mov"
+    generate_border(original)
+    before = library.list_effect_libraries()
+    before_asset = next(
+        item for item in before["libraries"] if item["library_id"] == library_id
+    )["assets"][0]
+    if library_id == "effect_2":
+        library.update_effect_asset(
+            library_id, before_asset["asset_id"],
+            expected_revision=before["revision"],
+            updates={"enabled": False, "default_weight": 3.0},
+        )
+    else:
+        library.update(
+            before_asset["asset_id"], expected_revision=library.list()["revision"],
+            updates={"enabled": False, "default_weight": 3.0},
+        )
+    renamed = original.with_name("新名称.mov")
+    original.rename(renamed)
+
+    def unexpected_validation(*args, **kwargs):
+        pytest.fail("Unchanged content should reuse its validated media probe")
+
+    monkeypatch.setattr(visual_borders, "validate_visual_border_media", unexpected_validation)
+    refreshed = VisualBorderLibrary(root).list_effect_libraries()
+    assets = next(
+        item for item in refreshed["libraries"] if item["library_id"] == library_id
+    )["assets"]
+    assert len(assets) == 1
+    assert assets[0]["asset_id"] == before_asset["asset_id"]
+    assert assets[0]["display_name"] == renamed.name
+    assert root / assets[0]["storage_path"] == renamed
+    assert assets[0]["enabled"] is False
+    assert assets[0]["default_weight"] == 3.0
+
+    def unexpected_hash(*args, **kwargs):
+        pytest.fail("Subsequent loads should recognize the renamed path")
+
+    monkeypatch.setattr(visual_borders, "_sha256", unexpected_hash)
+    assert VisualBorderLibrary(root).list_effect_libraries() == refreshed
+
+
 def test_global_visual_border_library_uses_revision_and_project_compatibility(tmp_path):
     library = VisualBorderLibrary(tmp_path / "config")
     first_source = tmp_path / "红.mov"

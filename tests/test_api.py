@@ -97,6 +97,36 @@ def test_batch_dedup_settings_are_independent_of_project_configs(tmp_path):
     assert "没有可用视频" in submitted.json()["detail"]
 
 
+def test_batch_dedup_directory_settings_default_to_nas_and_persist(tmp_path):
+    endpoint = "/api/v1/tools/batch-dedup/directory-settings"
+    directories = {"source_directory": str(tmp_path / "原素材"), "output_directory": str(tmp_path / "已处理")}
+    with authenticated_client(create_app(tmp_path)) as client:
+        assert client.get(endpoint).json() == {
+            "source_directory": "/Volumes/home/Smartstitch/批量去重/原素材",
+            "output_directory": "/Volumes/home/Smartstitch/批量去重/已处理",
+        }
+        assert client.put(endpoint, json=directories).status_code == 200
+        assert client.put(endpoint, json={**directories, "output_directory": "  "}).status_code == 422
+    with authenticated_client(create_app(tmp_path)) as fresh:
+        assert fresh.get(endpoint).json() == directories
+
+
+def test_batch_dedup_sync_settings_preserve_visual_settings_and_validate_mapping(tmp_path):
+    client = authenticated_client(create_app(tmp_path))
+    visual = client.get("/api/v1/tools/batch-dedup/settings").json()
+    sync = client.get("/api/v1/tools/batch-dedup/sync-settings").json()
+    assert sync["table_id"] == "tblU4s91qp2AlzqN"
+    assert sync["field_schema"] == "batch_dedup"
+    assert sync["row_scope"] == "succeeded_only"
+    sync["enabled"] = True
+    assert client.put("/api/v1/tools/batch-dedup/sync-settings", json=sync).status_code == 200
+    assert client.get("/api/v1/tools/batch-dedup/sync-settings").json() == sync
+    assert client.get("/api/v1/tools/batch-dedup/settings").json() == visual
+    assert "app_secret" not in sync
+    sync["row_scope"] = "all_items"
+    assert client.put("/api/v1/tools/batch-dedup/sync-settings", json=sync).status_code == 422
+
+
 def test_update_endpoints_use_application_release_checker(tmp_path):
     class FakeReleaseChecker:
         def check(self, current_version):

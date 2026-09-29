@@ -1432,6 +1432,14 @@ function closeToolboxTool(restoreFocus = true) {
 function mountFolderConcatTool(container) {
   let preview = null;
   let disposed = false;
+  let scanRevision = 0;
+  const namingContext = {
+    configDraft: { timeline: ["pool_1", "pool_2"], sources: {
+      pool_1: { label: "A 文件夹", mode: "required" },
+      pool_2: { label: "B 文件夹", mode: "required" },
+    }, output: {} }, scan: { assets: {} }, namingPicker: null,
+  };
+  const naming = ensureOutputNaming(namingContext.configDraft);
   container.innerHTML = `<div class="folder-concat-tool">
     <label class="field"><span>A 文件夹 · 拼接在前</span><div class="directory-picker-row">
       <input id="folderConcatA" type="text" data-path-input placeholder="选择或粘贴文件夹路径">
@@ -1446,6 +1454,10 @@ function mountFolderConcatTool(container) {
       <button class="button secondary small" type="button" data-pick-folder="folderConcatOutput">选择文件夹</button>
     </div></label>
     <p class="toolbox-intro">仅读取各文件夹第一层的 MP4、MOV、M4V、MKV、WebM 视频。按文件名排序后逐条配对，先 A 后 B；多出的视频不处理。每组生成一条 MP4，保存到新的批次目录，源视频保留。</p>
+    <section class="simple-config-card simple-naming-card">
+      <header><div><h3>成片命名</h3><p>从 A、B 文件名选片段，添加文字、日期和序号。</p></div><label class="simple-header-switch"><span>积木命名</span><input id="folderConcatNamingEnabled" class="switch-input" type="checkbox"></label></header>
+      <div class="simple-card-body"><button id="folderConcatImportNaming" type="button" class="button secondary small">导入当前项目的积木规则</button><small>素材库 1 对应 A，素材库 2 对应 B。先预览配对以加载文件名；此处编辑仅用于本次拼接。</small><div id="folderConcatNamingEditor"></div></div>
+    </section>
     <div class="actions"><button id="folderConcatPreview" class="button secondary" type="button">预览配对</button><button id="folderConcatStart" class="button primary" type="button">开始拼接</button></div>
     <div id="folderConcatResult" aria-live="polite"></div>
   </div>`;
@@ -1455,6 +1467,39 @@ function mountFolderConcatTool(container) {
     directory_a: normalizePathInput(input("folderConcatA").value),
     directory_b: normalizePathInput(input("folderConcatB").value),
     output_directory: normalizePathInput(input("folderConcatOutput").value) || null,
+    naming: naming.enabled ? structuredClone(naming) : null,
+  });
+  const invalidate = () => { preview = null; resultBox.replaceChildren(); };
+  const renderNaming = () => {
+    const root = input("folderConcatNamingEditor");
+    root.innerHTML = naming.enabled ? renderBuilderEditor(namingContext.configDraft, namingContext) : "";
+    if (naming.enabled) bindBuilderControls({ context: namingContext, root,
+      rerender: renderNaming, onChange: invalidate,
+      preview: async () => { input("folderConcatPreview").click(); },
+    });
+  };
+  const clearSamples = () => {
+    scanRevision += 1;
+    namingContext.scan = { assets: {} };
+    namingContext.namingPicker = null;
+    invalidate(); renderNaming();
+  };
+  input("folderConcatNamingEnabled").addEventListener("change", event => {
+    naming.enabled = naming.builder.enabled = event.target.checked;
+    invalidate(); renderNaming();
+  });
+  input("folderConcatImportNaming").addEventListener("click", () => {
+    const imported = state.config?.output?.naming;
+    if (!imported?.builder?.enabled || !imported.builder.blocks.length) {
+      toast("当前项目没有已配置的积木命名规则", true); return;
+    }
+    if (imported.builder.blocks.some(block => block.type === "source" && !["pool_1", "pool_2"].includes(block.category))) {
+      toast("当前规则引用了素材库 1、2 以外的素材库，请在此处重新配置 A、B 命名片段", true); return;
+    }
+    Object.assign(naming, structuredClone(imported), { enabled: true });
+    input("folderConcatNamingEnabled").checked = true;
+    namingContext.namingPicker = null;
+    invalidate(); renderNaming();
   });
   const requireFolders = payload => {
     if (!payload.directory_a || !payload.directory_b) {
@@ -1469,28 +1514,32 @@ function mountFolderConcatTool(container) {
       const result = await api("/system/directory-picker", { method: "POST" });
       if (!result.cancelled) {
         input(button.dataset.pickFolder).value = result.path;
-        preview = null;
-        resultBox.replaceChildren();
+        clearSamples();
       }
     } catch (error) { toast(error.message, true); }
     finally { button.disabled = false; }
   }));
-  container.querySelectorAll("input").forEach(field => field.addEventListener("input", () => {
-    preview = null;
-    resultBox.replaceChildren();
-  }));
+  container.querySelectorAll("[data-path-input]").forEach(field => field.addEventListener("input", clearSamples));
   input("folderConcatPreview").addEventListener("click", async event => {
     const payload = values();
     if (!requireFolders(payload)) return;
     const button = event.currentTarget;
     button.disabled = true;
     try {
-      preview = await api("/tools/folder-concat/preview", { method: "POST", body: JSON.stringify(payload) });
-      if (disposed) return;
+      const revision = ++scanRevision;
+      const files = await api("/tools/folder-concat/preview", { method: "POST", body: JSON.stringify({ ...payload, naming: null }) });
+      if (disposed || revision !== scanRevision) return;
+      namingContext.scan = { assets: {
+        pool_1: files.pairs.map(pair => ({ name: pair.a_name })),
+        pool_2: files.pairs.map(pair => ({ name: pair.b_name })),
+      } };
+      renderNaming();
+      preview = payload.naming ? await api("/tools/folder-concat/preview", { method: "POST", body: JSON.stringify(payload) }) : files;
+      if (disposed || revision !== scanRevision) return;
       resultBox.innerHTML = `<section class="prores-result">
         <strong>可拼接 ${preview.pair_count} 组 · A ${preview.count_a} 条 · B ${preview.count_b} 条</strong>
         ${preview.unpaired_a || preview.unpaired_b ? `<p>A 多出 ${preview.unpaired_a} 条，B 多出 ${preview.unpaired_b} 条；这些视频不会参与本次任务。</p>` : ""}
-        <ul>${preview.pairs.map((pair, index) => `<li><span>${index + 1}. ${escapeHtml(pair.a_name)} → ${escapeHtml(pair.b_name)}</span></li>`).join("")}</ul>
+        <ul>${preview.pairs.map((pair, index) => `<li><span>${index + 1}. ${escapeHtml(pair.a_name)} → ${escapeHtml(pair.b_name)} → ${escapeHtml(pair.output_name)}</span></li>`).join("")}</ul>
       </section>`;
     } catch (error) { preview = null; toast(error.message, true); }
     finally { button.disabled = false; }
@@ -1508,7 +1557,7 @@ function mountFolderConcatTool(container) {
     } catch (error) { toast(error.message, true); }
     finally { button.disabled = false; }
   });
-  return () => { disposed = true; };
+  return () => { disposed = true; scanRevision += 1; };
 }
 
 function mountVideoUpscaleTool(container, executionMode = "local") {
@@ -1876,34 +1925,106 @@ function mountProResAlphaTool(container) {
 
 function mountBatchDedupTool(container) {
   let visual = null;
+  let sync = null;
+  let credentials = null;
+  let savedAppId = "";
+  let secret = "";
+  let connection = null;
+  let connectionError = null;
   let sourceDirectory = "";
+  let outputDirectory = "";
   let disposed = false;
+  let librariesLoading = true;
+  let librariesError = "";
+  let librariesReady = false;
   const render = () => {
-    if (disposed || !visual) return;
+    if (disposed || !visual || !sync || !credentials) return;
+    const tables = connection?.tables || [];
+    const tableOptions = tables.length
+      ? tables.map(table => `<option value="${escapeHtml(table.table_id)}" ${table.table_id === sync.table_id ? "selected" : ""}>${escapeHtml(table.name || table.table_id)}</option>`).join("")
+      : `<option value="${escapeHtml(sync.table_id)}">${sync.table_id ? `已选择 ${escapeHtml(sync.table_id)}` : "请先测试连接"}</option>`;
     container.innerHTML = `<div class="batch-dedup-tool">
       <label class="field"><span>源视频文件夹</span><div class="directory-picker-row">
         <input id="batchDedupDirectory" type="text" data-path-input value="${escapeHtml(sourceDirectory)}" placeholder="选择或粘贴文件夹路径">
         <button id="batchDedupChoose" class="button secondary small" type="button">选择文件夹</button>
       </div></label>
+      <label class="field"><span>输出文件夹</span><div class="directory-picker-row">
+        <input id="batchDedupOutputDirectory" type="text" data-path-input value="${escapeHtml(outputDirectory)}" placeholder="选择或粘贴输出文件夹路径">
+        <button id="batchDedupChooseOutput" class="button secondary small" type="button">选择文件夹</button>
+      </div></label>
       <section class="simple-config-card simple-wide-card ${visual.enabled ? "is-accent" : ""}">
         <header><span class="simple-card-number">01</span><div><h3>视觉去重</h3><p>每张卡片就是一个特效库；从上到下排列，逐条应用到所选文件夹的视频。</p></div>
           <label class="simple-header-switch"><span>${visual.enabled ? "已启用" : "未启用"}</span><input id="batchDedupEnabled" class="switch-input" type="checkbox" ${visual.enabled ? "checked" : ""}></label></header>
         <div class="simple-card-body simple-visual-dedup-body ${visual.enabled ? "" : "is-disabled"}">
-          <div class="simple-source-list visual-effect-layer-list">${visualEffectLayerCards({ visual_dedup: visual })}</div>
-          <div class="simple-card-footer"><button id="batchDedupAddLibrary" class="button secondary" type="button">＋ 添加特效库</button><small>拖动卡片或点击上下移动，编号会自动更新</small></div>
+          <div class="simple-source-list visual-effect-layer-list">${visualEffectLayerCards({ visual_dedup: visual }, { loading: librariesLoading, error: librariesError })}</div>
+          <div class="simple-card-footer"><button id="batchDedupAddLibrary" class="button secondary" type="button" ${librariesReady ? "" : "disabled"}>＋ 添加特效库</button><small>拖动卡片或点击上下移动，编号会自动更新</small></div>
         </div>
       </section>
-      <p class="toolbox-intro">每个源视频生成一条去重成片，输出到源文件夹旁的新批次目录。源文件保留；任务进度在“任务记录”查看。</p>
-      <div class="actions"><button id="batchDedupSave" class="button secondary" type="button">保存去重设置</button><button id="batchDedupStart" class="button primary" type="button">开始批量去重</button></div>
+      <div class="simple-card-footer"><small role="status">${librariesLoading ? "素材库正在后台加载，可先选择文件夹和调整去重设置。" : librariesError ? `素材库加载失败：${escapeHtml(librariesError)}` : "新增或改名素材后，点击刷新素材库即可更新。"}</small><button id="batchDedupRefreshLibraries" class="button secondary small" type="button" ${librariesLoading ? "disabled" : ""}>${librariesLoading ? "正在加载素材库…" : "刷新素材库"}</button></div>
+      <section class="simple-config-card simple-wide-card simple-feishu-card ${sync.enabled ? "is-accent" : ""}">
+        <header><span class="simple-card-number">02</span><div><h3>飞书多维表格同步</h3><p>去重结束后自动上表：文本为成片文件名，视频为去重后的文件。只同步成功成片。</p></div><label class="simple-header-switch"><span>${sync.enabled ? "已启用" : "未启用"}</span><input id="batchDedupFeishuEnabled" class="switch-input" type="checkbox" ${sync.enabled ? "checked" : ""}></label></header>
+        <div class="simple-card-body simple-feishu-body ${sync.enabled ? "" : "is-disabled"}">
+          <div class="simple-feishu-grid">
+            <label class="simple-large-field"><span>App ID <small>全局凭证，所有项目共用</small></span><input id="batchDedupFeishuAppId" value="${escapeHtml(credentials.app_id)}" ${sync.enabled ? "" : "disabled"}></label>
+            <label class="simple-large-field"><span>App Secret <small>只允许更换，不会读回原值</small></span><input id="batchDedupFeishuAppSecret" type="password" value="${escapeHtml(secret)}" placeholder="${credentials.app_secret_configured ? "已配置，留空则不修改" : "填写 App Secret"}" autocomplete="new-password" ${sync.enabled ? "" : "disabled"}></label>
+            <label class="simple-large-field simple-feishu-url"><span>多维表格链接</span><input id="batchDedupFeishuUrl" value="${escapeHtml(sync.base_url)}" ${sync.enabled ? "" : "disabled"}></label>
+            <label class="simple-large-field"><span>数据表</span><select id="batchDedupFeishuTable" ${sync.enabled ? "" : "disabled"}>${tableOptions}</select></label>
+          </div>
+          <div class="simple-feishu-actions"><button id="batchDedupTestFeishuBtn" class="button secondary small" type="button" ${sync.enabled ? "" : "disabled"}>测试连接</button><span>${escapeHtml(connection ? `已连接，识别到 ${tables.length} 个数据表` : "填写后点击测试连接")}</span><small>Secret 仅保存在本机，不会进入任务快照。</small>${connectionError ? `<div class="feishu-connection-error">${escapeHtml(connectionError.message)}</div>` : ""}</div>
+        </div>
+      </section>
+      <p class="toolbox-intro">每个源视频生成一条去重成片，保存到输出文件夹下的新批次目录。源文件保留；任务进度在“任务记录”查看。</p>
+      <div class="actions"><button id="batchDedupSave" class="button secondary" type="button">保存去重设置</button><button id="batchDedupStart" class="button primary" type="button" ${librariesReady ? "" : "disabled"}>开始批量去重</button></div>
     </div>`;
     const sourceInput = container.querySelector("#batchDedupDirectory");
+    container.querySelector("#batchDedupRefreshLibraries").addEventListener("click", refreshLibraries);
+    if (!librariesReady) {
+      container.querySelectorAll('[data-effect-library-name], [data-open-effect-library]').forEach(control => { control.disabled = true; });
+      container.querySelectorAll('[data-effect-action="delete"]').forEach(button => {
+        if (visual.effect_layers.find(item => item.layer_id === button.dataset.effectId)?.type === "overlay") button.disabled = true;
+      });
+    }
+    container.querySelector("#batchDedupFeishuEnabled").addEventListener("change", event => { sync.enabled = event.target.checked; render(); });
+    container.querySelector("#batchDedupFeishuAppId").addEventListener("input", event => { credentials.app_id = event.target.value; connection = null; });
+    container.querySelector("#batchDedupFeishuAppSecret").addEventListener("input", event => { secret = event.target.value; connection = null; });
+    container.querySelector("#batchDedupFeishuUrl").addEventListener("input", event => {
+      sync.base_url = event.target.value.trim();
+      try { sync.table_id = new URL(sync.base_url).searchParams.get("table") || ""; } catch { sync.table_id = ""; }
+      connection = null;
+      connectionError = null;
+      const select = container.querySelector("#batchDedupFeishuTable");
+      select.innerHTML = `<option value="${escapeHtml(sync.table_id)}">${sync.table_id ? `已选择 ${escapeHtml(sync.table_id)}` : "请先测试连接"}</option>`;
+    });
+    container.querySelector("#batchDedupFeishuTable").addEventListener("change", event => { sync.table_id = event.target.value; });
+    container.querySelector("#batchDedupTestFeishuBtn").addEventListener("click", async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      button.textContent = "正在连接…";
+      try {
+        connection = await api("/integrations/feishu/test", { method: "POST", body: JSON.stringify({ base_url: sync.base_url, app_id: credentials.app_id.trim(), app_secret: secret || null, field_schema: "batch_dedup", table_id: sync.table_id }) });
+        connectionError = null;
+        if (!connection.tables.some(table => table.table_id === sync.table_id)) sync.table_id = connection.selected_table_id || "";
+        toast("飞书多维表格连接成功");
+      } catch (error) { connection = null; connectionError = error.detail || { message: error.message }; toast(error.message, true); }
+      finally { render(); }
+    });
     sourceInput.addEventListener("input", () => { sourceDirectory = sourceInput.value; });
+    container.querySelector("#batchDedupOutputDirectory").addEventListener("input", event => { outputDirectory = event.target.value; });
+    container.querySelector("#batchDedupChooseOutput").addEventListener("click", async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const result = await api("/system/directory-picker", { method: "POST" });
+        if (!result.cancelled && !disposed) { outputDirectory = result.path; container.querySelector("#batchDedupOutputDirectory").value = result.path; }
+      } catch (error) { toast(error.message, true); }
+      finally { button.disabled = false; }
+    });
     container.querySelector("#batchDedupChoose").addEventListener("click", async event => {
       const button = event.currentTarget;
       button.disabled = true;
       try {
         const result = await api("/system/directory-picker", { method: "POST" });
-        if (!result.cancelled) { sourceDirectory = result.path; sourceInput.value = result.path; }
+        if (!result.cancelled && !disposed) { sourceDirectory = result.path; container.querySelector("#batchDedupDirectory").value = result.path; }
       } catch (error) { toast(error.message, true); }
       finally { button.disabled = false; }
     });
@@ -2005,6 +2126,20 @@ function mountBatchDedupTool(container) {
       } catch (error) { toast(error.message, true); }
     });
     const save = async () => {
+      const directories = await api("/tools/batch-dedup/directory-settings", { method: "PUT", body: JSON.stringify({ source_directory: normalizePathInput(sourceDirectory), output_directory: normalizePathInput(outputDirectory) }) });
+      sourceDirectory = directories.source_directory;
+      outputDirectory = directories.output_directory;
+      if (sync.enabled) {
+        if (!credentials.app_id.trim() || (!secret && !credentials.app_secret_configured)) throw new Error("请先配置飞书 App ID 和 App Secret");
+        if (!sync.base_url || !sync.table_id) throw new Error("请填写多维表格链接并选择数据表");
+      }
+      if (secret || credentials.app_id.trim() !== savedAppId) {
+        credentials = await api("/integrations/feishu/settings", { method: "PUT", body: JSON.stringify({ app_id: credentials.app_id.trim(), app_secret: secret || null }) });
+        savedAppId = credentials.app_id;
+        secret = "";
+        container.querySelector("#batchDedupFeishuAppSecret").value = "";
+      }
+      sync = await api("/tools/batch-dedup/sync-settings", { method: "PUT", body: JSON.stringify(sync) });
       visual = await api("/tools/batch-dedup/settings", { method: "PUT", body: JSON.stringify(visual) });
       toast("去重设置已保存");
     };
@@ -2012,13 +2147,17 @@ function mountBatchDedupTool(container) {
       try { await save(); } catch (error) { toast(error.message, true); }
     });
     container.querySelector("#batchDedupStart").addEventListener("click", async event => {
+      if (!librariesReady) return toast("请等待素材库加载完成", true);
       const directory = normalizePathInput(sourceDirectory);
       if (!directory) return toast("请先选择源视频文件夹", true);
+      const output = normalizePathInput(outputDirectory);
+      if (!output) return toast("请先选择输出文件夹", true);
       const button = event.currentTarget;
       button.disabled = true;
       try {
+        await save();
         const job = await api("/tools/batch-dedup", {
-          method: "POST", body: JSON.stringify({ source_directory: directory, visual_dedup: visual }),
+          method: "POST", body: JSON.stringify({ source_directory: directory, output_directory: output, visual_dedup: visual, feishu_base_sync: sync }),
         });
         toast(`已提交 ${job.count} 条视频的去重任务`);
         await loadJobs();
@@ -2027,13 +2166,62 @@ function mountBatchDedupTool(container) {
       finally { button.disabled = false; }
     });
   };
+  // Keep typing and scroll position intact when background loading completes.
+  const renderLibraryUpdate = () => {
+    if (disposed) return;
+    const active = document.activeElement;
+    const attribute = active && container.contains(active)
+      ? ["id", "data-effect-library-name", "data-effect-opacity", "data-effect-opacity-slider"]
+        .find(name => active.hasAttribute(name)) : null;
+    const value = active?.value;
+    const start = active?.selectionStart;
+    const end = active?.selectionEnd;
+    const scrollTop = container.scrollTop;
+    render();
+    if (attribute) {
+      const replacement = Array.from(container.querySelectorAll(`[${attribute}]`))
+        .find(item => item.getAttribute(attribute) === active.getAttribute(attribute));
+      if (replacement && !replacement.disabled) {
+        replacement.value = value;
+        replacement.focus({ preventScroll: true });
+        if (start != null && typeof replacement.setSelectionRange === "function") replacement.setSelectionRange(start, end);
+      }
+    }
+    container.scrollTop = scrollTop;
+  };
+  async function refreshLibraries() {
+    if (disposed) return;
+    librariesLoading = true;
+    librariesReady = false;
+    librariesError = "";
+    renderLibraryUpdate();
+    try {
+      const libraries = await api("/global-assets/visual-effect-libraries");
+      if (disposed) return;
+      state.visualEffectLibraries = libraries;
+      librariesReady = true;
+    } catch (error) {
+      if (disposed) return;
+      librariesError = error.message;
+    } finally {
+      if (!disposed) {
+        librariesLoading = false;
+        renderLibraryUpdate();
+      }
+    }
+  }
   container.innerHTML = '<div class="empty-state">正在加载去重设置…</div>';
-  Promise.all([api("/tools/batch-dedup/settings"), api("/global-assets/visual-effect-libraries")])
-    .then(([settings, libraries]) => {
+  Promise.all([api("/tools/batch-dedup/settings"), api("/tools/batch-dedup/sync-settings"), api("/integrations/feishu/settings"), api("/tools/batch-dedup/directory-settings")])
+    .then(([settings, syncSettings, feishuSettings, directories]) => {
       if (disposed) return;
       visual = settings;
-      state.visualEffectLibraries = libraries;
+      sync = syncSettings;
+      credentials = feishuSettings;
+      savedAppId = credentials.app_id;
+      sourceDirectory = directories.source_directory;
+      outputDirectory = directories.output_directory;
       render();
+      refreshLibraries();
     })
     .catch(error => { if (!disposed) container.innerHTML = `<div class="warning-box">${escapeHtml(error.message)}</div>`; });
   return () => { disposed = true; };
@@ -5813,24 +6001,24 @@ function builderSignature(tokens) {
     : /^\d+$/.test(token) ? "N" : "T").join("");
 }
 
-function builderPicker(config) {
+function builderPicker(config, context = state) {
   const pools = config.timeline.filter(category => config.sources[category]?.mode !== "disabled");
-  const picker = state.namingPicker || {};
+  const picker = context.namingPicker || {};
   if (!pools.includes(picker.category)) {
     picker.category = pools[0] || "";
     picker.sample = "";
     picker.tokenIndex = -1;
   }
-  if (!picker.sample) picker.sample = state.scan?.assets?.[picker.category]?.[0]?.name || "";
-  state.namingPicker = picker;
+  if (!picker.sample) picker.sample = context.scan?.assets?.[picker.category]?.[0]?.name || "";
+  context.namingPicker = picker;
   return picker;
 }
 
-function renderBuilderEditor(config) {
+function renderBuilderEditor(config, context = state) {
   const naming = ensureOutputNaming(config);
   const blocks = naming.builder.blocks;
-  const picker = builderPicker(config);
-  const sampleNames = [...new Set((state.scan?.assets?.[picker.category] || []).map(asset => asset.name))];
+  const picker = builderPicker(config, context);
+  const sampleNames = [...new Set((context.scan?.assets?.[picker.category] || []).map(asset => asset.name))];
   if (!sampleNames.includes(picker.sample)) {
     picker.sample = sampleNames[0] || "";
     picker.tokenIndex = -1;
@@ -5863,40 +6051,46 @@ function renderBuilderEditor(config) {
   </div>`;
 }
 
-function bindBuilderControls() {
-  const naming = ensureOutputNaming(state.configDraft);
+function bindBuilderControls(options = {}) {
+  const context = options.context || state;
+  const $ = selector => (options.root || document).querySelector(selector);
+  const $$ = selector => [...(options.root || document).querySelectorAll(selector)];
+  const naming = ensureOutputNaming(context.configDraft);
   const blocks = naming.builder.blocks;
   const rerender = () => {
+    options.onChange?.();
+    if (options.rerender) { options.rerender(); return; }
     const scrollTop = configEditorScrollTop();
     renderSimpleConfig();
     restoreActiveConfigScroll(scrollTop);
   };
   const stale = () => {
+    options.onChange?.();
     const result = $("#builderPreviewResult");
     if (result) result.textContent = "设置已修改，请重新验证文件名";
   };
   $("#builderPool")?.addEventListener("change", event => {
-    state.namingPicker = { category: event.target.value, sample: "", tokenIndex: -1,
-      targetId: "", replaceId: state.namingPicker?.replaceId || "" };
+    context.namingPicker = { category: event.target.value, sample: "", tokenIndex: -1,
+      targetId: "", replaceId: context.namingPicker?.replaceId || "" };
     rerender();
   });
   $("#builderSample")?.addEventListener("change", event => {
-    const picker = builderPicker(state.configDraft);
+    const picker = builderPicker(context.configDraft, context);
     picker.sample = event.target.value.trim();
     picker.tokenIndex = -1;
     rerender();
   });
   $$('[data-builder-token]').forEach(button => button.addEventListener("click", () => {
-    const picker = builderPicker(state.configDraft);
+    const picker = builderPicker(context.configDraft, context);
     picker.sample = $("#builderSample").value.trim();
     picker.tokenIndex = Number(button.dataset.builderToken);
     rerender();
   }));
   $("#builderTarget")?.addEventListener("change", event => {
-    builderPicker(state.configDraft).targetId = event.target.value;
+    builderPicker(context.configDraft, context).targetId = event.target.value;
   });
   $("#builderAddSource")?.addEventListener("click", () => {
-    const picker = builderPicker(state.configDraft);
+    const picker = builderPicker(context.configDraft, context);
     const sampleName = $("#builderSample")?.value.trim() || "";
     const tokens = builderTokens(sampleName);
     if (!picker.category || picker.tokenIndex < 0 || !tokens[picker.tokenIndex]) {
@@ -5970,7 +6164,7 @@ function bindBuilderControls() {
   $$('[data-builder-repick]').forEach(button => button.addEventListener("click", () => {
     const block = blocks.find(item => item.id === button.dataset.builderRepick);
     if (!block) return;
-    state.namingPicker = { category: block.category, sample: block.variants[0].sample_name,
+    context.namingPicker = { category: block.category, sample: block.variants[0].sample_name,
       tokenIndex: block.variants[0].token_index, targetId: "", replaceId: block.id };
     rerender();
   }));
@@ -6008,6 +6202,7 @@ function bindBuilderControls() {
     stale();
   });
   $("#builderPreview")?.addEventListener("click", async event => {
+    if (options.preview) { await options.preview(); return; }
     const button = event.currentTarget;
     const result = $("#builderPreviewResult");
     button.disabled = true;
@@ -6016,7 +6211,7 @@ function bindBuilderControls() {
       const preview = await api(`/configs/${state.configId}/naming-builder-preview`, {
         method: "POST", body: JSON.stringify({ config: currentStructuredDraft() }),
       });
-      const coverage = preview.coverage.map(item => `${state.configDraft.sources[item.category]?.label || item.category}：${item.matched}/${item.total} 可用${item.unmatched.length ? `，未匹配如 ${item.unmatched.join("、")}` : ""}`).join("；");
+      const coverage = preview.coverage.map(item => `${context.configDraft.sources[item.category]?.label || item.category}：${item.matched}/${item.total} 可用${item.unmatched.length ? `，未匹配如 ${item.unmatched.join("、")}` : ""}`).join("；");
       if (preview.error) {
         result.innerHTML = `<strong>无法生成：${escapeHtml(preview.error)}</strong><small>${escapeHtml(coverage)}</small>`;
         return;
@@ -6092,7 +6287,7 @@ function ensureVisualEffectLibraryLayers(config) {
   return visual.effect_layers;
 }
 
-function visualEffectLayerCards(config) {
+function visualEffectLayerCards(config, libraryState = {}) {
   const layers = ensureVisualEffectLibraryLayers(config);
   const cards = layers.map((layer, index) => {
     const library = layer.type === "overlay" ? visualEffectLibrary(layer.library_id) : null;
@@ -6100,11 +6295,13 @@ function visualEffectLayerCards(config) {
     const libraryName = library?.name || layer.name;
     const status = layer.type === "blur_frame"
       ? `内置效果 · 前景 ${Math.round(Number(layer.foreground_scale || 0.9) * 100)}%`
+      : libraryState.loading ? "素材库正在后台加载…"
+      : libraryState.error ? "素材库加载失败，请刷新重试"
       : library ? `${assets.length} 个素材${layer.enabled ? "可参与去重" : " · 未参与去重"}` : "素材库不可用";
     const libraryControl = layer.type === "overlay"
       ? library
         ? `<button type="button" class="text-btn simple-source-directory" data-open-effect-library="${escapeHtml(layer.library_id)}" title="打开文件夹：${escapeHtml(library.directory)}">${escapeHtml(layer.library_id)} ↗</button>`
-        : '<span class="text-btn simple-source-directory">库不可用</span>'
+        : `<span class="text-btn simple-source-directory">${libraryState.loading || libraryState.error ? escapeHtml(layer.library_id) : "库不可用"}</span>`
       : '<span class="text-btn simple-source-directory">内置效果</span>';
     return `
       <article class="simple-source-card visual-effect-layer-card ${layer.enabled ? "" : "is-disabled"}" data-effect-layer-card="${escapeHtml(layer.layer_id)}" draggable="true">

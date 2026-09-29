@@ -58,6 +58,8 @@ from .models import (
     AddBenefitRequest,
     AddPoolRequest,
     BatchDedupRequest,
+    BatchDedupDirectorySettings,
+    BatchDedupSyncConfig,
     CloneConfigRequest,
     ConfigLockAcquireRequest,
     ConfigLockActionRequest,
@@ -708,6 +710,11 @@ def create_app(
                 selected_table_id = None
             if not selected_table_id and len(tables) == 1:
                 selected_table_id = str(tables[0]["table_id"])
+            if request.field_schema == "batch_dedup":
+                selected_table_id = request.table_id or selected_table_id
+                if not selected_table_id:
+                    raise FeishuError("请先选择批量去重上表的数据表")
+                client.validate_batch_dedup_sync_schema(base_token, selected_table_id)
             return {
                 "ok": True,
                 "base_token": base_token,
@@ -2010,6 +2017,34 @@ def create_app(
         try:
             return codec_settings.save(settings).model_dump()
         except OSError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/tools/batch-dedup/directory-settings")
+    def get_batch_dedup_directory_settings() -> dict[str, object]:
+        try:
+            return job_manager.get_batch_dedup_directory_settings().model_dump(mode="json")
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.put("/api/v1/tools/batch-dedup/directory-settings")
+    def save_batch_dedup_directory_settings(settings: BatchDedupDirectorySettings) -> dict[str, object]:
+        try:
+            return job_manager.save_batch_dedup_directory_settings(settings).model_dump(mode="json")
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/tools/batch-dedup/sync-settings")
+    def get_batch_dedup_sync_settings() -> dict[str, object]:
+        try:
+            return job_manager.get_batch_dedup_sync_settings().model_dump(mode="json")
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.put("/api/v1/tools/batch-dedup/sync-settings")
+    def save_batch_dedup_sync_settings(settings: BatchDedupSyncConfig) -> dict[str, object]:
+        try:
+            return job_manager.save_batch_dedup_sync_settings(settings).model_dump(mode="json")
+        except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/v1/tools/batch-dedup/settings")

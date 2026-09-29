@@ -280,6 +280,15 @@ class FeishuBaseClient:
         self._ensure_field_types(base_token, table_id, USER_FIELD_TYPES)
         self.ensure_text_fields(base_token, table_id, SMARTSTITCH_TEXT_FIELDS)
 
+    def ensure_batch_dedup_sync_schema(self, base_token: str, table_id: str) -> None:
+        self.validate_batch_dedup_sync_schema(base_token, table_id)
+        self.ensure_text_fields(base_token, table_id, ["_smartstitch_key"])
+
+    def validate_batch_dedup_sync_schema(self, base_token: str, table_id: str) -> None:
+        self._ensure_field_types(base_token, table_id, {
+            "文本": {1, "text"}, "视频": {17, "attachment"},
+        })
+
     def ensure_taobao_flash_sync_schema(
         self, base_token: str, table_id: str
     ) -> str:
@@ -790,11 +799,12 @@ class FeishuSyncManager:
         target: dict[str, Any],
     ) -> dict[str, int]:
         items = list(job.get("items") or [])
-        if target.get("row_scope") == "succeeded_only":
+        is_batch_dedup = job.get("job_type") == "batch_dedup" or target.get("field_schema") == "batch_dedup"
+        if target.get("row_scope") == "succeeded_only" or is_batch_dedup:
             items = [item for item in items if item.get("status") == "succeeded"]
         sync_config = job.get("feishu_base_sync") or {}
         field_schema = sync_config.get("field_schema", "auto")
-        if field_schema == "auto":
+        if field_schema == "auto" and not is_batch_dedup:
             field_schema = job.get("workflow_type", "generic")
             if field_schema == "generic":
                 field_names = {
@@ -803,9 +813,11 @@ class FeishuSyncManager:
                 }
                 if TAOBAO_FLASH_MATERIAL_FIELD in field_names:
                     field_schema = "taobao_flash"
-        is_taobao_flash = field_schema == "taobao_flash"
+        is_taobao_flash = field_schema == "taobao_flash" and not is_batch_dedup
         review_field = ""
-        if is_taobao_flash:
+        if is_batch_dedup:
+            client.ensure_batch_dedup_sync_schema(base_token, table_id)
+        elif is_taobao_flash:
             review_field = client.ensure_taobao_flash_sync_schema(base_token, table_id)
         else:
             client.ensure_sync_schema(base_token, table_id)
@@ -829,15 +841,19 @@ class FeishuSyncManager:
                 and isinstance(existing_record.get("fields"), dict)
                 else {}
             )
-            fields = (
-                self._build_taobao_flash_fields(
+            if is_batch_dedup:
+                fields = {
+                    "文本": str(item.get("output_name") or Path(str(item.get("output_path") or "")).name),
+                    "_smartstitch_key": smartstitch_key,
+                }
+            elif is_taobao_flash:
+                fields = self._build_taobao_flash_fields(
                     job, item, existing_fields, daily_sequences,
                     review_field=review_field,
                 )
-                if is_taobao_flash
-                else self._build_fields(job, item)
-            )
-            attachment_field = "视频" if is_taobao_flash else "文件"
+            else:
+                fields = self._build_fields(job, item)
+            attachment_field = "视频" if is_taobao_flash or is_batch_dedup else "文件"
             if not self._attachment_tokens(existing_fields.get(attachment_field)):
                 output_path = str(item.get("output_path") or "")
                 if item.get("status") == "succeeded" and output_path:

@@ -603,7 +603,7 @@ class FeishuBaseSyncConfig(BaseModel):
     enabled: bool = False
     base_url: str = ""
     table_id: str = Field(default="", max_length=128, pattern=r"^[A-Za-z0-9_-]*$")
-    field_schema: Literal["auto", "generic", "taobao_flash"] = "auto"
+    field_schema: Literal["auto", "generic", "taobao_flash", "batch_dedup"] = "auto"
     trigger: Literal["job_terminal"] = "job_terminal"
     row_scope: Literal["all_items", "succeeded_only"] = "all_items"
     write_mode: Literal["upsert"] = "upsert"
@@ -1084,11 +1084,32 @@ class ClusterJobCreateRequest(JobCreateRequest, ScheduledStartRequest):
     pass
 
 
+class BatchDedupSyncConfig(FeishuBaseSyncConfig):
+    base_url: str = "https://yiranmobi.feishu.cn/wiki/R4FlwOhkNiUsVcklCLacoa5anbf?table=tblU4s91qp2AlzqN&view=vewWtNk7Fn"
+    table_id: str = Field(default="tblU4s91qp2AlzqN", max_length=128, pattern=r"^[A-Za-z0-9_-]*$")
+    field_schema: Literal["batch_dedup"] = "batch_dedup"
+    row_scope: Literal["succeeded_only"] = "succeeded_only"
+
+
+class BatchDedupDirectorySettings(BaseModel):
+    source_directory: str = Field(default="/Volumes/home/Smartstitch/批量去重/原素材", min_length=1)
+    output_directory: str = Field(default="/Volumes/home/Smartstitch/批量去重/已处理", min_length=1)
+
+    _normalize_directories = field_validator("source_directory", "output_directory", mode="before")(
+        normalize_path_input
+    )
+
+
 class BatchDedupRequest(BaseModel):
     source_directory: str
+    output_directory: str | None = None
     visual_dedup: VisualDedupConfig
+    feishu_base_sync: BatchDedupSyncConfig | None = None
 
     _normalize_source_directory = field_validator("source_directory", mode="before")(
+        normalize_path_input
+    )
+    _normalize_output_directory = field_validator("output_directory", mode="before")(
         normalize_path_input
     )
 
@@ -1097,6 +1118,7 @@ class FolderConcatRequest(BaseModel):
     directory_a: str
     directory_b: str
     output_directory: str | None = None
+    naming: OutputNamingConfig | None = None
 
     _normalize_directory_a = field_validator("directory_a", mode="before")(
         normalize_path_input
@@ -1131,6 +1153,8 @@ class FeishuConnectionTestRequest(BaseModel):
     base_url: str = Field(min_length=1, max_length=2048)
     app_id: str | None = Field(default=None, max_length=128)
     app_secret: str | None = Field(default=None, max_length=512)
+    field_schema: Literal["batch_dedup"] | None = None
+    table_id: str = Field(default="", max_length=128, pattern=r"^[A-Za-z0-9_-]*$")
 
     @field_validator("base_url", "app_id", "app_secret")
     @classmethod
