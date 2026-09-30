@@ -19,24 +19,22 @@ MAX_BENEFIT_CATEGORIES = 20
 MAX_GENERIC_POOLS = 50
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 PATH_QUOTE_PAIRS = {"'": "'", '"': '"', "‘": "’", "“": "”"}
-NAMING_FILENAME_TOKEN_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}|\d{8}|[^_-]+|[_-]")
+NAMING_FIELD_SEPARATOR = "|!|"
+SMARTSTITCH_SLICE_SUFFIX = re.compile(
+    r"__(?:\d{3}|g\d{3})_[A-Za-z0-9-]+_(?:f\d+-\d+|p\d{3}-\d{3})(?:-v\d+)?$"
+)
+
+
+def naming_source_stem(filename: str) -> str:
+    stem = Path(filename).stem
+    return SMARTSTITCH_SLICE_SUFFIX.sub("", stem)
 
 
 def naming_filename_tokens(filename: str) -> list[str]:
-    return NAMING_FILENAME_TOKEN_PATTERN.findall(Path(filename).stem.split("__", 1)[0])
-
-
-def naming_filename_signature(tokens: list[str]) -> str:
-    def token_kind(token: str) -> str:
-        if token in {"-", "_"}:
-            return token
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", token):
-            return "D"
-        if re.fullmatch(r"\d{8}", token):
-            return "E"
-        return "N" if re.fullmatch(r"[0-9]+", token) else "T"
-
-    return "".join(token_kind(token) for token in tokens)
+    fields = [field.strip() for field in naming_source_stem(filename).split(NAMING_FIELD_SEPARATOR)]
+    if any(not field for field in fields):
+        raise ValueError("文件名包含空字段或连续分隔符 |!|")
+    return fields
 
 
 def is_benefit_category(category: str) -> bool:
@@ -437,8 +435,8 @@ class NamingSourceMetadataConfig(BaseModel):
     categories: list[str] = Field(default_factory=lambda: ["pool_*"])
     strip_smartstitch_suffix: bool = True
     pattern: str = (
-        r"^(?P<source_index>\d+)_(?P<talent>[^-]+)-"
-        r"(?P<source_title>.+)-(?P<restriction_date>\d{4}-\d{2}-\d{2})$"
+        r"^(?P<source_index>\d+)\|!\|(?P<talent>.+?)\|!\|"
+        r"(?P<source_title>.+?)\|!\|(?P<restriction_date>\d{4}-\d{2}-\d{2})$"
     )
     restriction_date_formats: list[str] = Field(
         default_factory=lambda: ["%Y-%m-%d"]
@@ -502,15 +500,15 @@ class NamingRestrictionDateConfig(BaseModel):
 
 class NamingBlockVariantConfig(BaseModel):
     sample_name: str = Field(min_length=1)
-    signature: str = Field(min_length=1)
-    token_index: int = Field(ge=0)
+    field_count: int = Field(ge=1)
+    field_index: int = Field(ge=0)
 
     @model_validator(mode="after")
     def validate_sample(self) -> NamingBlockVariantConfig:
         tokens = naming_filename_tokens(self.sample_name)
-        if self.signature != naming_filename_signature(tokens):
-            raise ValueError("文件名样本与解析格式不一致")
-        if self.token_index >= len(tokens) or tokens[self.token_index] in {"-", "_"}:
+        if self.field_count != len(tokens):
+            raise ValueError("文件名样本与字段数量不一致")
+        if self.field_index >= len(tokens):
             raise ValueError("文件名样本未包含选定片段")
         return self
 
@@ -536,8 +534,8 @@ class NamingBlockConfig(BaseModel):
             raise ValueError("当天日期块不能映射限制日期字段")
         if self.type != "source" and self.variants:
             raise ValueError("只有素材命名块能配置文件名样本")
-        if len({item.signature for item in self.variants}) != len(self.variants):
-            raise ValueError("同一素材命名块不能重复配置相同文件名格式")
+        if len({item.field_count for item in self.variants}) != len(self.variants):
+            raise ValueError("同一素材命名块不能重复配置相同字段数量")
         return self
 
 

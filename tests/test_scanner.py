@@ -249,7 +249,7 @@ def test_managed_library_rejects_multiple_auto_overlays(tmp_path):
 def test_generic_scan_parses_naming_metadata_and_reports_bad_filename(tmp_path, monkeypatch):
     pool = tmp_path / "pool_1"
     pool.mkdir()
-    valid = pool / "00016_张三-红果拿下了我全家-2026-10-31.mp4"
+    valid = pool / "00016|!|张三|!|红果拿下了我全家|!|2026-10-31.mp4"
     invalid = pool / "无法解析.mp4"
     valid.write_bytes(b"video")
     invalid.write_bytes(b"video")
@@ -298,7 +298,7 @@ def test_generic_scan_parses_naming_metadata_and_reports_bad_filename(tmp_path, 
 def test_builder_scan_excludes_unmatched_only_in_referenced_pool(tmp_path, monkeypatch):
     for category in ("pool_1", "pool_2"):
         (tmp_path / category).mkdir()
-    for name in ("瑞幸-咖啡-ai1.mp4", "1.mp4"):
+    for name in ("瑞幸|!|咖啡|!|ai1.mp4", "1.mp4"):
         (tmp_path / "pool_1" / name).write_bytes(b"video")
     (tmp_path / "pool_2" / "2.mp4").write_bytes(b"video")
     monkeypatch.setattr(
@@ -314,7 +314,7 @@ def test_builder_scan_excludes_unmatched_only_in_referenced_pool(tmp_path, monke
         "output": {"directory": str(tmp_path / "out"), "naming": {
             "enabled": True, "builder": {"enabled": True, "blocks": [
                 {"id": "brand", "type": "source", "category": "pool_1", "variants": [
-                    {"sample_name": "瑞幸-咖啡-ai1.mp4", "signature": "T-T-T", "token_index": 0}
+                    {"sample_name": "瑞幸|!|咖啡|!|ai1.mp4", "field_count": 3, "field_index": 0}
                 ]},
             ]},
         }},

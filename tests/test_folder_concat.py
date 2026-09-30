@@ -15,7 +15,7 @@ from smartstitch.api import create_app
 from smartstitch.config import ConfigStore
 from smartstitch.folder_concat import inspect_folders
 from smartstitch.jobs import JobManager
-from smartstitch.models import FolderConcatRequest, OutputNamingConfig
+from smartstitch.models import FolderConcatRequest, NamingBlockVariantConfig, OutputNamingConfig
 from smartstitch.scanner import probe_media
 
 
@@ -36,11 +36,11 @@ def builder_naming():
         "enabled": True, "sequence_start": 7,
         "builder": {"enabled": True, "blocks": [
             {"id": "a", "type": "source", "category": "pool_1", "variants": [
-                {"sample_name": "a.mp4", "signature": "T", "token_index": 0},
+                {"sample_name": "a.mp4", "field_count": 1, "field_index": 0},
             ]},
             {"id": "separator", "type": "text", "text": "-"},
             {"id": "b", "type": "source", "category": "pool_2", "variants": [
-                {"sample_name": "b.mp4", "signature": "T", "token_index": 0},
+                {"sample_name": "b.mp4", "field_count": 1, "field_index": 0},
             ]},
             {"id": "date", "type": "date", "date_format": "mmdd"},
             {"id": "sequence", "type": "sequence"},
@@ -116,6 +116,42 @@ def test_folder_concat_renders_a_then_b_and_records_result(tmp_path, use_builder
     assert (rendered.parent / "manifest.csv").exists()
 
 
+def test_folder_concat_reads_pipe_separator_from_both_folders(tmp_path):
+    a, b, output = tmp_path / "A", tmp_path / "B", tmp_path / "output"
+    output.mkdir()
+    source_a = a / "00006|!|周小小闹_大学宿舍_|!|标题-甲|!|2027-02-28.mp4"
+    source_b = b / "瑞幸|!|咖啡|!|广告-乙.mp4"
+    make_video(source_a, "red")
+    make_video(source_b, "blue")
+    naming = builder_naming()
+    naming.builder.blocks[0].variants = [
+        NamingBlockVariantConfig(sample_name=source_a.name, field_count=4, field_index=1),
+    ]
+    naming.builder.blocks[2].variants = [
+        NamingBlockVariantConfig(sample_name=source_b.name, field_count=3, field_index=0),
+    ]
+    # Revalidate the request as the browser/API does.
+    request = FolderConcatRequest(
+        directory_a=str(a), directory_b=str(b), output_directory=str(output),
+        naming=naming.model_dump(mode="json"),
+    )
+    preview = inspect_folders(request)
+    expected = f"周小小闹_大学宿舍_-瑞幸{date.today():%m%d}7.mp4"
+    assert preview["pairs"][0]["output_name"] == expected
+    manager = JobManager(ConfigStore(tmp_path / "config"), tmp_path / "data")
+    job = manager.create_folder_concat(request)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        job = manager.get_job(job["id"])
+        if job["status"] in {"completed", "partial_failed", "failed", "cancelled"}:
+            break
+        time.sleep(0.05)
+    assert job["status"] == "completed", [item["error"] for item in job["items"]]
+    rendered = Path(job["items"][0]["output_path"])
+    assert rendered.name == expected
+    assert probe_media(rendered).duration > 0.4
+
+
 def test_folder_concat_naming_preview_and_duplicates(tmp_path):
     a, b = tmp_path / "中文 A", tmp_path / "中文 B"
     a.mkdir()
@@ -142,7 +178,7 @@ def test_folder_concat_naming_preview_and_duplicates(tmp_path):
     assert "递增序号" in response.json()["detail"]
 
 
-@pytest.mark.parametrize("invalid", ["category", "signature", "filename"])
+@pytest.mark.parametrize("invalid", ["category", "field_count", "filename"])
 def test_folder_concat_rejects_invalid_builder_before_creating_job(tmp_path, invalid):
     a, b = tmp_path / "A", tmp_path / "B"
     a.mkdir()
@@ -152,9 +188,9 @@ def test_folder_concat_rejects_invalid_builder_before_creating_job(tmp_path, inv
     naming = builder_naming().model_dump(mode="json")
     if invalid == "category":
         naming["builder"]["blocks"][0]["category"] = "pool_3"
-    elif invalid == "signature":
+    elif invalid == "field_count":
         naming["builder"]["blocks"][0]["variants"] = [
-            {"sample_name": "123.mp4", "signature": "N", "token_index": 0},
+            {"sample_name": "123.mp4", "field_count": 2, "field_index": 0},
         ]
     else:
         naming["builder"]["blocks"][1]["text"] = "/"

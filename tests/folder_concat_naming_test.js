@@ -10,9 +10,11 @@ const context = { document: { addEventListener() {} }, crypto: webcrypto,
 };
 vm.createContext(context);
 vm.runInContext(fs.readFileSync('frontend/app.js', 'utf8') + `
-globalThis.testNaming = { state, ensureOutputNaming, renderBuilderEditor, bindBuilderControls, mountFolderConcatTool, renderFolderConcatNamingPreview };
+globalThis.testNaming = { state, ensureOutputNaming, renderBuilderEditor, bindBuilderControls, mountFolderConcatTool, renderFolderConcatNamingPreview, builderTokens };
 `, context);
 const api = context.testNaming;
+assert.deepEqual(Array.from(api.builderTokens('商品|!|开头-甲.mp4')), ['商品', '开头-甲']);
+assert.deepEqual(Array.from(api.builderTokens('达人_乙|!|结尾__001_pool-2_f0-50.mp4')), ['达人_乙', '结尾']);
 api.state.namingPicker = { category: 'pool_9', sample: '项目素材.mp4' };
 api.state.scan = { assets: { pool_1: [{ name: '项目文件.mp4' }] } };
 const local = {

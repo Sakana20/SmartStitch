@@ -10,7 +10,7 @@ import pytest
 
 from smartstitch.config import ConfigStore
 from smartstitch.library import LibraryService
-from smartstitch.models import CreateLibraryRequest, TimelineSliceRequest
+from smartstitch.models import CreateLibraryRequest, TimelineSliceRequest, naming_filename_tokens
 from smartstitch.slicer import (
     BACKGROUND_SLICE_NICE,
     SOFTWARE_VIDEO_ENCODER,
@@ -19,9 +19,56 @@ from smartstitch.slicer import (
     SliceError,
     TimelineSlicer,
     _lower_background_process_priority,
+    _safe_stem,
 )
 from smartstitch.scanner import probe_media
 from smartstitch.timeline import TimelineAnalyzer
+
+
+def test_slice_stem_preserves_business_field_separator():
+    assert _safe_stem("编号|!|周小小闹_大学宿舍_|!|标题-甲", preserve_field_separator=True) == (
+        "编号|!|周小小闹_大学宿舍_|!|标题-甲"
+    )
+    assert _safe_stem("甲|!|单个|和!都保留", preserve_field_separator=True) == "甲|!|单个|和!都保留"
+    with pytest.raises(SliceError, match="空字段"):
+        _safe_stem("甲|!||!|乙", preserve_field_separator=True)
+
+
+def test_sliced_output_keeps_field_separator(tmp_path):
+    def runner(command, **_kwargs):
+        if command[0] == "ffmpeg":
+            Path(command[-1]).write_bytes(b"rendered")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"streams": [{"codec_type": "video"}]}),
+            stderr="",
+        )
+
+    slicer, analysis_id, revision, config_hash = setup_slicer(tmp_path, runner)
+    source = tmp_path / "原始 视频.mp4"
+    renamed = source.with_name("00006|!|周小小闹_大学宿舍_|!|标题-甲|!|2027-02-28.mp4")
+    source.rename(renamed)
+    analysis_path = slicer.timeline_analyzer.data_directory / f"{analysis_id}.json"
+    analysis = json.loads(analysis_path.read_text())
+    analysis["source_path"] = str(renamed)
+    analysis_path.write_text(json.dumps(analysis, ensure_ascii=False))
+
+    result = slicer.export(TimelineSliceRequest(
+        analysis_id=analysis_id,
+        config_id="slice-library",
+        review_revision=revision,
+        current_config_hash=config_hash,
+        client_request_id="slice-pipe-separator",
+        assignments=[{"segment_index": 1, "category": "hook"}],
+    ))
+
+    assert result["ok"] is True
+    output_name = Path(result["items"][0]["output_path"]).name
+    assert output_name.startswith(renamed.stem + "__001_hook_")
+    assert naming_filename_tokens(output_name) == [
+        "00006", "周小小闹_大学宿舍_", "标题-甲", "2027-02-28",
+    ]
 
 
 def setup_slicer(tmp_path, runner):

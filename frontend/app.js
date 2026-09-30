@@ -5825,7 +5825,7 @@ function ensureOutputNaming(config) {
       source_metadata: {
         categories: ["pool_*"],
         strip_smartstitch_suffix: true,
-        pattern: "^(?P<source_index>\\d+)_(?P<talent>[^-]+)-(?P<source_title>.+)-(?P<restriction_date>\\d{4}-\\d{2}-\\d{2})$",
+        pattern: "^(?P<source_index>\\d+)\\|!\\|(?P<talent>.+?)\\|!\\|(?P<source_title>.+?)\\|!\\|(?P<restriction_date>\\d{4}-\\d{2}-\\d{2})$",
         restriction_date_formats: ["%Y-%m-%d"],
         on_unmatched: "error",
       },
@@ -5993,7 +5993,11 @@ function parseNamingDate(value, formats) {
 function parseNamingAsset(config, asset) {
   const naming = ensureOutputNaming(config);
   let stem = asset.name.replace(/\.[^.]+$/, "");
-  if (naming.source_metadata.strip_smartstitch_suffix) stem = stem.split("__", 1)[0];
+  if (naming.source_metadata.strip_smartstitch_suffix) stem = stripBuilderSliceSuffix(stem);
+  if (!stem.includes("|!|")) throw new Error("素材文件名未使用 |!| 字段分隔符");
+  const fields = builderTokens(asset.name);
+  if (!fields.length) throw new Error("素材文件名包含空字段或连续分隔符 |!|");
+  if (fields.length !== 4) throw new Error(`素材文件名应包含 4 个 |!| 分隔字段，实际为 ${fields.length} 个`);
   const browserPattern = naming.source_metadata.pattern.replaceAll("(?P<", "(?<");
   const match = stem.match(new RegExp(browserPattern));
   const talent = match?.groups?.talent?.trim();
@@ -6035,16 +6039,14 @@ function namingExample(config) {
     .replace(/\{(product|benefit|talents|restriction_date|sequence)(?::[^}]*)?\}/g, (_, key) => values[key]);
 }
 
-function builderTokens(filename) {
-  const stem = String(filename || "").replace(/\.[^.]+$/, "").split("__", 1)[0];
-  return stem.match(/\d{4}-\d{2}-\d{2}|\d{8}|[^_-]+|[_-]/g) || [];
+function stripBuilderSliceSuffix(stem) {
+  return stem.replace(/__(?:\d{3}|g\d{3})_[A-Za-z0-9-]+_(?:f\d+-\d+|p\d{3}-\d{3})(?:-v\d+)?$/, "");
 }
 
-function builderSignature(tokens) {
-  return tokens.map(token => token === "-" || token === "_" ? token
-    : /^\d{4}-\d{2}-\d{2}$/.test(token) ? "D"
-    : /^\d{8}$/.test(token) ? "E"
-    : /^\d+$/.test(token) ? "N" : "T").join("");
+function builderTokens(filename) {
+  const stem = stripBuilderSliceSuffix(String(filename || "").replace(/\.[^.]+$/, ""));
+  const fields = stem.split("|!|").map(value => value.trim());
+  return fields.some(value => !value) ? [] : fields;
 }
 
 function builderPicker(config, context = state) {
@@ -6073,7 +6075,7 @@ function renderBuilderEditor(config, context = state) {
   const sourceTargets = blocks.filter(block => block.type === "source" && block.category === picker.category);
   const cards = blocks.map((block, index) => {
     const title = block.type === "source"
-      ? `${config.sources[block.category]?.label || block.category}：${builderTokens(block.variants[0]?.sample_name || "")[block.variants[0]?.token_index] || "片段"}`
+      ? `${config.sources[block.category]?.label || block.category}：${builderTokens(block.variants[0]?.sample_name || "")[block.variants[0]?.field_index] || "片段"}`
       : block.type === "sequence" ? "序号" : block.type === "date" ? "当天日期" : "自填文字";
     const body = block.type === "text"
       ? `<input data-builder-text="${escapeHtml(block.id)}" value="${escapeHtml(block.text)}" aria-label="自填文字">`
@@ -6086,8 +6088,8 @@ function renderBuilderEditor(config, context = state) {
   }).join("");
   return `<div class="builder-editor">
     <div class="builder-picker"><strong>1. 从文件名选片段</strong><div class="builder-picker-row"><label>素材库<select id="builderPool">${config.timeline.filter(category => config.sources[category]?.mode !== "disabled").map(category => `<option value="${escapeHtml(category)}" ${category === picker.category ? "selected" : ""}>${escapeHtml(config.sources[category]?.label || category)}</option>`).join("")}</select></label><label>文件名<select id="builderSample" ${sampleNames.length ? "" : "disabled"}>${sampleNames.length ? sampleNames.map(name => `<option value="${escapeHtml(name)}" ${name === picker.sample ? "selected" : ""}>${escapeHtml(name)}</option>`).join("") : '<option value="">该素材库暂无已扫描文件</option>'}</select></label></div>
-      <div class="builder-tokens">${tokens.map((token, index) => token === "-" || token === "_" ? `<span>${escapeHtml(token)}</span>` : `<button type="button" class="builder-token ${picker.tokenIndex === index ? "active" : ""}" data-builder-token="${index}">${escapeHtml(token)}</button>`).join("") || '<small>请选择一个文件名</small>'}</div>
-      <div class="builder-picker-row">${picker.replaceId ? '<small>正在重选已有字段块的来源与片段</small>' : `<label>添加方式<select id="builderTarget"><option value="">新建素材字段块</option>${sourceTargets.map(block => `<option value="${escapeHtml(block.id)}" ${picker.targetId === block.id ? "selected" : ""}>给“${escapeHtml(builderTokens(block.variants[0]?.sample_name || "")[block.variants[0]?.token_index] || "片段")}”增加格式</option>`).join("")}</select></label>`}<button id="builderAddSource" type="button" class="button secondary small" ${sampleNames.length ? "" : "disabled"}>${picker.replaceId ? "保存字段来源" : "添加所选片段"}</button></div>
+      <div class="builder-tokens">${tokens.map((token, index) => `<button type="button" class="builder-token ${picker.tokenIndex === index ? "active" : ""}" data-builder-token="${index}">${escapeHtml(token)}</button>`).join("") || `<small>${picker.sample ? "文件名包含空字段或连续分隔符 |!|" : "请选择一个文件名"}</small>`}</div>
+      <div class="builder-picker-row">${picker.replaceId ? '<small>正在重选已有字段块的来源与片段</small>' : `<label>添加方式<select id="builderTarget"><option value="">新建素材字段块</option>${sourceTargets.map(block => `<option value="${escapeHtml(block.id)}" ${picker.targetId === block.id ? "selected" : ""}>给“${escapeHtml(builderTokens(block.variants[0]?.sample_name || "")[block.variants[0]?.field_index] || "片段")}”增加格式</option>`).join("")}</select></label>`}<button id="builderAddSource" type="button" class="button secondary small" ${sampleNames.length ? "" : "disabled"}>${picker.replaceId ? "保存字段来源" : "添加所选片段"}</button></div>
     </div>
     <div class="builder-canvas"><strong>2. 拼接文件名</strong><small>拖动块调整顺序；文字可直接修改。扩展名 .mp4 自动添加。</small><div class="builder-block-list">${cards || '<div class="simple-empty-state">先添加一个素材片段或文字块</div>'}</div>
       <div class="builder-toolbar"><input id="builderNewText" placeholder="输入任意文字，例如最高25元红包"><button id="builderAddText" type="button" class="button secondary small">＋ 文字块</button><button id="builderAddSeparator" type="button" class="button secondary small">＋ 分隔符 -</button><button id="builderAddDate" type="button" class="button secondary small">＋ 日期 MMDD</button><button id="builderAddSequence" type="button" class="button secondary small" ${blocks.some(block => block.type === "sequence") ? "disabled" : ""}>＋ 序号</button></div>
@@ -6140,10 +6142,10 @@ function bindBuilderControls(options = {}) {
     const sampleName = $("#builderSample")?.value.trim() || "";
     const tokens = builderTokens(sampleName);
     if (!picker.category || picker.tokenIndex < 0 || !tokens[picker.tokenIndex]) {
-      toast("请先选择素材库、文件名和一个片段", true); return;
+      toast(tokens.length ? "请先选择素材库、文件名和一个片段" : "文件名包含空字段或连续分隔符 |!|", true); return;
     }
     const variant = {
-      sample_name: sampleName, signature: builderSignature(tokens), token_index: picker.tokenIndex,
+      sample_name: sampleName, field_count: tokens.length, field_index: picker.tokenIndex,
     };
     const replacement = blocks.find(block => block.id === picker.replaceId && block.type === "source");
     if (replacement) {
@@ -6157,7 +6159,7 @@ function bindBuilderControls(options = {}) {
     const targetId = $("#builderTarget")?.value || "";
     const target = blocks.find(block => block.id === targetId && block.category === picker.category);
     if (target) {
-      if (target.variants.some(item => item.signature === variant.signature)) {
+      if (target.variants.some(item => item.field_count === variant.field_count)) {
         toast("这个文件名格式已有规则，可删除原块后重新选择片段", true); return;
       }
       target.variants.push(variant);
@@ -6211,7 +6213,7 @@ function bindBuilderControls(options = {}) {
     const block = blocks.find(item => item.id === button.dataset.builderRepick);
     if (!block) return;
     context.namingPicker = { category: block.category, sample: block.variants[0].sample_name,
-      tokenIndex: block.variants[0].token_index, targetId: "", replaceId: block.id };
+      tokenIndex: block.variants[0].field_index, targetId: "", replaceId: block.id };
     rerender();
   }));
   $$('[data-builder-move]').forEach(button => button.addEventListener("click", () => {

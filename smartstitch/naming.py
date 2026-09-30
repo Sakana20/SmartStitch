@@ -11,8 +11,8 @@ from .models import (
     NamingSourceRecord,
     PlanNamingMetadata,
     NamingBlockConfig,
-    naming_filename_signature,
     naming_filename_tokens,
+    naming_source_stem,
 )
 
 
@@ -28,28 +28,16 @@ def filename_tokens(filename: str) -> list[str]:
     return naming_filename_tokens(filename)
 
 
-def filename_signature(tokens: list[str]) -> str:
-    return naming_filename_signature(tokens)
-
-
 def source_block_value(block: NamingBlockConfig, asset: Asset) -> str:
-    tokens = filename_tokens(asset.name)
-    signature = filename_signature(tokens)
-    compatible = [
-        item for item in block.variants
-        if len(tokens) > item.token_index
-        and signature[:item.token_index + 1] == item.signature[:item.token_index + 1]
-        and (
-            len(signature) <= item.token_index + 1
-            or len(item.signature) <= item.token_index + 1
-            or signature[item.token_index + 1] == item.signature[item.token_index + 1]
-        )
-    ]
-    variant = max(compatible, key=lambda item: (item.signature == signature, item.token_index), default=None)
+    try:
+        tokens = filename_tokens(asset.name)
+    except ValueError as exc:
+        raise NamingError(f"{asset.name}: {exc}") from exc
+    variant = next((item for item in block.variants if item.field_count == len(tokens)), None)
     if variant is None:
-        raise NamingError(f"{asset.name}: 缺少选定片段或前面字段的分隔方式不匹配")
-    value = tokens[variant.token_index].strip()
-    if not value or value in {"-", "_"}:
+        raise NamingError(f"{asset.name}: 字段数量 {len(tokens)} 与命名规则不匹配")
+    value = tokens[variant.field_index].strip()
+    if not value:
         raise NamingError(f"{asset.name}: 选定的文件名片段为空")
     return value
 
@@ -135,9 +123,15 @@ def _parse_restriction_date(value: str, formats: list[str]) -> date:
 
 def parse_asset_naming(config: AppConfig, asset: Asset) -> AssetNamingMetadata:
     settings = config.output.naming.source_metadata
-    source_stem = Path(asset.name).stem
-    if settings.strip_smartstitch_suffix:
-        source_stem = source_stem.split("__", 1)[0]
+    source_stem = naming_source_stem(asset.name) if settings.strip_smartstitch_suffix else Path(asset.name).stem
+    if "|!|" not in source_stem:
+        raise NamingError("素材文件名未使用 |!| 字段分隔符")
+    try:
+        fields = naming_filename_tokens(asset.name)
+    except ValueError as exc:
+        raise NamingError(str(exc)) from exc
+    if len(fields) != 4:
+        raise NamingError(f"素材文件名应包含 4 个 |!| 分隔字段，实际为 {len(fields)} 个")
     match = re.fullmatch(settings.pattern, source_stem)
     if match is None:
         raise NamingError("文件名不符合解析规则")

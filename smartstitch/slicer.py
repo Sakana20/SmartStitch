@@ -66,7 +66,15 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _safe_stem(value: str) -> str:
+def _safe_stem(value: str, *, preserve_field_separator: bool = False) -> str:
+    if preserve_field_separator:
+        fields = value.split("|!|")
+        if any(not field.strip() for field in fields):
+            raise SliceError("源文件名包含空字段或连续分隔符 |!|")
+        cleaned = [re.sub(r"[^\w.|!-]+", "_", field, flags=re.UNICODE).strip(".") for field in fields]
+        if any(not field for field in cleaned):
+            raise SliceError("源文件名清洗后包含空字段")
+        return "|!|".join(cleaned)
     cleaned = re.sub(r"[^\w.-]+", "_", value, flags=re.UNICODE).strip("._")
     return cleaned or "video"
 
@@ -307,7 +315,7 @@ class TimelineSlicer:
                 "fallback_reason": None,
             },
         }
-        source_stem = _safe_stem(source.stem)
+        source_stem = _safe_stem(source.stem, preserve_field_separator=True)
         for assignment in normalized_assignments:
             unit_index = int(assignment["unit_index"])
             category = str(assignment["category"])

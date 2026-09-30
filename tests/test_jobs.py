@@ -209,7 +209,7 @@ def test_generic_job_renders_dynamic_timeline_and_labelled_manifest(tmp_path):
 def test_generic_job_uses_business_filename_and_exports_naming_metadata(tmp_path):
     source = tmp_path / "source"
     generate_clip(
-        source / "pool_1" / "00016_张三-红果拿下了我全家-2026-10-31.mp4",
+        source / "pool_1" / "00016|!|张三|!|红果拿下了我全家|!|2026-10-31.mp4",
         "red",
     )
     config_directory = tmp_path / "config"

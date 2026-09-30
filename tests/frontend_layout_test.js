@@ -463,15 +463,17 @@ assert.doesNotMatch(app, /<datalist id="builderSampleList"/, "文件名不应使
 assert.ok(["function bindBuilderControls(options = {})", "data-builder-text", "dragstart", "naming-builder-preview"].every(value => app.includes(value)), "积木编辑器必须能编辑、拖动并进行实际命名预览");
 assert.doesNotMatch(app, /data-builder-role|BUILDER_ROLE_OPTIONS|飞书字段/, "文件名积木编辑器不应展示飞书字段映射");
 assert.doesNotMatch(app, /data-builder-date-format|日期显示/, "文件名积木编辑器不应展示日期格式选择器");
-const builderTokenHelpers = app.match(/function builderTokens\(filename\) \{[\s\S]*?\n\}\n\nfunction builderPicker/)?.[0].replace(/\n\nfunction builderPicker$/, "");
+const builderTokenHelpers = app.match(/function stripBuilderSliceSuffix\(stem\) \{[\s\S]*?\n\}\n\nfunction builderPicker/)?.[0].replace(/\n\nfunction builderPicker$/, "");
 assert.ok(builderTokenHelpers);
-const builderHelpers = vm.runInNewContext(`${builderTokenHelpers}; ({ builderTokens, builderSignature })`);
-assert.equal(builderHelpers.builderSignature(builderHelpers.builderTokens("瑞幸-咖啡-ai1.mp4")), "T-T-T");
-assert.equal(builderHelpers.builderSignature(builderHelpers.builderTokens("通用-热菜-烤鸭.mp4")), "T-T-T");
-const builderEditorSource = app.match(/function builderTokens\(filename\) \{[\s\S]*?\n\}\n\nfunction globalVisualBordersForDraft/)?.[0].replace(/\n\nfunction globalVisualBordersForDraft$/, "");
+const builderHelpers = vm.runInNewContext(`${builderTokenHelpers}; ({ builderTokens })`);
+assert.deepEqual(Array.from(builderHelpers.builderTokens("瑞幸|!|咖啡|!|ai1.mp4")), ["瑞幸", "咖啡", "ai1"]);
+assert.deepEqual(Array.from(builderHelpers.builderTokens("通用|!|热菜|!|烤鸭.mp4")), ["通用", "热菜", "烤鸭"]);
+assert.deepEqual(Array.from(builderHelpers.builderTokens("甲__内部|!|乙__g003_pool-8_p007-009.mp4")), ["甲__内部", "乙"]);
+assert.deepEqual(Array.from(builderHelpers.builderTokens("甲|!||!|乙.mp4")), []);
+const builderEditorSource = app.match(/function stripBuilderSliceSuffix\(stem\) \{[\s\S]*?\n\}\n\nfunction globalVisualBordersForDraft/)?.[0].replace(/\n\nfunction globalVisualBordersForDraft$/, "");
 assert.ok(builderEditorSource);
 const builderEditor = vm.runInNewContext(`${builderEditorSource}; renderBuilderEditor`, {
-  state: { namingPicker: null, scan: { assets: { pool_1: [{ name: "瑞幸-咖啡-ai1.mp4" }] } } },
+  state: { namingPicker: null, scan: { assets: { pool_1: [{ name: "瑞幸|!|咖啡|!|ai1.mp4" }] } } },
   ensureOutputNaming: config => config.output.naming,
   escapeHtml: value => String(value),
 });
@@ -484,7 +486,7 @@ const builderMarkupWithRole = builderEditor({
   timeline: ["pool_1"], sources: { pool_1: { label: "前贴", mode: "required" } },
   output: { naming: { sequence_start: 1, builder: { blocks: [
     { id: "brand", type: "source", category: "pool_1", role: "product",
-      variants: [{ sample_name: "瑞幸-咖啡-ai1.mp4", token_index: 0 }] },
+      variants: [{ sample_name: "瑞幸|!|咖啡|!|ai1.mp4", field_count: 3, field_index: 0 }] },
     { id: "today", type: "date", date_format: "mmdd", role: "" },
   ] } } },
 });

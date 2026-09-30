@@ -266,14 +266,14 @@ def test_builder_preview_uses_unsaved_blocks_and_actual_selected_asset(tmp_path,
         "enabled": True,
         "builder": {"enabled": True, "blocks": [
             {"id": "brand", "type": "source", "category": "pool_1", "role": "product",
-             "variants": [{"sample_name": "瑞幸-咖啡-ai1.mp4", "signature": "T-T-T", "token_index": 0}]},
+             "variants": [{"sample_name": "瑞幸|!|咖啡|!|ai1.mp4", "field_count": 3, "field_index": 0}]},
             {"id": "dash", "type": "text", "text": "-"},
             {"id": "offer", "type": "text", "text": "最高25元红包", "role": "benefit"},
         ]},
     })
     actual = Asset(
-        id="actual", category="pool_1", path=str(tmp_path / "pool_1" / "通用-热菜-烤鸭.mp4"),
-        name="通用-热菜-烤鸭.mp4", media_type="video",
+        id="actual", category="pool_1", path=str(tmp_path / "pool_1" / "通用|!|热菜|!|烤鸭.mp4"),
+        name="通用|!|热菜|!|烤鸭.mp4", media_type="video",
         probe=MediaProbe(duration=1, width=720, height=1280),
     )
     monkeypatch.setattr(api_module, "scan_config", lambda *_args, **_kwargs: ScanResult(

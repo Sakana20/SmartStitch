@@ -209,7 +209,7 @@ output:
       # SmartStitch 切片会保留原文件名并添加 __片段信息，开启后只解析前缀。
       strip_smartstitch_suffix: true
       # 必须包含 talent 和 restriction_date 命名分组。
-      pattern: '^(?P<source_index>\d+)_(?P<talent>[^-]+)-(?P<source_title>.+)-(?P<restriction_date>\d{4}-\d{2}-\d{2})$'
+      pattern: '^(?P<source_index>\d+)\|!\|(?P<talent>.+?)\|!\|(?P<source_title>.+?)\|!\|(?P<restriction_date>\d{4}-\d{2}-\d{2})$'
       restriction_date_formats: ["%Y-%m-%d"]
       on_unmatched: error
     talent:

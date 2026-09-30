@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from smartstitch.models import AppConfig, Asset, MediaProbe, ScanResult, SourceMode
 from smartstitch.naming import (
-    NamingError, derive_plan_naming, filename_signature, filename_tokens, parse_asset_naming,
+    NamingError, derive_plan_naming, filename_tokens, parse_asset_naming,
     render_plan_filename,
     source_block_value,
 )
@@ -56,6 +56,24 @@ def naming_asset(category: str, filename: str) -> Asset:
     )
 
 
+def test_field_separator_preserves_content_and_only_strips_real_slice_suffix():
+    name = "00006|!|周小小闹_大学宿舍_|!|标题-甲__内部|!|2027-02-28__001_pool-8_f0-1658-v2.mp4"
+    assert filename_tokens(name) == ["00006", "周小小闹_大学宿舍_", "标题-甲__内部", "2027-02-28"]
+    assert filename_tokens("甲__普通文字|!|乙.mp4") == ["甲__普通文字", "乙"]
+    assert filename_tokens("甲|!|乙__g003_pool-8_p007-009.mp4") == ["甲", "乙"]
+    for invalid in ("甲|!||!|乙.mp4", "|!|甲.mp4", "甲|!|.mp4"):
+        with pytest.raises(ValueError, match="空字段"):
+            filename_tokens(invalid)
+
+
+def test_legacy_metadata_requires_four_new_fields(tmp_path):
+    with pytest.raises(NamingError, match="4 个"):
+        parse_asset_naming(
+            naming_config(tmp_path),
+            naming_asset("pool_1", "00016|!|张三|!|标题|!|附加|!|2026-10-31.mp4"),
+        )
+
+
 def test_generic_dynamic_naming_uses_timeline_order_earliest_date_and_sequence(tmp_path):
     config = naming_config(tmp_path)
     scan = ScanResult(
@@ -64,13 +82,13 @@ def test_generic_dynamic_naming_uses_timeline_order_earliest_date_and_sequence(t
             "pool_1": [
                 naming_asset(
                     "pool_1",
-                    "00016_张三-红果拿下了我全家-2026-10-31__001_pool-1_f0-10.mp4",
+                    "00016|!|张三|!|红果拿下了我全家|!|2026-10-31__001_pool-1_f0-10.mp4",
                 )
             ],
             "pool_2": [
                 naming_asset(
                     "pool_2",
-                    "00018_李四-红果拿下了我全家-2026-10-20__002_pool-2_f10-20.mp4",
+                    "00018|!|李四|!|红果拿下了我全家|!|2026-10-20__002_pool-2_f10-20.mp4",
                 )
             ],
             "benefit_overlay": [],
@@ -94,14 +112,13 @@ def test_generic_dynamic_naming_uses_timeline_order_earliest_date_and_sequence(t
 
 def test_builder_uses_selected_asset_segments_and_editable_text(tmp_path):
     data = naming_config(tmp_path).model_dump(mode="json")
-    names = ["瑞幸-咖啡-ai1.mp4", "通用-热菜-烤鸭.mp4"]
-    signature = filename_signature(filename_tokens(names[0]))
+    names = ["瑞幸|!|咖啡|!|ai1.mp4", "通用|!|热菜|!|烤鸭.mp4"]
     blocks = [
         {"id": "brand", "type": "source", "category": "pool_1", "role": "product",
-         "variants": [{"sample_name": names[0], "signature": signature, "token_index": 0}]},
+         "variants": [{"sample_name": names[0], "field_count": 3, "field_index": 0}]},
         {"id": "dash1", "type": "text", "text": "-"},
         {"id": "category", "type": "source", "category": "pool_1",
-         "variants": [{"sample_name": names[0], "signature": signature, "token_index": 2}]},
+         "variants": [{"sample_name": names[0], "field_count": 3, "field_index": 1}]},
         {"id": "dash2", "type": "text", "text": "-"},
         {"id": "offer", "type": "text", "text": "最高25元红包", "role": "benefit"},
         {"id": "dash3", "type": "text", "text": "-"},
@@ -132,49 +149,52 @@ def test_builder_uses_selected_asset_segments_and_editable_text(tmp_path):
     assert changed.naming.benefit == "买一送一"
 
 
-def test_builder_selected_fields_accept_extra_filename_segments(tmp_path):
+def test_builder_selected_fields_require_matching_field_count(tmp_path):
     from smartstitch.models import NamingBlockConfig
 
-    sample = "沪上阿姨-奶茶-店员.mp4"
-    actual = naming_asset("pool_1", "霸王茶姬-奶茶-店员-优惠价.mp4")
-    signature = filename_signature(filename_tokens(sample))
-    for token_index, expected in ((0, "霸王茶姬"), (2, "奶茶")):
+    sample = "沪上阿姨|!|奶茶|!|店员.mp4"
+    actual = naming_asset("pool_1", "霸王茶姬|!|奶茶|!|店员|!|优惠价.mp4")
+    for token_index, expected in ((0, "霸王茶姬"), (1, "奶茶")):
         block = NamingBlockConfig.model_validate({
             "id": f"field-{token_index}", "type": "source", "category": "pool_1",
-            "variants": [{"sample_name": sample, "signature": signature, "token_index": token_index}],
+            "variants": [{"sample_name": sample, "field_count": 3, "field_index": token_index}],
         })
+        with pytest.raises(NamingError, match="字段数量"):
+            source_block_value(block, actual)
+        block.variants.append(NamingBlockConfig.model_validate({
+            "id": "extra", "type": "source", "category": "pool_1",
+            "variants": [{"sample_name": actual.name, "field_count": 4, "field_index": token_index}],
+        }).variants[0])
         assert source_block_value(block, actual) == expected
-        with pytest.raises(NamingError):
-            source_block_value(block, naming_asset("pool_1", "霸王茶姬_奶茶.mp4"))
 
 
 def test_builder_date_fragment_and_missing_format(tmp_path):
     config = naming_config(tmp_path)
-    sample = "00016_磊金夫妇-红果拿下了我全家-2027-05-17__001_pool-1_f0-10.mp4"
+    sample = "00016|!|磊金夫妇|!|红果拿下了我全家|!|2027-05-17__001_pool-1_f0-10.mp4"
     tokens = filename_tokens(sample)
-    assert tokens[2] == "磊金夫妇"
-    assert tokens[6] == "2027-05-17"
+    assert tokens[1] == "磊金夫妇"
+    assert tokens[3] == "2027-05-17"
     from smartstitch.models import NamingBlockConfig
     block = NamingBlockConfig.model_validate({
         "id": "date", "type": "source", "category": "pool_1",
-        "variants": [{"sample_name": sample, "signature": filename_signature(tokens), "token_index": 6}],
+        "variants": [{"sample_name": sample, "field_count": 4, "field_index": 3}],
     })
     assert source_block_value(block, naming_asset("pool_1", sample)) == "2027-05-17"
-    with pytest.raises(NamingError, match="片段"):
+    with pytest.raises(NamingError, match="字段数量"):
         source_block_value(block, naming_asset("pool_1", "1.mp4"))
 
     data = config.model_dump(mode="json")
-    variant = {"sample_name": sample, "signature": filename_signature(tokens)}
+    variant = {"sample_name": sample, "field_count": 4}
     data["output"]["naming"]["builder"] = {"enabled": True, "blocks": [
         {"id": "product", "type": "text", "text": "红果短剧", "role": "product"},
         {"id": "sep1", "type": "text", "text": "-"},
         {"id": "benefit", "type": "text", "text": "功能综述", "role": "benefit"},
         {"id": "sep2", "type": "text", "text": "-"},
         {"id": "talent", "type": "source", "category": "pool_1", "role": "talent",
-         "variants": [{**variant, "token_index": 2}]},
+         "variants": [{**variant, "field_index": 1}]},
         {"id": "sep3", "type": "text", "text": "-"},
         {"id": "date", "type": "source", "category": "pool_1", "role": "restriction_date",
-         "date_format": "compact", "variants": [{**variant, "token_index": 6}]},
+         "date_format": "compact", "variants": [{**variant, "field_index": 3}]},
         {"id": "sep4", "type": "text", "text": "-"},
         {"id": "sequence", "type": "sequence"},
     ]}
@@ -208,7 +228,7 @@ def test_explicit_naming_pools_exclude_other_stitched_pools(tmp_path):
     scan = ScanResult(
         config_id=config.id,
         assets={
-            "pool_1": [naming_asset("pool_1", "00016_张三-中间文案-2026-10-31.mp4")],
+            "pool_1": [naming_asset("pool_1", "00016|!|张三|!|中间文案|!|2026-10-31.mp4")],
             "pool_2": [naming_asset("pool_2", "不需解析.mp4")],
             "benefit_overlay": [],
         },
@@ -247,8 +267,8 @@ def test_sequence_can_start_from_configured_number(tmp_path):
     scan = ScanResult(
         config_id=config.id,
         assets={
-            "pool_1": [naming_asset("pool_1", "00016_张三-中间文案-2026-10-31.mp4")],
-            "pool_2": [naming_asset("pool_2", "00018_李四-中间文案-2026-10-20.mp4")],
+            "pool_1": [naming_asset("pool_1", "00016|!|张三|!|中间文案|!|2026-10-31.mp4")],
+            "pool_2": [naming_asset("pool_2", "00018|!|李四|!|中间文案|!|2026-10-20.mp4")],
             "benefit_overlay": [],
         },
     )
@@ -265,7 +285,7 @@ def test_naming_rejects_invalid_date_and_non_generic_enablement(tmp_path):
     with pytest.raises(NamingError, match="无效的限制日期"):
         parse_asset_naming(
             config,
-            naming_asset("pool_1", "00016_张三-中间文案-2026-02-30.mp4"),
+            naming_asset("pool_1", "00016|!|张三|!|中间文案|!|2026-02-30.mp4"),
         )
 
     legacy = config.model_dump(mode="json")
@@ -296,12 +316,12 @@ def test_naming_template_requires_all_business_fields(tmp_path):
     ("filename", "talent", "restriction_date"),
     [
         (
-            "00016_小慧不大乖-红果拿下了我全家-2026-11-14__002_pool-8_f3-1327.mp4",
+            "00016|!|小慧不大乖|!|红果拿下了我全家|!|2026-11-14__002_pool-8_f3-1327.mp4",
             "小慧不大乖",
             "2026-11-14",
         ),
         (
-            "00018_磊金夫妇-红果拿下了我全家-2027-05-17__001_pool-8_f0-1391.mp4",
+            "00018|!|磊金夫妇|!|红果拿下了我全家|!|2027-05-17__001_pool-8_f0-1391.mp4",
             "磊金夫妇",
             "2027-05-17",
         ),
