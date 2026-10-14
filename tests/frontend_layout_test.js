@@ -16,13 +16,20 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20261013-folder-naming"/,
+  /href="\/styles\.css\?v=20261014-auto-black-time"/,
   "前端交互或样式更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|render-eta\.js|app\.js)\?v=([^"]+)/g)]
   .map(match => match[1]);
 assert.equal(staticVersions.length, 4, "四个前端静态资源都必须声明缓存版本");
 assert.equal(new Set(staticVersions).size, 1, "CSS 与 JS 必须使用同一个发布版本，避免新旧资源混用");
+assert.match(app, /id: "auto-video-split"[\s\S]*?mount: mountAutoVideoSplitTool/, "自动分割视频卡片必须可打开");
+assert.match(app, /function mountAutoVideoSplitTool\(container\)[\s\S]*?\/tools\/auto-video-split\/preview/, "自动分割视频必须检测并预览实际分段");
+assert.match(app, /id="autoSplitNamingEnabled"[\s\S]*?bindBuilderControls\(\{ context: namingContext/, "自动分割应复用积木命名编辑器");
+assert.doesNotMatch(app, /自动分割视频即将加入/, "自动分割不再显示占位页面");
+const autoSplitTool = app.match(/function mountAutoVideoSplitTool\(container\)[\s\S]*?\n\}\n\nfunction mountSettingsTool/)?.[0] || "";
+assert.doesNotMatch(autoSplitTool, /autoSplitBlackSeconds|minimum_black_seconds:/, "自动分割默认不应要求填写黑屏秒数");
+assert.match(autoSplitTool, /查看每处黑屏的起止时间/, "分段预览应显示检测到的实际黑屏时间");
 assert.match(app, /id: "batch-dedup"[\s\S]*?mount: mountBatchDedupTool/, "批量去重卡片必须可打开");
 assert.match(app, /const availableDestinations = \(\) => \[[\s\S]*?effectLibraries\.map\(library =>/, "ProRes 保存位置必须从视觉特效库列表动态生成");
 assert.match(app, /function mountBatchDedupTool\(container\)[\s\S]*?\/tools\/batch-dedup/, "批量去重面板必须提交后端任务");

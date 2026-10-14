@@ -71,6 +71,7 @@ from .models import (
     FeishuConnectionTestRequest,
     FeishuSettingsUpdateRequest,
     FolderConcatRequest,
+    AutoVideoSplitRequest,
     GlobalVisualEffectLibraryCreateRequest,
     GlobalVisualEffectLibraryUpdateRequest,
     GlobalVisualBorderUpdateRequest,
@@ -1750,6 +1751,20 @@ def create_app(
         try:
             return job_manager.create_batch_dedup(request)
         except (ConfigError, FileNotFoundError, PlanError, ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/auto-video-split/preview")
+    def preview_auto_video_split(request: AutoVideoSplitRequest) -> dict[str, object]:
+        try:
+            return job_manager.preview_auto_video_split(request)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/auto-video-split")
+    def create_auto_video_split(request: AutoVideoSplitRequest) -> dict[str, object]:
+        try:
+            return job_manager.create_auto_video_split(request)
+        except (ValueError, OSError, RuntimeError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.post("/api/v1/tools/folder-concat/preview")

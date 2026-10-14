@@ -1149,6 +1149,25 @@ class FolderConcatOverlayConfig(BaseModel):
         return self
 
 
+class AutoVideoSplitRequest(BaseModel):
+    source_file: str
+    output_directory: str | None = None
+    minimum_black_seconds: float | None = Field(default=None, ge=0.1, le=600, allow_inf_nan=False)
+    pixel_threshold: float = Field(default=0.10, ge=0, le=1, allow_inf_nan=False)
+    picture_threshold: float = Field(default=0.98, gt=0, le=1, allow_inf_nan=False)
+    sequence_start: int = Field(default=1, ge=1, le=999999)
+    naming: OutputNamingConfig | None = None
+
+    _normalize_source = field_validator("source_file", mode="before")(normalize_path_input)
+    _normalize_output = field_validator("output_directory", mode="before")(normalize_path_input)
+
+    @model_validator(mode="after")
+    def validate_naming(self) -> AutoVideoSplitRequest:
+        if self.naming and self.naming.enabled and not self.naming.builder.enabled:
+            raise ValueError("自动分割视频请使用积木命名")
+        return self
+
+
 class FolderConcatRequest(BaseModel):
     directory_a: str
     directory_b: str

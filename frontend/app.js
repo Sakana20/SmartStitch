@@ -134,6 +134,7 @@ const toolboxTools = [
   { id: "portrait-to-landscape", title: "竖改横", description: "批量转为横屏，清晰原画面叠加模糊背景。", cover: "/assets/tools/portrait-to-landscape.svg?v=2", order: 8, mount: mountLandscapeTool },
   { id: "folder-concat", title: "文件夹拼接", description: "选择两个文件夹，批量拼接视频。", cover: "/assets/tools/folder-concat.svg", order: 10, mount: mountFolderConcatTool },
   { id: "batch-dedup", title: "批量去重", description: "选择文件夹，逐条应用现有视觉去重效果。", cover: "/assets/tools/batch-dedup.svg", order: 20, mount: mountBatchDedupTool },
+  { id: "auto-video-split", title: "自动分割视频", description: "按持续黑屏分割视频，支持积木命名。", cover: "/assets/tools/auto-video-split.svg", order: 25, mount: mountAutoVideoSplitTool },
   { id: "settings", title: "设置", description: "应用偏好与设置，更多选项即将加入。", cover: "/assets/tools/settings.svg", order: 30, mount: mountSettingsTool },
 ];
 let toolboxCleanup = null;
@@ -1359,6 +1360,142 @@ function mountUserManagementTool(container) {
     } catch (error) { showError(error); }
   });
   refresh();
+}
+
+function mountAutoVideoSplitTool(container) {
+  let disposed = false;
+  let revision = 0;
+  let preview = null;
+  const namingContext = {
+    configDraft: { timeline: ["pool_1"], sources: { pool_1: { label: "源视频", mode: "required" } }, output: {} },
+    scan: { assets: {} }, namingPicker: null,
+  };
+  const naming = ensureOutputNaming(namingContext.configDraft);
+  naming.builder.blocks = [{ id: crypto.randomUUID(), type: "sequence", category: "", variants: [], text: "", role: "", date_format: "raw" }];
+  container.innerHTML = `<div class="folder-concat-tool auto-video-split-tool">
+    <label class="field"><span>源视频</span><div class="directory-picker-row">
+      <input id="autoSplitSource" type="text" data-path-input placeholder="选择或粘贴视频文件路径">
+      <button id="autoSplitPickSource" class="button secondary small" type="button">选择视频</button>
+    </div></label>
+    <label class="field"><span>输出位置 <small>留空则保存到源视频所在文件夹</small></span><div class="directory-picker-row">
+      <input id="autoSplitOutput" type="text" data-path-input placeholder="可选择输出文件夹">
+      <button id="autoSplitPickOutput" class="button secondary small" type="button">选择文件夹</button>
+    </div></label>
+    <p class="toolbox-intro"><strong>黑屏时间自动检测</strong> · 无需填写秒数，自动读取每处黑屏的起止时间和实际时长；不同长度的分隔黑屏都可识别，短于 0.3 秒的闪黑保留。</p>
+    <label id="autoSplitSequenceField" class="field"><span>起始序号</span><input id="autoSplitSequence" type="number" min="1" max="999999" value="1"><small>默认保存为 01.mp4、02.mp4…；设为 21 即从 21.mp4 开始。</small></label>
+    <p class="toolbox-intro">按时间顺序去掉黑屏分隔，每段另存为一个 MP4。保留画面尺寸、帧率和声音，源视频保留；输出到新建的批次文件夹。</p>
+    <section class="simple-config-card simple-naming-card">
+      <header><div><h3>分段命名</h3><p>从源视频文件名选片段，添加文字、日期和序号。</p></div><label class="simple-header-switch"><span>积木命名</span><input id="autoSplitNamingEnabled" class="switch-input" type="checkbox"></label></header>
+      <div class="simple-card-body simple-naming-card-body"><small>源文件名字段以 |!| 分隔；积木拖动、文字修改和重名规则与现有成片命名一致。</small><div id="autoSplitNamingEditor"></div></div>
+    </section>
+    <div class="actions"><button id="autoSplitPreview" class="button secondary" type="button">检测并预览分段</button><button id="autoSplitStart" class="button primary" type="button" disabled>开始分割</button></div>
+    <div id="autoSplitResult" aria-live="polite"></div>
+  </div>`;
+  const input = id => container.querySelector(`#${id}`);
+  const resultBox = input("autoSplitResult");
+  const values = () => ({
+    source_file: normalizePathInput(input("autoSplitSource").value),
+    output_directory: normalizePathInput(input("autoSplitOutput").value) || null,
+    sequence_start: naming.sequence_start,
+    naming: naming.enabled ? structuredClone(naming) : null,
+  });
+  const invalidate = () => {
+    revision += 1;
+    preview = null;
+    resultBox.replaceChildren();
+    input("autoSplitStart").disabled = true;
+    input("autoSplitSequence").value = String(naming.sequence_start);
+  };
+  const showPreview = data => {
+    resultBox.innerHTML = `<section class="prores-result"><strong>检测到 ${data.black_ranges.length} 处黑屏 · 可导出 ${data.count} 段</strong>
+      ${data.black_ranges.length ? `<p>分隔黑屏实际时长：${data.black_detection.duration_min_seconds.toFixed(3)}–${data.black_detection.duration_max_seconds.toFixed(3)} 秒</p><details><summary>查看每处黑屏的起止时间</summary><ul>${data.black_ranges.map((range, index) => `<li>黑屏 ${index + 1} · ${range.start_seconds.toFixed(3)}–${range.end_seconds.toFixed(3)} 秒 · 持续 ${range.duration_seconds.toFixed(3)} 秒</li>`).join("")}</ul></details>` : ""}
+      ${data.black_detection?.ignored_short_count ? `<p>保留 ${data.black_detection.ignored_short_count} 处短暂闪黑。</p>` : ""}
+      ${(data.warnings || []).map(warning => `<p>${escapeHtml(warning)}</p>`).join("")}
+      <ul>${data.segments.map(segment => `<li>${segment.sequence}. ${escapeHtml(segment.output_name)} · ${segment.start_seconds.toFixed(3)}–${segment.end_seconds.toFixed(3)} 秒 · 时长 ${segment.duration_seconds.toFixed(3)} 秒</li>`).join("")}</ul></section>`;
+  };
+  const detect = async () => {
+    const payload = values();
+    if (!payload.source_file) { toast("请先选择源视频", true); return; }
+    invalidate();
+    const current = revision;
+    const button = input("autoSplitPreview");
+    button.disabled = true;
+    resultBox.textContent = "正在检测黑屏并生成分段文件名…";
+    try {
+      const data = await api("/tools/auto-video-split/preview", { method: "POST", body: JSON.stringify(payload) });
+      if (disposed || current !== revision) return;
+      preview = data;
+      showPreview(data);
+      input("autoSplitStart").disabled = false;
+      const builderResult = input("autoSplitNamingEditor").querySelector("#builderPreviewResult");
+      if (builderResult) {
+        const first = data.segments[0];
+        builderResult.innerHTML = `<strong>${escapeHtml(first.output_name)}</strong><small>块取值：${escapeHtml((first.naming?.block_values || []).map(block => block.value).join(" | "))}</small>`;
+      }
+    } catch (error) {
+      if (!disposed && current === revision) { resultBox.textContent = `检测失败：${error.message}`; toast(error.message, true); }
+    } finally { if (!disposed) button.disabled = false; }
+  };
+  const renderNaming = () => {
+    const root = input("autoSplitNamingEditor");
+    root.innerHTML = naming.enabled ? renderBuilderEditor(namingContext.configDraft, namingContext) : "";
+    input("autoSplitSequenceField").classList.toggle("hidden", naming.enabled);
+    if (naming.enabled) bindBuilderControls({ context: namingContext, root,
+      rerender: renderNaming, onChange: invalidate, preview: detect });
+  };
+  const sourceChanged = () => {
+    invalidate();
+    const name = values().source_file.split(/[\\/]/).pop();
+    namingContext.scan = { assets: { pool_1: name ? [{ name }] : [] } };
+    namingContext.namingPicker = null;
+    renderNaming();
+  };
+  input("autoSplitNamingEnabled").addEventListener("change", event => {
+    naming.enabled = naming.builder.enabled = event.target.checked;
+    invalidate(); renderNaming();
+  });
+  input("autoSplitSequence").addEventListener("change", event => {
+    const number = Number(event.target.value);
+    if (!Number.isInteger(number) || number < 1 || number > 999999) {
+      event.target.value = String(naming.sequence_start); toast("起始序号需在 1～999999 之间", true); return;
+    }
+    naming.sequence_start = number;
+    invalidate();
+  });
+  input("autoSplitSource").addEventListener("input", sourceChanged);
+  input("autoSplitOutput").addEventListener("input", invalidate);
+  for (const [buttonId, fieldId, endpoint, changed] of [
+    ["autoSplitPickSource", "autoSplitSource", "video-file-picker", sourceChanged],
+    ["autoSplitPickOutput", "autoSplitOutput", "directory-picker", invalidate],
+  ]) input(buttonId).addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const original = input(fieldId).value;
+    button.disabled = true;
+    try {
+      const selected = await api(`/system/${endpoint}`, { method: "POST" });
+      if (disposed || selected.cancelled || input(fieldId).value !== original) return;
+      input(fieldId).value = selected.path;
+      changed();
+    } catch (error) { if (!disposed) toast(error.message, true); }
+    finally { button.disabled = false; }
+  });
+  input("autoSplitPreview").addEventListener("click", detect);
+  input("autoSplitStart").addEventListener("click", async event => {
+    if (!preview) { toast("请先检测并预览分段", true); return; }
+    const payload = values();
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const job = await api("/tools/auto-video-split", { method: "POST", body: JSON.stringify(payload) });
+      if (disposed) return;
+      toast(`已提交 ${job.count} 段视频分割任务`);
+      await loadJobs();
+      await openJob(job.id);
+    } catch (error) { if (!disposed) toast(error.message, true); }
+    finally { if (!disposed) button.disabled = !preview; }
+  });
+  renderNaming();
+  return () => { disposed = true; revision += 1; };
 }
 
 function mountSettingsTool(container) {
@@ -5159,7 +5296,7 @@ function renderJobs() {
     const pct = prechecking ? (total ? done / total * 100 : 0) : RenderEta.progress(job) * 100;
     const sourceName = job.source?.name || job.source?.path?.split(/[\\/]/).pop();
     const title = isUpscale ? job.kind === "batch" ? `${job.mode === "cluster" ? "NAS" : "本机"}超分批次` : String(job.source || "").split(/[\\/]/).pop() : isSlice ? sourceName : job.config_name;
-    const typeLabel = isUpscale ? `${job.mode === "cluster" ? "集群" : "本机"}超分 · ${job.model}` : isSlice ? "切片入库" : (job.job_type === "batch_dedup" ? "批量去重" : job.job_type === "folder_concat" ? "文件夹拼接" : job.job_type === "cluster" ? "集群渲染" : "成片渲染");
+    const typeLabel = isUpscale ? `${job.mode === "cluster" ? "集群" : "本机"}超分 · ${job.model}` : isSlice ? "切片入库" : (job.job_type === "batch_dedup" ? "批量去重" : job.job_type === "folder_concat" ? "文件夹拼接" : job.job_type === "auto_video_split" ? "自动分割视频" : job.job_type === "cluster" ? "集群渲染" : "成片渲染");
     const counts = isUpscale ? job.kind === "batch" ? `完成 ${job.completed_files || 0} · 失败 ${job.failed_files || 0}` : `${job.status === "completed" ? "已生成" : "处理中"}` : `成功 ${job.success_count || 0} · 失败 ${job.failure_count || 0}`;
     const created = typeof job.created_at === "number" ? job.created_at * 1000 : job.created_at;
     return `<div class="job-row" data-job-id="${escapeHtml(job.id)}" data-job-type="${isUpscale ? "upscale" : isSlice ? "slice" : "render"}"><div><strong>${escapeHtml(title || "未命名任务")}</strong><small>${escapeHtml(typeLabel)} · ${formatDate(created)}${job.scheduled_at ? ` · 预约 ${escapeHtml(formatDate(job.scheduled_at))}` : ""} · #${escapeHtml(isUpscale ? job.id.slice(0, 8) : job.short_id)}</small></div><div><div class="mini-progress"><i style="width:${pct}%"></i></div><small>${done}/${total} ${prechecking ? "条已预检" : isUpscale ? "帧" : "已处理"}</small><small>${RenderEta.html(job)}</small></div><span class="status ${cls}">${label}</span><span class="job-count">${escapeHtml(counts)}</span><b>›</b></div>`;
@@ -5344,7 +5481,7 @@ function renderJobDetail(job) {
   $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">BATCH #${job.short_id}</p><h2>${escapeHtml(job.config_name)}</h2><span class="status ${cls}">${label}</span><p>${escapeHtml(job.output_directory)}</p></div>
     <div class="big-progress"><div><span>总体进度</span><b>${totalProgress.toFixed(1)}%</b></div><div class="bar"><i style="width:${totalProgress}%"></i></div></div>
     <p class="render-eta-detail">${RenderEta.html(job, job.job_type || "render")}</p>
-    ${job.job_type === "folder_concat" ? `<p class="folder-concat-overlay-summary">${escapeHtml(folderConcatOverlaySummary(job.benefit_overlays))}</p>${(job.warnings || []).map(warning => `<p class="cluster-control-hint">${escapeHtml(warning)}</p>`).join("")}` : `<div class="seed-card"><span>随机种子</span><strong>${job.seed}</strong></div>`}
+    ${job.job_type === "auto_video_split" ? `<p class="cluster-control-hint">已去除 ${job.black_ranges.length} 处黑屏，按时间顺序导出 ${job.count} 段。</p>` : job.job_type === "folder_concat" ? `<p class="folder-concat-overlay-summary">${escapeHtml(folderConcatOverlaySummary(job.benefit_overlays))}</p>${(job.warnings || []).map(warning => `<p class="cluster-control-hint">${escapeHtml(warning)}</p>`).join("")}` : `<div class="seed-card"><span>随机种子</span><strong>${job.seed}</strong></div>`}
     ${renderFeishuSyncPanel(job)}
     ${job.scheduled_at ? `<p class="cluster-control-hint">预约开始：${escapeHtml(formatDate(job.scheduled_at))}</p>` : ""}
     ${job.job_type === "cluster" ? `<p class="cluster-control-hint">请在工具台的“SmartStitch 集群控制”中取消或删除集群任务。</p>` : !terminalStates.has(job.status) ? `<button id="cancelJobBtn" class="button secondary" style="width:100%">取消剩余任务</button>` : ""}
@@ -5362,7 +5499,7 @@ function renderJobDetail(job) {
       const [itemLabel,itemCls] = statusInfo(item.status);
       const selections = Object.entries(item.selections || {})
         .filter(([, asset]) => asset)
-        .map(([category, asset]) => `${job.job_type === "batch_dedup" ? "源视频" : job.job_type === "folder_concat" ? (category === "pool_1" ? "A" : "B") : categoryLabel(category)}：${asset.name}`)
+        .map(([category, asset]) => `${["batch_dedup", "auto_video_split"].includes(job.job_type) ? "源视频" : job.job_type === "folder_concat" ? (category === "pool_1" ? "A" : "B") : categoryLabel(category)}：${asset.name}${job.job_type === "auto_video_split" ? ` · ${item.start_seconds.toFixed(3)}–${item.end_seconds.toFixed(3)} 秒` : ""}`)
         .join("　·　");
       const worker = item.worker_name ? ` · 工作机：${item.worker_name}` : "";
       const codec = item.actual_video_encoder ? `${codecDecodeLabel(item.video_decode_status)} · ${item.actual_video_encoder === "h264_videotoolbox" ? "硬件编码" : item.actual_video_encoder}` : "";

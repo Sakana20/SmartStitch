@@ -17,12 +17,13 @@ from typing import Any
 import yaml
 
 from .config import ConfigStore
+from .auto_video_split import detection_key, detect_video, name_segments, render_split_item, split_config
 from .database import SQLiteStore
 from .folder_concat import (
     folder_concat_config, freeze_folder_overlay, inspect_folders,
     overlay_sha256, prepare_folder_concat,
 )
-from .models import AppConfig, BatchDedupDirectorySettings, BatchDedupRequest, BatchDedupSyncConfig, FolderConcatRequest, JobCreateRequest, SourceMode, VisualDedupConfig
+from .models import AppConfig, Asset, AutoVideoSplitRequest, BatchDedupDirectorySettings, BatchDedupRequest, BatchDedupSyncConfig, FolderConcatRequest, JobCreateRequest, SourceMode, VisualDedupConfig
 from .planner import build_plan
 from .probe_cache import MediaProbeCache
 from .renderer import render_item
@@ -87,6 +88,7 @@ class JobManager:
         self.output_sync_manager: Any | None = None
         self.visual_border_library = visual_border_library
         self.media_probe_cache = media_probe_cache or MediaProbeCache(shared_store)
+        self.auto_split_cache: dict[tuple, dict] = {}
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return [self._summary(job) for job in self.database.list()]
@@ -107,6 +109,82 @@ class JobManager:
             dedup_visual=request.visual_dedup,
             dedup_sync=request.feishu_base_sync or self.get_batch_dedup_sync_settings(),
         )
+
+    def preview_auto_video_split(self, request: AutoVideoSplitRequest) -> dict[str, Any]:
+        key = detection_key(request)
+        with self.lock:
+            detection = self.auto_split_cache.get(key)
+        if detection is None:
+            try:
+                detection = detect_video(request)
+            except subprocess.TimeoutExpired as exc:
+                raise ValueError("视频检测超时，请检查视频后重试") from exc
+            with self.lock:
+                if len(self.auto_split_cache) >= 8:
+                    self.auto_split_cache.pop(next(iter(self.auto_split_cache)))
+                self.auto_split_cache[key] = detection
+        return name_segments(request, detection)
+
+    def create_auto_video_split(self, request: AutoVideoSplitRequest) -> dict[str, Any]:
+        if self.stopping:
+            raise RuntimeError("SmartStitch 正在退出，不能启动新任务")
+        preview = self.preview_auto_video_split(request)
+        output_root = (Path(request.output_directory).expanduser().resolve()
+                       if request.output_directory else Path(preview["source_file"]).parent)
+        if not output_root.is_dir():
+            raise ValueError("输出位置不存在或不是文件夹")
+        config = split_config(preview, output_root)
+        self._apply_codec_settings(config)
+        if shutil.disk_usage(output_root).free / (1024**3) < config.batch.minimum_free_space_gb:
+            raise OSError("输出磁盘剩余空间不足 0.5 GB")
+        job_id = uuid.uuid4().hex
+        batch = self._batch_directory(config, job_id[:8])
+        batch.mkdir(exist_ok=False)
+        registered = False
+        try:
+            snapshot_path = batch / "config.snapshot.yaml"
+            snapshot = config.model_dump(mode="json")
+            snapshot["auto_video_split"] = {"request": request.model_dump(mode="json"), "analysis": preview}
+            snapshot_path.write_text(yaml.safe_dump(snapshot, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            asset = Asset(id="split-source", category="pool_1", path=preview["source_file"],
+                          name=preview["source_name"], media_type="video", probe=preview["probe"])
+            items = [{
+                **segment, "status": "pending", "progress": 0.0,
+                "output_path": str(batch / segment["output_name"]),
+                "estimated_duration": segment["duration_seconds"], "actual_duration": None,
+                "planned_video_encoder": config.output.video_codec, "actual_video_encoder": None,
+                "hardware_acceleration": False, "encoder_fallback_reason": None,
+                "attempts": 0, "error": None, "source_fingerprint": preview["fingerprint"],
+                "selections": {"pool_1": asset.model_dump(mode="json")}, "overlay": None,
+                "visual_border": None, "visual_effects": [],
+            } for segment in preview["segments"]]
+            job = {
+                "id": job_id, "job_type": "auto_video_split", "source_file": preview["source_file"],
+                "short_id": job_id[:8], "config_id": config.id, "config_name": config.name,
+                "schema_version": config.schema_version, "workflow_type": "generic",
+                "timeline": ["pool_1"], "pool_labels": {"pool_1": "源视频"},
+                "status": "draft", "count": len(items), "seed": None,
+                "algorithm": "black_separator", "algorithm_version": 1, "distribution": {},
+                "black_ranges": preview["black_ranges"], "warnings": preview["warnings"],
+                "black_detection": preview.get("black_detection"),
+                "output_directory": str(batch), "config_snapshot_path": str(snapshot_path),
+                "visual_dedup": config.visual_dedup.model_dump(mode="json"),
+                "feishu_base_sync": config.output.feishu_base_sync.model_dump(mode="json"),
+                "concurrency": config.batch.concurrency, "retry_count": 0,
+                "success_count": 0, "failure_count": 0,
+                "created_at": _now(), "started_at": None, "finished_at": None, "items": items,
+            }
+            self.database.save(job)
+            registered = True
+            self._write_manifest(job)
+            self._write_csv(job)
+        except Exception:
+            if registered:
+                self.database.delete(job_id)
+            shutil.rmtree(batch, ignore_errors=True)
+            raise
+        self.start(job_id)
+        return self.get_job(job_id)
 
     def create_folder_concat(self, request: FolderConcatRequest) -> dict[str, Any]:
         preview = inspect_folders(request, validate_overlay=False, config_store=self.config_store)
@@ -639,9 +717,11 @@ class JobManager:
                     frozen = job["benefit_overlays"]
                     if overlay_sha256(Path(frozen["snapshot_path"])) != frozen["sha256"]:
                         raise ValueError("风险提示语图片副本已变化或损坏")
-                result = render_item(
+                split_job = job.get("job_type") == "auto_video_split"
+                render = render_split_item if split_job else render_item
+                result = render(
                     config,
-                    planned,
+                    item_data if split_job else planned,
                     Path(item_data["output_path"]),
                     cancel_event,
                     on_progress=lambda progress: self._mutate_item(job_id, item_index, progress=progress),
@@ -727,6 +807,8 @@ class JobManager:
             ["overlay_enabled", "overlay_name", "overlay_start_seconds", "overlay_end_seconds"]
             if job.get("job_type") == "folder_concat" else []
         )
+        split_columns = ["sequence", "start_seconds", "end_seconds"] if job.get("job_type") == "auto_video_split" else []
+        split_columns = [column for column in split_columns if column not in naming_columns]
         available = {key for item in job["items"] for key in item["selections"]}
         categories = [category for category in job.get("timeline", []) if category in available]
         categories.extend(sorted(available - set(categories)))
@@ -749,6 +831,7 @@ class JobManager:
                     *category_columns.values(),
                     "benefit_overlay",
                     *overlay_columns,
+                    *split_columns,
                     "visual_border",
                     "visual_effects",
                     "output_path",
@@ -781,6 +864,8 @@ class JobManager:
                         "overlay_start_seconds": actual_range.get("start_seconds", ""),
                         "overlay_end_seconds": actual_range.get("end_seconds", ""),
                     })
+                for column in split_columns:
+                    row[column] = item[column]
                 naming = item.get("naming")
                 if naming:
                     row.update(
