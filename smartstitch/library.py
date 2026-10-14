@@ -1202,3 +1202,17 @@ def pick_video_file() -> dict[str, Any]:
             return {"cancelled": True, "path": None}
         raise LibraryError(result.stderr.strip() or "无法打开视频选择器")
     return {"cancelled": False, "path": result.stdout.strip()}
+
+
+def pick_image_file() -> dict[str, Any]:
+    if platform.system() != "Darwin":
+        raise LibraryError("当前系统暂不支持图形文件选择器，请手动输入绝对路径")
+    result = subprocess.run(
+        ["osascript", "-e", 'POSIX path of (choose file with prompt "选择风险提示语图片" of type {"png", "jpg", "jpeg", "webp", "bmp"})'],
+        capture_output=True, text=True, check=False, timeout=300,
+    )
+    if result.returncode:
+        if "-128" in result.stderr or "User canceled" in result.stderr:
+            return {"cancelled": True, "path": None}
+        raise LibraryError(result.stderr.strip() or "无法打开图片选择器")
+    return {"cancelled": False, "path": result.stdout.strip()}

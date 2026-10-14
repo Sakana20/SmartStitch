@@ -160,6 +160,15 @@ button.cluster-topology-node, .cluster-topology-node[data-cluster-select-node] {
 .folder-concat-tool { display: grid; gap: 18px; }
 .folder-concat-tool > .field, .folder-concat-tool > .toolbox-intro { margin: 0; }
 .folder-concat-tool > .actions { justify-content: flex-end; }
+.folder-concat-overlay-card .simple-card-body { display: grid; gap: 14px; }
+.folder-concat-overlay-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.folder-concat-overlay-fields .field { margin: 0; }
+.folder-concat-overlay-card small, .folder-concat-overlay-summary { overflow-wrap: anywhere; }
+@media (max-width: 640px) { .folder-concat-overlay-fields { grid-template-columns: 1fr; } }
+@media (max-width: 560px) {
+  .folder-concat-tool .folder-concat-overlay-card > header > div { flex: 1 1 100%; }
+  .folder-concat-overlay-card > header .simple-header-switch { margin-left: 0; }
+}
 .prores-tool { display: grid; gap: 18px; }
 .prores-tool > .field, .prores-tool > .toolbox-intro { margin: 0; }
 .prores-tool > .actions { justify-content: flex-end; }

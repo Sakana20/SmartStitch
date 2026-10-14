@@ -78,13 +78,20 @@ preview.handlers.click({ currentTarget: preview }).then(() => {
       addEventListener(type, callback) { this.handlers[type] = callback; },
       replaceChildren() { this.innerHTML = ''; },
       querySelector() { return null; }, querySelectorAll() { return []; },
+      classList: { toggle() {} },
     };
     controls.set(`#${id}`, item);
     return item;
   }
   for (const id of ['folderConcatA', 'folderConcatB', 'folderConcatOutput',
     'folderConcatResult', 'folderConcatNamingStatus', 'folderConcatNamingEditor',
-    'folderConcatNamingEnabled', 'folderConcatPreview', 'folderConcatStart']) control(id);
+    'folderConcatNamingEnabled', 'folderConcatPreview', 'folderConcatStart',
+    'folderConcatOverlayEnabled', 'folderConcatOverlayBody', 'folderConcatOverlayFile',
+    'folderConcatOverlayPick', 'folderConcatOverlayStatus', 'folderConcatOverlayScale',
+    'folderConcatOverlaySource', 'folderConcatOverlayExisting', 'folderConcatOverlayLocal',
+    'folderConcatOverlayConfig', 'folderConcatOverlayRefresh', 'folderConcatOverlayConfigStatus',
+    'folderConcatOverlayOpacity', 'folderConcatOverlayScope',
+    'folderConcatOverlayRange', 'folderConcatOverlayStart', 'folderConcatOverlayEnd']) control(id);
   const container = { innerHTML: '', querySelector: selector => controls.get(selector), querySelectorAll: () => [] };
   const requests = [];
   context.mockApi = async (endpoint, options) => {

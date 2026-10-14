@@ -18,7 +18,10 @@ import yaml
 
 from .config import ConfigStore
 from .database import SQLiteStore
-from .folder_concat import folder_concat_config, inspect_folders
+from .folder_concat import (
+    folder_concat_config, freeze_folder_overlay, inspect_folders,
+    overlay_sha256, prepare_folder_concat,
+)
 from .models import AppConfig, BatchDedupDirectorySettings, BatchDedupRequest, BatchDedupSyncConfig, FolderConcatRequest, JobCreateRequest, SourceMode, VisualDedupConfig
 from .planner import build_plan
 from .probe_cache import MediaProbeCache
@@ -106,7 +109,7 @@ class JobManager:
         )
 
     def create_folder_concat(self, request: FolderConcatRequest) -> dict[str, Any]:
-        preview = inspect_folders(request)
+        preview = inspect_folders(request, validate_overlay=False, config_store=self.config_store)
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             raise ValueError("找不到 FFmpeg 或 ffprobe")
         output_root = (
@@ -115,28 +118,10 @@ class JobManager:
         )
         if not output_root.is_dir():
             raise ValueError("输出位置不存在或不是文件夹")
-        config = self._folder_concat_config(preview, output_root)
+        config, assets_by_path, overlay = prepare_folder_concat(
+            preview, output_root, probe_cache=self.media_probe_cache,
+        )
         self._apply_codec_settings(config)
-        scan = scan_config(config, probe_cache=self.media_probe_cache)
-        assets_by_path = {
-            category: {asset.path: asset for asset in scan.assets[category]}
-            for category in ("pool_1", "pool_2")
-        }
-        invalid = [
-            asset
-            for pair in preview["pairs"]
-            for category, path in (("pool_1", pair["a"]), ("pool_2", pair["b"]))
-            if not (asset := assets_by_path[category][path]).selectable
-        ]
-        if invalid:
-            details = "；".join(f"{asset.name}: {asset.error or '不可用'}" for asset in invalid[:5])
-            raise ValueError(f"文件夹中有不可用视频，请先处理：{details}")
-        first = assets_by_path["pool_1"][preview["pairs"][0]["a"]].probe
-        if first.width and first.height:
-            config.output.width = max(2, first.width // 2 * 2)
-            config.output.height = max(2, first.height // 2 * 2)
-        if first.fps:
-            config.output.fps = first.fps
         job_id = uuid.uuid4().hex
         short_id = job_id[:8]
         batch_directory = self._batch_directory(config, short_id)
@@ -144,60 +129,80 @@ class JobManager:
         if free_gb < config.batch.minimum_free_space_gb:
             raise OSError(f"输出磁盘剩余空间 {free_gb:.2f} GB，低于配置要求")
         batch_directory.mkdir(parents=True, exist_ok=False)
-        snapshot_path = batch_directory / "config.snapshot.yaml"
-        snapshot_path.write_text(
-            yaml.safe_dump(config.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
-        items = []
-        for index, pair in enumerate(preview["pairs"], start=1):
-            a = assets_by_path["pool_1"][pair["a"]]
-            b = assets_by_path["pool_2"][pair["b"]]
-            output_name = pair["output_name"]
-            items.append({
-                "index": index, "status": "pending", "progress": 0.0,
-                "output_name": output_name,
-                "output_path": str(batch_directory / output_name),
-                "estimated_duration": round(a.probe.duration + b.probe.duration, 3),
-                "actual_duration": None,
-                "planned_video_encoder": config.output.video_codec,
-                "actual_video_encoder": None,
-                "hardware_acceleration": False,
-                "encoder_fallback_reason": None,
-                "attempts": 0, "error": None,
-                "selections": {
-                    "pool_1": a.model_dump(mode="json"),
-                    "pool_2": b.model_dump(mode="json"),
-                },
-                "overlay": None, "visual_border": None,
-                "visual_effects": [], "naming": pair["naming"],
-            })
-        job = {
-            "id": job_id, "job_type": "folder_concat",
-            "source_directory": preview["directory_a"],
-            "source_directory_b": preview["directory_b"],
-            "short_id": short_id, "config_id": config.id,
-            "config_name": config.name, "schema_version": config.schema_version,
-            "workflow_type": config.workflow_type,
-            "timeline": list(config.timeline),
-            "pool_labels": {"pool_1": "A 文件夹", "pool_2": "B 文件夹"},
-            "status": "draft", "count": len(items), "seed": None,
-            "algorithm": "filename_order_pairing", "algorithm_version": 1,
-            "distribution": {},
-            "warnings": [f"多出的 {preview['unpaired_a']} 条 A 视频和 {preview['unpaired_b']} 条 B 视频未配对"]
-            if preview["unpaired_a"] or preview["unpaired_b"] else [],
-            "output_directory": str(batch_directory),
-            "config_snapshot_path": str(snapshot_path),
-            "visual_dedup": config.visual_dedup.model_dump(mode="json"),
-            "feishu_base_sync": config.output.feishu_base_sync.model_dump(mode="json"),
-            "concurrency": config.batch.concurrency,
-            "retry_count": config.batch.retry_count,
-            "success_count": 0, "failure_count": 0,
-            "created_at": _now(), "started_at": None,
-            "finished_at": None, "items": items,
-        }
-        self.database.save(job)
-        self._write_manifest(job)
+        registered = False
+        try:
+            overlay = freeze_folder_overlay(config, preview["benefit_overlays"], batch_directory)
+            snapshot_path = batch_directory / "config.snapshot.yaml"
+            snapshot = config.model_dump(mode="json")
+            snapshot["folder_concat_overlay"] = preview["benefit_overlays"]
+            snapshot_path.write_text(
+                yaml.safe_dump(snapshot, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            items = []
+            for index, pair in enumerate(preview["pairs"], start=1):
+                a = assets_by_path["pool_1"][pair["a"]]
+                b = assets_by_path["pool_2"][pair["b"]]
+                output_name = pair["output_name"]
+                items.append({
+                    "index": index, "status": "pending", "progress": 0.0,
+                    "output_name": output_name,
+                    "output_path": str(batch_directory / output_name),
+                    "estimated_duration": round(a.probe.duration + b.probe.duration, 3),
+                    "actual_duration": None,
+                    "planned_video_encoder": config.output.video_codec,
+                    "actual_video_encoder": None,
+                    "hardware_acceleration": False,
+                    "encoder_fallback_reason": None,
+                    "attempts": 0, "error": None,
+                    "selections": {
+                        "pool_1": a.model_dump(mode="json"),
+                        "pool_2": b.model_dump(mode="json"),
+                    },
+                    "overlay": overlay.model_dump(mode="json") if overlay else None,
+                    "overlay_scope": (
+                        request.benefit_overlays.timing.scope
+                        if request.benefit_overlays and request.benefit_overlays.timing.scope in {"a", "b"} else None
+                    ),
+                    "overlay_range": pair.get("overlay_range"), "visual_border": None,
+                    "visual_effects": [], "naming": pair["naming"],
+                })
+            job = {
+                "id": job_id, "job_type": "folder_concat",
+                "source_directory": preview["directory_a"],
+                "source_directory_b": preview["directory_b"],
+                "short_id": short_id, "config_id": config.id,
+                "config_name": config.name, "schema_version": config.schema_version,
+                "workflow_type": config.workflow_type,
+                "timeline": list(config.timeline),
+                "pool_labels": {"pool_1": "A 文件夹", "pool_2": "B 文件夹"},
+                "status": "draft", "count": len(items), "seed": None,
+                "algorithm": "filename_order_pairing", "algorithm_version": 1,
+                "distribution": {},
+                "warnings": preview["warnings"] + (
+                    [f"多出的 {preview['unpaired_a']} 条 A 视频和 {preview['unpaired_b']} 条 B 视频未配对"]
+                    if preview["unpaired_a"] or preview["unpaired_b"] else []
+                ),
+                "benefit_overlays": preview["benefit_overlays"],
+                "output_directory": str(batch_directory),
+                "config_snapshot_path": str(snapshot_path),
+                "visual_dedup": config.visual_dedup.model_dump(mode="json"),
+                "feishu_base_sync": config.output.feishu_base_sync.model_dump(mode="json"),
+                "concurrency": config.batch.concurrency,
+                "retry_count": config.batch.retry_count,
+                "success_count": 0, "failure_count": 0,
+                "created_at": _now(), "started_at": None,
+                "finished_at": None, "items": items,
+            }
+            self.database.save(job)
+            registered = True
+            self._write_manifest(job)
+            self._write_csv(job)
+        except Exception:
+            if registered:
+                self.database.delete(job_id)
+            shutil.rmtree(batch_directory, ignore_errors=True)
+            raise
         self.start(job_id)
         return self.get_job(job_id)
 
@@ -611,6 +616,7 @@ class JobManager:
                 for category, asset in item_data["selections"].items()
             },
             overlay=Asset.model_validate(item_data["overlay"]) if item_data["overlay"] else None,
+            overlay_scope=item_data.get("overlay_scope"),
             visual_border=(
                 Asset.model_validate(item_data["visual_border"])
                 if item_data.get("visual_border")
@@ -629,6 +635,10 @@ class JobManager:
                 break
             self._mutate_item(job_id, item_index, attempts=attempt + 1, error=None)
             try:
+                if job.get("job_type") == "folder_concat" and item_data.get("overlay"):
+                    frozen = job["benefit_overlays"]
+                    if overlay_sha256(Path(frozen["snapshot_path"])) != frozen["sha256"]:
+                        raise ValueError("风险提示语图片副本已变化或损坏")
                 result = render_item(
                     config,
                     planned,
@@ -713,6 +723,10 @@ class JobManager:
             if has_naming
             else []
         )
+        overlay_columns = (
+            ["overlay_enabled", "overlay_name", "overlay_start_seconds", "overlay_end_seconds"]
+            if job.get("job_type") == "folder_concat" else []
+        )
         available = {key for item in job["items"] for key in item["selections"]}
         categories = [category for category in job.get("timeline", []) if category in available]
         categories.extend(sorted(available - set(categories)))
@@ -734,6 +748,7 @@ class JobManager:
                     *naming_columns,
                     *category_columns.values(),
                     "benefit_overlay",
+                    *overlay_columns,
                     "visual_border",
                     "visual_effects",
                     "output_path",
@@ -758,6 +773,14 @@ class JobManager:
                     "output_path": item["output_path"],
                     "error": item["error"] or "",
                 }
+                if overlay_columns:
+                    actual_range = item.get("overlay_range") or {}
+                    row.update({
+                        "overlay_enabled": bool(item.get("overlay")),
+                        "overlay_name": job.get("benefit_overlays", {}).get("name", ""),
+                        "overlay_start_seconds": actual_range.get("start_seconds", ""),
+                        "overlay_end_seconds": actual_range.get("end_seconds", ""),
+                    })
                 naming = item.get("naming")
                 if naming:
                     row.update(

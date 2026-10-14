@@ -16,7 +16,7 @@ const selectTimelineSegmentSource = app.match(
 
 assert.match(
   html,
-  /href="\/styles\.css\?v=20260929-dedup-background"/,
+  /href="\/styles\.css\?v=20261013-folder-naming"/,
   "前端交互或样式更新后必须刷新静态资源缓存版本",
 );
 const staticVersions = [...html.matchAll(/(?:styles\.css|timeline-math\.js|render-eta\.js|app\.js)\?v=([^"]+)/g)]

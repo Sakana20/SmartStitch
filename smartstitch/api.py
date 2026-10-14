@@ -41,7 +41,7 @@ from .feishu import (
     FeishuSettingsStore,
     FeishuSyncManager,
 )
-from .folder_concat import inspect_folders
+from .folder_concat import inspect_folders, list_config_overlay_images
 from .jobs import JobManager, TERMINAL_STATES
 from .library import (
     MAX_VISUAL_BORDER_BYTES,
@@ -51,6 +51,7 @@ from .library import (
     open_directory_in_file_manager,
     pick_directory,
     pick_video_file,
+    pick_image_file,
 )
 from .media import DisconnectSafeFileResponse
 from .models import (
@@ -669,6 +670,13 @@ def create_app(
     def video_file_picker() -> dict[str, object]:
         try:
             return pick_video_file()
+        except (LibraryError, OSError, subprocess.SubprocessError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/system/image-file-picker")
+    def image_file_picker() -> dict[str, object]:
+        try:
+            return pick_image_file()
         except (LibraryError, OSError, subprocess.SubprocessError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -1747,9 +1755,13 @@ def create_app(
     @app.post("/api/v1/tools/folder-concat/preview")
     def preview_folder_concat(request: FolderConcatRequest) -> dict[str, object]:
         try:
-            return inspect_folders(request)
+            return inspect_folders(request, probe_cache=job_manager.media_probe_cache, config_store=config_store)
         except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/v1/tools/folder-concat/overlay-images")
+    def folder_concat_overlay_images() -> dict[str, object]:
+        return {"items": list_config_overlay_images(config_store)}
 
     @app.post("/api/v1/tools/folder-concat")
     def create_folder_concat(request: FolderConcatRequest) -> dict[str, object]:

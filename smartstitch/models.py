@@ -1030,6 +1030,7 @@ class PlanItem(BaseModel):
     index: int
     selections: dict[str, Asset | None]
     overlay: Asset | None = None
+    overlay_scope: Literal["a", "b"] | None = None
     visual_border: Asset | None = None
     visual_effects: list[PlannedVisualEffect] = Field(default_factory=list)
     output_name: str
@@ -1112,11 +1113,55 @@ class BatchDedupRequest(BaseModel):
     )
 
 
+class FolderConcatOverlayPlacement(OverlayPlacement):
+    x: str = "(W-w)/2"
+    y: str = "(H-h)/2"
+    shrink_if_oversized: Literal[True] = True
+    opacity: float = Field(default=1, ge=0, le=1, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_position(self) -> FolderConcatOverlayPlacement:
+        self.x, self.y = "(W-w)/2", "(H-h)/2"
+        if self.scale_mode == "stretch":
+            self.x = self.y = "0"
+        return self
+
+
+class FolderConcatOverlayTiming(OverlayTiming):
+    scope: Literal["full", "custom", "a", "b"] = "full"
+    start_seconds: float = Field(default=0, ge=0, allow_inf_nan=False)
+    end_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+
+class FolderConcatOverlayConfig(BaseModel):
+    mode: Literal["required"] = "required"
+    file: str = ""
+    config_id: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    placement: FolderConcatOverlayPlacement = Field(default_factory=FolderConcatOverlayPlacement)
+    timing: FolderConcatOverlayTiming = Field(default_factory=FolderConcatOverlayTiming)
+
+    _normalize_file = field_validator("file", mode="before")(normalize_path_input)
+
+    @model_validator(mode="after")
+    def require_source(self) -> FolderConcatOverlayConfig:
+        if bool(self.file.strip()) == bool(self.config_id):
+            raise ValueError("请从现有配置选择提示语图片，或添加一张图片；只能选择一种来源")
+        return self
+
+
 class FolderConcatRequest(BaseModel):
     directory_a: str
     directory_b: str
     output_directory: str | None = None
     naming: OutputNamingConfig | None = None
+    benefit_overlays: FolderConcatOverlayConfig | None = None
+
+    @field_validator("benefit_overlays", mode="before")
+    @classmethod
+    def ignore_disabled_overlay(cls, value):
+        if isinstance(value, dict) and value.get("mode") == "disabled":
+            return None
+        return value
 
     _normalize_directory_a = field_validator("directory_a", mode="before")(
         normalize_path_input

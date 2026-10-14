@@ -104,9 +104,18 @@ def _audio_filter(index: int, asset: Asset, config: AppConfig) -> str:
     )
 
 
-def _overlay_range(config: AppConfig, timeline: list[tuple[str, Asset]]) -> tuple[float, float | None]:
+def _overlay_range(config: AppConfig, timeline: list[tuple[str, Asset]], scope_override: str | None = None) -> tuple[float, float | None]:
     timing = config.benefit_overlays.timing
     total = sum(asset.probe.duration for _, asset in timeline if asset.probe)
+    if scope_override in {"a", "b"}:
+        elapsed = 0.0
+        target = "pool_1" if scope_override == "a" else "pool_2"
+        for category, asset in timeline:
+            duration = asset.probe.duration if asset.probe else 0
+            if category == target:
+                return elapsed, elapsed + duration
+            elapsed += duration
+        raise RenderError("文件夹拼接风险提示语时段缺少对应素材")
     if timing.scope == "full":
         return 0, None
     if timing.scope == "custom":
@@ -373,7 +382,7 @@ def build_ffmpeg_command(
         filters.append(
             f"[{overlay_index}:v]{overlay_scale},format=rgba,colorchannelmixer=aa={opacity:.6f}[overlay]"
         )
-        start, end = _overlay_range(config, timeline)
+        start, end = _overlay_range(config, timeline, item.overlay_scope)
         x = _escape_filter_value(placement.x)
         y = _escape_filter_value(placement.y)
         enable = (
@@ -381,6 +390,8 @@ def build_ffmpeg_command(
             if end is None
             else f"between(t,{start:.6f},{end:.6f})"
         )
+        if item.overlay_scope is not None:
+            enable = f"gte(t,{start:.6f})*lt(t,{end:.6f})"
         filters.append(
             f"{video_map}[overlay]overlay=x='{x}':y='{y}':"
             f"enable='{enable}':eof_action=pass[outv]"

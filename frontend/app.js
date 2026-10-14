@@ -1436,12 +1436,22 @@ function renderFolderConcatNamingPreview(preview) {
   return `<strong>${escapeHtml(pair.output_name)}</strong><small>块取值：${escapeHtml(parts)}</small><small>对应素材：A 文件夹：${escapeHtml(pair.a_name)}；B 文件夹：${escapeHtml(pair.b_name)}</small>`;
 }
 
+function folderConcatOverlaySummary(overlay) {
+  if (!overlay?.enabled) return "未添加风险提示语";
+  const placement = overlay.placement;
+  const size = { original: "原图尺寸", fit: "等比适配画布", stretch: "铺满画布" }[placement.scale_mode];
+  const timing = { full: "整条成片", a: "仅 A 文件夹", b: "仅 B 文件夹" }[overlay.timing.scope] || `${overlay.timing.start_seconds} 秒至 ${overlay.timing.end_seconds == null ? "成片结束" : `${overlay.timing.end_seconds} 秒`}`;
+  return `风险提示语：${overlay.name}${overlay.source_config_name ? `（${overlay.source_config_name}）` : ""} · ${overlay.width}×${overlay.height} · ${size} · 居中叠加 · 透明度 ${Math.round(placement.opacity * 100)}% · ${timing}${placement.opacity === 0 ? "（不可见）" : ""}`;
+}
+
 function mountFolderConcatTool(container) {
   let preview = null;
   let disposed = false;
   let scanRevision = 0;
   let sampleRevision = 0;
   let sampleTimer = null;
+  let overlayConfigRevision = 0;
+  let overlayConfigsLoaded = false;
   const namingContext = {
     configDraft: { timeline: ["pool_1", "pool_2"], sources: {
       pool_1: { label: "A 文件夹", mode: "required" },
@@ -1463,9 +1473,33 @@ function mountFolderConcatTool(container) {
       <button class="button secondary small" type="button" data-pick-folder="folderConcatOutput">选择文件夹</button>
     </div></label>
     <p class="toolbox-intro">仅读取各文件夹第一层的 MP4、MOV、M4V、MKV、WebM 视频。按文件名排序后逐条配对，先 A 后 B；多出的视频不处理。每组生成一条 MP4，保存到新的批次目录，源视频保留。</p>
+    <section class="simple-config-card folder-concat-overlay-card">
+      <header><div><h3>风险提示语</h3><p>选用现有配置的提示语图片或添加图片，统一居中叠加在最上层。</p></div><label class="simple-header-switch"><span>添加风险提示语</span><input id="folderConcatOverlayEnabled" class="switch-input" type="checkbox" aria-label="添加风险提示语"></label></header>
+      <div id="folderConcatOverlayBody" class="simple-card-body hidden">
+        <label class="field"><span>图片来源</span><select id="folderConcatOverlaySource"><option value="config">从现有配置选择</option><option value="local">添加图片</option></select></label>
+        <div id="folderConcatOverlayExisting">
+          <label class="field"><span>配置中的提示语图片</span><div class="directory-picker-row"><select id="folderConcatOverlayConfig"><option value="">请先开启以读取图片</option></select><button id="folderConcatOverlayRefresh" class="button secondary small" type="button">刷新图片列表</button></div></label>
+          <small id="folderConcatOverlayConfigStatus" aria-live="polite">只读取图片，不修改所选配置。</small>
+        </div>
+        <label id="folderConcatOverlayLocal" class="field hidden"><span>图片文件 <small>静态 PNG、JPG、WebP、BMP，最大 20 MB</small></span><div class="directory-picker-row">
+          <input id="folderConcatOverlayFile" type="text" data-path-input placeholder="选择或粘贴图片文件路径">
+          <button id="folderConcatOverlayPick" class="button secondary small" type="button">添加图片</button>
+        </div></label>
+        <small id="folderConcatOverlayStatus" aria-live="polite">请选择图片，预览配对时检查图片与显示时段。</small>
+        <div class="folder-concat-overlay-fields">
+          <label class="field"><span>图片尺寸</span><select id="folderConcatOverlayScale"><option value="original">原图尺寸</option><option value="fit">等比适配画布</option><option value="stretch">铺满画布（会拉伸）</option></select><small>超大图片自动等比缩小到画布内。</small></label>
+          <label class="field"><span>透明度（%）</span><input id="folderConcatOverlayOpacity" type="number" min="0" max="100" step="1" value="100"></label>
+          <label class="field"><span>显示时段</span><select id="folderConcatOverlayScope"><option value="full">整条成片</option><option value="a">仅 A 文件夹</option><option value="b">仅 B 文件夹</option><option value="custom">自定义时段</option></select></label>
+        </div>
+        <div id="folderConcatOverlayRange" class="folder-concat-overlay-fields hidden">
+          <label class="field"><span>开始（秒）</span><input id="folderConcatOverlayStart" type="number" min="0" step="0.1" value="0"><small>以 A → B 成片起点为 0。</small></label>
+          <label class="field"><span>结束（秒）</span><input id="folderConcatOverlayEnd" type="number" min="0" step="0.1" placeholder="留空到成片结束"></label>
+        </div>
+      </div>
+    </section>
     <section class="simple-config-card simple-naming-card">
       <header><div><h3>成片命名</h3><p>从 A、B 文件名选片段，添加文字、日期和序号。</p></div><label class="simple-header-switch"><span>积木命名</span><input id="folderConcatNamingEnabled" class="switch-input" type="checkbox"></label></header>
-      <div class="simple-card-body simple-naming-card-body"><small>选择 A、B 文件夹后，自动读取里面的视频文件名。选择片段组成命名规则，仅用于本次拼接。</small><small id="folderConcatNamingStatus" aria-live="polite">请选择 A、B 文件夹以加载文件名。</small><div id="folderConcatNamingEditor"></div></div>
+      <div class="simple-card-body simple-naming-card-body"><small>选择 A、B 文件夹后自动读取视频文件名。字段以 |!| 分隔，按所选字段位置命名；文件名多出字段也可使用同一规则。</small><small id="folderConcatNamingStatus" aria-live="polite">请选择 A、B 文件夹以加载文件名。</small><div id="folderConcatNamingEditor"></div></div>
     </section>
     <div class="actions"><button id="folderConcatPreview" class="button secondary" type="button">预览配对</button><button id="folderConcatStart" class="button primary" type="button">开始拼接</button></div>
     <div id="folderConcatResult" aria-live="polite"></div>
@@ -1477,8 +1511,28 @@ function mountFolderConcatTool(container) {
     directory_b: normalizePathInput(input("folderConcatB").value),
     output_directory: normalizePathInput(input("folderConcatOutput").value) || null,
     naming: naming.enabled ? structuredClone(naming) : null,
+    benefit_overlays: input("folderConcatOverlayEnabled").checked ? {
+      mode: "required",
+      file: input("folderConcatOverlaySource").value === "local" ? normalizePathInput(input("folderConcatOverlayFile").value) : "",
+      config_id: input("folderConcatOverlaySource").value === "config" ? input("folderConcatOverlayConfig").value || null : null,
+      placement: {
+        scale_mode: input("folderConcatOverlayScale").value,
+        x: input("folderConcatOverlayScale").value === "stretch" ? "0" : "(W-w)/2",
+        y: input("folderConcatOverlayScale").value === "stretch" ? "0" : "(H-h)/2",
+        shrink_if_oversized: true,
+        opacity: input("folderConcatOverlayOpacity").value === "" ? null : Number(input("folderConcatOverlayOpacity").value) / 100,
+      },
+      timing: {
+        scope: input("folderConcatOverlayScope").value,
+        start_seconds: input("folderConcatOverlayScope").value !== "custom" ? 0 : input("folderConcatOverlayStart").value === "" ? null : Number(input("folderConcatOverlayStart").value),
+        end_seconds: input("folderConcatOverlayScope").value !== "custom" || input("folderConcatOverlayEnd").value === "" ? null : Number(input("folderConcatOverlayEnd").value),
+      },
+    } : null,
   });
-  const invalidate = () => { scanRevision += 1; preview = null; resultBox.replaceChildren(); };
+  const invalidate = () => {
+    scanRevision += 1; preview = null; resultBox.replaceChildren();
+    input("folderConcatOverlayStatus").textContent = "预检待更新，请预览配对以检查图片与显示时段。";
+  };
   const renderNaming = () => {
     const root = input("folderConcatNamingEditor");
     root.innerHTML = naming.enabled ? renderBuilderEditor(namingContext.configDraft, namingContext) : "";
@@ -1496,7 +1550,7 @@ function mountFolderConcatTool(container) {
         result.textContent = "正在读取素材并生成实际文件名…";
         try {
           const namedPreview = await api("/tools/folder-concat/preview", {
-            method: "POST", body: JSON.stringify(payload),
+            method: "POST", body: JSON.stringify({ ...payload, benefit_overlays: null }),
           });
           if (disposed || revision !== scanRevision) return;
           result.innerHTML = renderFolderConcatNamingPreview(namedPreview);
@@ -1530,7 +1584,7 @@ function mountFolderConcatTool(container) {
     sampleTimer = setTimeout(async () => {
       try {
         const files = await api("/tools/folder-concat/preview", {
-          method: "POST", body: JSON.stringify({ ...payload, naming: null }),
+          method: "POST", body: JSON.stringify({ ...payload, naming: null, benefit_overlays: null }),
         });
         if (disposed || revision !== sampleRevision) return;
         applySamples(files);
@@ -1565,6 +1619,58 @@ function mountFolderConcatTool(container) {
   }));
   [input("folderConcatA"), input("folderConcatB")].forEach(field => field.addEventListener("input", clearSamples));
   input("folderConcatOutput").addEventListener("input", invalidate);
+  const overlayChanged = () => {
+    invalidate();
+    input("folderConcatOverlayBody").classList.toggle("hidden", !input("folderConcatOverlayEnabled").checked);
+    input("folderConcatOverlayExisting").classList.toggle("hidden", input("folderConcatOverlaySource").value !== "config");
+    input("folderConcatOverlayLocal").classList.toggle("hidden", input("folderConcatOverlaySource").value !== "local");
+    input("folderConcatOverlayRange").classList.toggle("hidden", input("folderConcatOverlayScope").value !== "custom");
+    input("folderConcatOverlayStatus").textContent = "预检待更新，请预览配对以检查图片与显示时段。";
+  };
+  const loadOverlayConfigs = async () => {
+    const revision = ++overlayConfigRevision;
+    const button = input("folderConcatOverlayRefresh");
+    button.disabled = true;
+    input("folderConcatOverlayConfigStatus").textContent = "正在读取各配置的提示语图片…";
+    try {
+      const result = await api("/tools/folder-concat/overlay-images");
+      if (disposed || revision !== overlayConfigRevision) return;
+      const items = result.items || [];
+      const available = items.filter(item => item.available);
+      const field = input("folderConcatOverlayConfig");
+      const previous = field.value;
+      field.innerHTML = `<option value="">请选择提示语图片</option>${items.map(item => `<option value="${escapeHtml(item.config_id)}" ${item.available ? "" : "disabled"}>${escapeHtml(item.config_name)} · ${escapeHtml(item.available ? item.name : "无可用提示语图片")}</option>`).join("")}`;
+      field.value = available.some(item => item.config_id === previous) ? previous : overlayConfigsLoaded ? "" : available.find(item => item.config_id === state.configId)?.config_id || available[0]?.config_id || "";
+      overlayConfigsLoaded = true;
+      if (input("folderConcatOverlaySource").value === "config") overlayChanged();
+      input("folderConcatOverlayConfigStatus").textContent = available.length ? `可选择 ${available.length} 张配置提示语图片；只读取图片，不修改配置。` : "现有配置暂无可用提示语图片，可切换到“添加图片”。";
+    } catch (error) {
+      if (!disposed && revision === overlayConfigRevision) input("folderConcatOverlayConfigStatus").textContent = `读取失败：${error.message}，可刷新重试或添加图片。`;
+    } finally { if (revision === overlayConfigRevision) button.disabled = false; }
+  };
+  input("folderConcatOverlayEnabled").addEventListener("change", () => {
+    overlayChanged();
+    if (input("folderConcatOverlayEnabled").checked && input("folderConcatOverlaySource").value === "config" && !overlayConfigsLoaded) return loadOverlayConfigs();
+  });
+  input("folderConcatOverlaySource").addEventListener("change", () => {
+    overlayChanged();
+    if (input("folderConcatOverlaySource").value === "config" && !overlayConfigsLoaded) return loadOverlayConfigs();
+  });
+  input("folderConcatOverlayRefresh").addEventListener("click", loadOverlayConfigs);
+  for (const id of ["Config", "Scale", "Scope"]) input(`folderConcatOverlay${id}`).addEventListener("change", overlayChanged);
+  for (const id of ["File", "Opacity", "Start", "End"]) input(`folderConcatOverlay${id}`).addEventListener("input", overlayChanged);
+  input("folderConcatOverlayPick").addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const currentFile = input("folderConcatOverlayFile").value;
+    button.disabled = true;
+    try {
+      const result = await api("/system/image-file-picker", { method: "POST" });
+      if (disposed || result.cancelled || input("folderConcatOverlaySource").value !== "local" || input("folderConcatOverlayFile").value !== currentFile) return;
+      input("folderConcatOverlayFile").value = result.path;
+      overlayChanged();
+    } catch (error) { if (!disposed) toast(error.message, true); }
+    finally { button.disabled = false; }
+  });
   input("folderConcatPreview").addEventListener("click", async event => {
     const payload = values();
     if (!requireFolders(payload)) return;
@@ -1572,22 +1678,31 @@ function mountFolderConcatTool(container) {
     button.disabled = true;
     clearTimeout(sampleTimer);
     sampleRevision += 1;
+    const revision = ++scanRevision;
     try {
-      const revision = ++scanRevision;
-      const files = await api("/tools/folder-concat/preview", { method: "POST", body: JSON.stringify({ ...payload, naming: null }) });
+      const files = await api("/tools/folder-concat/preview", { method: "POST", body: JSON.stringify({ ...payload, naming: null, benefit_overlays: null }) });
       if (disposed || revision !== scanRevision) return;
       applySamples(files);
-      const namedPreview = payload.naming ? await api("/tools/folder-concat/preview", { method: "POST", body: JSON.stringify(payload) }) : files;
+      const namedPreview = payload.naming || payload.benefit_overlays ? await api("/tools/folder-concat/preview", { method: "POST", body: JSON.stringify(payload) }) : files;
       if (disposed || revision !== scanRevision) return;
       preview = namedPreview;
+      const overlay = preview.benefit_overlays;
+      input("folderConcatOverlayStatus").textContent = overlay?.enabled ? `已检查：${overlay.name} · ${overlay.width}×${overlay.height} · ${(overlay.size_bytes / 1024).toFixed(1)} KB · ${overlay.format}` : "请选择图片，预览配对时检查图片与显示时段。";
       const namingResult = container.querySelector("#builderPreviewResult");
       if (namingResult) namingResult.innerHTML = renderFolderConcatNamingPreview(preview);
       resultBox.innerHTML = `<section class="prores-result">
         <strong>可拼接 ${preview.pair_count} 组 · A ${preview.count_a} 条 · B ${preview.count_b} 条</strong>
         ${preview.unpaired_a || preview.unpaired_b ? `<p>A 多出 ${preview.unpaired_a} 条，B 多出 ${preview.unpaired_b} 条；这些视频不会参与本次任务。</p>` : ""}
-        <ul>${preview.pairs.map((pair, index) => `<li><span>${index + 1}. ${escapeHtml(pair.a_name)} → ${escapeHtml(pair.b_name)} → ${escapeHtml(pair.output_name)}</span></li>`).join("")}</ul>
+        <p>${escapeHtml(folderConcatOverlaySummary(overlay))}</p>
+        ${(preview.warnings || []).map(warning => `<p>${escapeHtml(warning)}</p>`).join("")}
+        <ul>${preview.pairs.map((pair, index) => `<li><span>${index + 1}. ${escapeHtml(pair.a_name)} → ${escapeHtml(pair.b_name)} → ${escapeHtml(pair.output_name)}${pair.overlay_range ? ` · 图片 ${pair.overlay_range.start_seconds.toFixed(2)}–${pair.overlay_range.end_seconds.toFixed(2)} 秒` : ""}</span></li>`).join("")}</ul>
       </section>`;
-    } catch (error) { preview = null; toast(error.message, true); }
+    } catch (error) {
+      if (disposed || revision !== scanRevision) return;
+      preview = null; resultBox.replaceChildren();
+      if (payload.benefit_overlays) input("folderConcatOverlayStatus").textContent = `预检失败：${error.message}`;
+      toast(error.message, true);
+    }
     finally { button.disabled = false; }
   });
   input("folderConcatStart").addEventListener("click", async event => {
@@ -1603,7 +1718,7 @@ function mountFolderConcatTool(container) {
     } catch (error) { toast(error.message, true); }
     finally { button.disabled = false; }
   });
-  return () => { disposed = true; scanRevision += 1; sampleRevision += 1; clearTimeout(sampleTimer); };
+  return () => { disposed = true; scanRevision += 1; sampleRevision += 1; overlayConfigRevision += 1; clearTimeout(sampleTimer); };
 }
 
 function mountVideoUpscaleTool(container, executionMode = "local") {
@@ -5229,7 +5344,7 @@ function renderJobDetail(job) {
   $("#jobDetail").innerHTML = `<div class="job-detail-header"><p class="eyebrow">BATCH #${job.short_id}</p><h2>${escapeHtml(job.config_name)}</h2><span class="status ${cls}">${label}</span><p>${escapeHtml(job.output_directory)}</p></div>
     <div class="big-progress"><div><span>总体进度</span><b>${totalProgress.toFixed(1)}%</b></div><div class="bar"><i style="width:${totalProgress}%"></i></div></div>
     <p class="render-eta-detail">${RenderEta.html(job, job.job_type || "render")}</p>
-    ${job.job_type === "folder_concat" ? "" : `<div class="seed-card"><span>随机种子</span><strong>${job.seed}</strong></div>`}
+    ${job.job_type === "folder_concat" ? `<p class="folder-concat-overlay-summary">${escapeHtml(folderConcatOverlaySummary(job.benefit_overlays))}</p>${(job.warnings || []).map(warning => `<p class="cluster-control-hint">${escapeHtml(warning)}</p>`).join("")}` : `<div class="seed-card"><span>随机种子</span><strong>${job.seed}</strong></div>`}
     ${renderFeishuSyncPanel(job)}
     ${job.scheduled_at ? `<p class="cluster-control-hint">预约开始：${escapeHtml(formatDate(job.scheduled_at))}</p>` : ""}
     ${job.job_type === "cluster" ? `<p class="cluster-control-hint">请在工具台的“SmartStitch 集群控制”中取消或删除集群任务。</p>` : !terminalStates.has(job.status) ? `<button id="cancelJobBtn" class="button secondary" style="width:100%">取消剩余任务</button>` : ""}
