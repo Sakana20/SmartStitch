@@ -11,7 +11,7 @@ import threading
 from datetime import date
 from pathlib import Path
 
-from .models import AppConfig, Asset, AutoVideoSplitRequest, MediaProbe
+from .models import AppConfig, Asset, AutoVideoSplitNamingRequest, AutoVideoSplitRequest, MediaProbe
 from .naming import append_duplicate_suffix, derive_plan_naming, render_plan_filename
 from .renderer import RenderError, _probe_rendered_duration, _run_ffmpeg_command
 from .scanner import VIDEO_EXTENSIONS
@@ -122,16 +122,37 @@ def detect_video(request: AutoVideoSplitRequest) -> dict:
 
 
 def split_config(preview: dict, output_root: Path) -> AppConfig:
+    output = {"directory": str(output_root), "naming": preview.get("naming") or {}}
+    probe = preview.get("probe") or {}
+    output.update({field: probe[field] for field in ("width", "height", "fps") if field in probe})
     return AppConfig.model_validate({
         "schema_version": 3, "workflow_type": "generic", "id": "auto-video-split", "name": "自动分割视频",
         "source_root": str(Path(preview["source_file"]).parent), "timeline": ["pool_1"],
         "sources": {"pool_1": {"label": "源视频", "mode": "required", "directory": "."}},
         "benefit_overlays": {"mode": "disabled", "file": ""},
-        "output": {"directory": str(output_root), "width": preview["probe"]["width"],
-                   "height": preview["probe"]["height"], "fps": preview["probe"]["fps"],
-                   "naming": preview.get("naming") or {}},
+        "output": output,
         "batch": {"minimum_free_space_gb": 0.5, "retry_count": 0},
     })
+
+
+def preview_split_naming(request: AutoVideoSplitNamingRequest) -> dict:
+    """Validate one output name from the source name alone, without media I/O."""
+    source = Path(request.source_file).expanduser()
+    if not request.source_file.strip() or source.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise ValueError("请先选择源视频文件名")
+    config = split_config({
+        "source_file": str(source),
+        "naming": request.naming.model_dump(mode="json") if request.naming else None,
+    }, source.parent)
+    asset = Asset(id="split-source", category="pool_1", path=str(source), name=source.name, media_type="video")
+    sequence = config.output.naming.sequence_start if config.output.naming.enabled else request.sequence_start
+    metadata = (derive_plan_naming(config, {"pool_1": asset}, sequence)
+                if config.output.naming.enabled else None)
+    return {
+        "output_name": render_plan_filename(config, metadata) if metadata else f"{sequence:02d}.mp4",
+        "source_name": source.name, "sequence": sequence,
+        "block_values": metadata.block_values if metadata else [],
+    }
 
 
 def name_segments(request: AutoVideoSplitRequest, detection: dict) -> dict:

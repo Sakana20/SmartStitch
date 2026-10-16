@@ -1436,12 +1436,31 @@ function mountAutoVideoSplitTool(container) {
       if (!disposed && current === revision) { resultBox.textContent = `检测失败：${error.message}`; toast(error.message, true); }
     } finally { if (!disposed) button.disabled = false; }
   };
+  const validateNaming = async event => {
+    const payload = values();
+    if (!payload.source_file) { toast("请先选择源视频", true); return; }
+    const button = event.currentTarget;
+    const root = input("autoSplitNamingEditor");
+    const result = root.querySelector("#builderPreviewResult");
+    const current = revision;
+    button.disabled = true;
+    result.textContent = "正在验证文件名…";
+    try {
+      const data = await api("/tools/auto-video-split/naming-preview", { method: "POST", body: JSON.stringify({
+        source_file: payload.source_file, sequence_start: payload.sequence_start, naming: payload.naming,
+      }) });
+      if (disposed || current !== revision || root.querySelector("#builderPreviewResult") !== result) return;
+      result.innerHTML = `<strong>${escapeHtml(data.output_name)}</strong><small>块取值：${escapeHtml(data.block_values.map(block => block.value).join(" | "))}</small><small>源文件名：${escapeHtml(data.source_name)}</small>`;
+    } catch (error) {
+      if (!disposed && current === revision && root.querySelector("#builderPreviewResult") === result) result.textContent = `无法生成：${error.message}`;
+    } finally { button.disabled = false; }
+  };
   const renderNaming = () => {
     const root = input("autoSplitNamingEditor");
     root.innerHTML = naming.enabled ? renderBuilderEditor(namingContext.configDraft, namingContext) : "";
     input("autoSplitSequenceField").classList.toggle("hidden", naming.enabled);
     if (naming.enabled) bindBuilderControls({ context: namingContext, root,
-      rerender: renderNaming, onChange: invalidate, preview: detect });
+      rerender: renderNaming, onChange: invalidate, preview: validateNaming });
   };
   const sourceChanged = () => {
     invalidate();

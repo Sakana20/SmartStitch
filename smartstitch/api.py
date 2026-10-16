@@ -43,6 +43,7 @@ from .feishu import (
 )
 from .folder_concat import inspect_folders, list_config_overlay_images
 from .jobs import JobManager, TERMINAL_STATES
+from .auto_video_split import preview_split_naming
 from .library import (
     MAX_VISUAL_BORDER_BYTES,
     LibraryConflictError,
@@ -72,6 +73,7 @@ from .models import (
     FeishuSettingsUpdateRequest,
     FolderConcatRequest,
     AutoVideoSplitRequest,
+    AutoVideoSplitNamingRequest,
     GlobalVisualEffectLibraryCreateRequest,
     GlobalVisualEffectLibraryUpdateRequest,
     GlobalVisualBorderUpdateRequest,
@@ -1751,6 +1753,13 @@ def create_app(
         try:
             return job_manager.create_batch_dedup(request)
         except (ConfigError, FileNotFoundError, PlanError, ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/v1/tools/auto-video-split/naming-preview")
+    def preview_auto_video_split_naming(request: AutoVideoSplitNamingRequest) -> dict[str, object]:
+        try:
+            return preview_split_naming(request)
+        except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.post("/api/v1/tools/auto-video-split/preview")

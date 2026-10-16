@@ -203,6 +203,39 @@ def test_api_preview_submit_and_validation(tmp_path, monkeypatch):
         assert client.post("/api/v1/tools/auto-video-split/preview", json={**payload, **invalid}).status_code == 422
 
 
+def test_naming_validation_does_not_probe_or_detect_video(tmp_path, monkeypatch):
+    (tmp_path / "config").mkdir()
+    app = create_app(tmp_path)
+    client = authenticated_client(app)
+    def forbidden(*args, **kwargs):
+        pytest.fail("文件名验证不应调用媒体探测或黑屏检测")
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr("smartstitch.jobs.detect_video", forbidden)
+    monkeypatch.setattr("smartstitch.auto_video_split.detect_video", forbidden)
+    monkeypatch.setattr(app.state.job_manager, "preview_auto_video_split", forbidden)
+    # No video file is needed: only its name is used by this endpoint.
+    source = tmp_path / "商品|!|混剪.mp4"
+    assert not source.exists()
+    payload = {"source_file": str(source), "naming": naming().model_dump(mode="json")}
+    response = client.post("/api/v1/tools/auto-video-split/naming-preview", json=payload)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["output_name"] == "商品-21.mp4"
+    assert data["source_name"] == source.name
+    assert [block["value"] for block in data["block_values"]] == ["商品", "-", "21"]
+    assert "segments" not in data and "black_ranges" not in data
+    actual = name_segments(AutoVideoSplitRequest.model_validate(payload), {
+        "source_file": str(source), "source_name": source.name,
+        "probe": {"width": 96, "height": 128, "fps": 30, "duration": 1},
+        "segments": [{"start_seconds": 0, "end_seconds": 1, "duration_seconds": 1}],
+    })
+    assert data["output_name"] == actual["segments"][0]["output_name"]
+    payload["naming"]["builder"]["blocks"][0]["category"] = "pool_2"
+    assert client.post("/api/v1/tools/auto-video-split/naming-preview", json=payload).status_code == 422
+    assert client.post("/api/v1/tools/auto-video-split/naming-preview", json={"source_file": str(source), "sequence_start": 21}).json()["output_name"] == "21.mp4"
+    assert client.post("/api/v1/tools/auto-video-split/naming-preview", json={"source_file": ""}).status_code == 422
+
+
 def test_no_separator_and_all_black_video(tmp_path):
     for color in ["red", "black"]:
         source = tmp_path / f"{color}.mp4"
@@ -251,3 +284,33 @@ def test_manual_duration_api_remains_available(tmp_path):
     assert len(detected["black_ranges"]) == 1
     assert detected["black_ranges"][0]["duration_seconds"] == pytest.approx(3)
     assert detected["black_detection"]["mode"] == "manual"
+
+
+def test_black_separators_with_logo_and_vertical_compliance_text(tmp_path):
+    clean = tmp_path / "clean.mp4"
+    source = tmp_path / "logo-and-compliance.mp4"
+    make_source(clean, black_lengths=(1, 3))
+    # Roughly 3% of the frame remains orange/white throughout the separator.
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-y", "-i", str(clean), "-vf",
+        "drawbox=x=2:y=3:w=24:h=5:color=orange:t=fill,drawbox=x=2:y=30:w=4:h=70:color=white:t=fill",
+        "-c:v", "libx264", "-threads", "1", "-c:a", "copy", str(source),
+    ], check=True)
+    strict = detect_video(AutoVideoSplitRequest(source_file=str(source), picture_threshold=.98))
+    assert not strict["black_ranges"]
+    assert len(strict["segments"]) == 1
+    detected = detect_video(AutoVideoSplitRequest(source_file=str(source)))
+    assert [gap["duration_seconds"] for gap in detected["black_ranges"]] == pytest.approx([1, 3], abs=1e-5)
+    assert len(detected["segments"]) == 3
+    assert detected["black_detection"]["ignored_short_count"] == 1
+
+
+def test_dark_scene_with_visible_subject_is_not_a_separator(tmp_path):
+    source = tmp_path / "dark-scene.mp4"
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=black:s=96x128:r=30:d=1",
+        "-vf", "drawbox=x=30:y=20:w=36:h=88:color=gray:t=fill", "-c:v", "libx264", "-threads", "1", str(source),
+    ], check=True)
+    detected = detect_video(AutoVideoSplitRequest(source_file=str(source)))
+    assert not detected["black_ranges"]
+    assert len(detected["segments"]) == 1
